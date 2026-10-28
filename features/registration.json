@@ -1,0 +1,55 @@
+{
+  "argv": [
+    "C:\\Users\\24605\\.codex\\worktrees\\f02-simulation-features\\课题\\first_round\\scripts\\cache_video_features.py",
+    "encode",
+    "--output",
+    "C:\\Users\\24605\\.codex\\worktrees\\f02-simulation-features\\课题\\first_round\\outputs\\f02\\runtime-2026-10-18\\jobs\\encode",
+    "--upstream-root",
+    "C:\\Users\\24605\\Documents\\ChatGPT\\课题\\third_party\\vjepa2",
+    "--checkpoint",
+    "C:\\Users\\24605\\Documents\\ChatGPT\\课题\\first_round\\outputs\\checkpoints\\vjepa2-vitg-fpc64-256-875c192-model.pth",
+    "--device",
+    "cuda:0"
+  ],
+  "config_sha256": "afef31e904f74f68f027ce79bb3a617ee917ab7e81336282bf7c6765dd983ba4",
+  "cwd": "C:\\Users\\24605\\.codex\\worktrees\\f02-simulation-features\\课题\\first_round",
+  "diagnostic_protocol": {
+    "control_vectors": [
+      [
+        -0.5,
+        0.0
+      ],
+      [
+        0.5,
+        0.0
+      ]
+    ],
+    "horizon_cycles": 8.0,
+    "identity_to_position_floor": 0.01,
+    "jepa_floor": 1e-05,
+    "noise_margin": 10.0,
+    "policy": "review_required_if_ambiguous_no_posthoc_threshold",
+    "raw_atol": 1e-05,
+    "raw_rtol": 0.0001,
+    "repeat_encodings": 3,
+    "trajectory_ids": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "version": "f02_signal_probe_v1"
+  },
+  "mode": "encode",
+  "protocol_sha256": "09a45ff10b5d256e8dbed279f8f5e269055877b7623195e52d889fef5da853fd",
+  "python": "C:\\Users\\24605\\Documents\\ChatGPT\\课题\\.venv\\Scripts\\python.exe",
+  "source_files_sha256": {
+    "first_round/src/po_jepa/actions.py": "7695f7f87ab391b1a04da40b806bbb88d1306fde954fc0cc67ac62e88761a806",
+    "first_round/src/po_jepa/geometry.py": "78caed6bd4436eba963c9b51f3d4a930258ff3a8bc973d56257e70c7e3cdc9ff",
+    "first_round/src/po_jepa/simulation.py": "510b75e6d2e9ced4c910ff29b9d8ca36b158df479e59e4ff12d770f5c59ade93",
+    "first_round/src/po_jepa/vjepa.py": "52206cdc9f1963349811a3ccc31ed1ac928afbd4bbf51aacac0e2921149a547a"
+  },
+  "source_sha256": "69ef3d6a3740d220a12d7491fddf43cce4a987174159cb847a1be44473102042",
+  "utf8_mode": 1,
+  "warnoptions": []
+}

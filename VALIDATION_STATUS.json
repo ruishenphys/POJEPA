@@ -1,0 +1,18 @@
+{
+  "delivery_version": "0.4.0",
+  "delivery_kind": "source_code_for_external_GPU_validation",
+  "mathematical_core_changed": true,
+  "resource_gate_implemented": true,
+  "explicit_resume_implemented": true,
+  "dependency_version_gate_implemented": true,
+  "real_GPU_validation_completed": false,
+  "formal_training_run_by_packager": false,
+  "scientific_reproduction_completed": false,
+  "validation_note": "CPU and independent review evidence retained in development repository; target GPU memory/time and real training/evaluation remain unverified. Source/archive identity must match the final handoff receipt.",
+  "shared_evidence_ledger_gate_implemented": true,
+  "comments_and_docstrings_cleaned": true,
+  "executable_AST_matches_v3_baseline": false,
+  "v4_changes": "建图用 detached encoder 特征(σ_z 待真实特征标定)、一致性在 LN 空间按元素平均、残差读出 Φ0=Id、K 跨网格固定、一致性权重标定+warmup；默认 configs/train/default.yaml 不变，v4 设置在 configs/train/v4.yaml 覆盖层",
+  "v4_cpu_validation": "tests 全部通过（py3.12/torch2.11 CPU）；tools/v4_validation 下 gradcheck、初始化检查、短训练结果；未在 GPU 上运行",
+  "v4_overlay_excluded_from_manifest": "configs/train/v4.yaml 需填入标定值，故不进 MANIFEST；其 sha256 写入 preflight 报告 v4_overlay_sha256"
+}

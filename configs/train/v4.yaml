@@ -1,0 +1,29 @@
+# v4 整改覆盖层（导师 2026-10-27 确认的 P1–P7）。只覆盖模型与损失；数据/编码/划分协议沿用 default.yaml，
+# 因此一轮冻结特征缓存（按 default.yaml 的 SHA 登记）仍可直接使用。checks.load_protocol() 会把本文件深度合并到 default.yaml 上。
+schema_version: 1
+protocol_id: overdamped_double_well_v4_overlay
+model:
+  projection:
+    encoder_dim: 1408
+    dynamic_dim: 64
+    readout: residual            # P6：Z_hat = Z + P_out(Psi C_tau) - P_out(Psi C_0)，Phi_0 = Id
+  graph:
+    q_dim: 16
+    q_seed: 1703
+    affinity_source: encoder     # P1：用 stop-gradient 编码器输出 Z 建图，不经过可训练 P_in
+    feature_dim: 1408            # Q ∈ R^{16×1408}，固定随机正交
+    sigma_x: 0.125               # 16×16 上约 2 格，8×8 上约 1 格
+    sigma_z: 12.4616             # v4 第一次 GPU 运行时 real_feature_probe.py 在真实特征上的标定值（K=16）
+    max_modes: 16                # P2：K 固定且跨网格相同（16 或 32，以 real_feature_probe.py 的建议为准）
+    fixed_modes: true
+    diagnostic_atol: 0.0000000001
+    diagnostic_rtol: 0.00000001
+loss:
+  consistency_metric: input_scale  # v5：撤回 P3 的逐路径 LN；两路径之差的平方按 N*E 取均值后除以输入 Z_t 的方差
+  time_weight: 0.0175            # P7：【待标定】python run.py calibrate 输出的 lambda_t
+  space_weight: 0.075            # P7：【待标定】python run.py calibrate 输出的 lambda_s
+  consistency_warmup_updates: 200   # P7：前 10% 更新线性预热
+  grad_clip_norm: 1.0            # 全局梯度范数裁剪（optimizer.step 前）；0 表示不裁剪。v4 第一次运行第 1009 步的梯度尖峰触发了塌缩
+calibration:
+  rho: 0.05                      # lambda_c = rho * E|grad L_JEPA| / E|grad L_c|；CPU 短训练中 0.2 拖慢 JEPA、0.05 不拖，先用 0.05
+  batches: 32                    # 初始化状态下前 32 个训练 batch，取逐 batch 梯度范数的中位数（单个离群 batch 曾把均值拉偏约 7 倍）
