@@ -239,7 +239,7 @@ def condition_step(condition, model, optimizer, batch, loss_config, completed_st
         raise ValueError("required Transformer gradient missing or nonfinite")
     maximum = max(p.grad.detach().abs().max().item() for _, p in parameters)
     grad_norm = training.clip_gradients([p for _, p in parameters], loss_config.grad_clip_norm)
-    optimizer.step()
+    training.scheduled_step(optimizer, loss_config, completed_steps)
     if any(not torch.isfinite(p).all() for _, p in parameters):
         raise ValueError("updated Transformer parameter nonfinite")
     training._optimizer_finite(optimizer)
@@ -474,7 +474,8 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
             data.cache._write_json(output/"updates"/f"{completed:04d}.json",dict(condition=condition,
                 completed_updates=completed,next_batch_index=completed,queries=[asdict(q) for q in rows],
                 losses=result.loss_values,grad_max_abs=result.grad_max_abs,grad_norm_before_clip=result.grad_norm,
-                grad_clip_norm=loss_config.grad_clip_norm,raw_predictions=scales,
+                grad_clip_norm=loss_config.grad_clip_norm,learning_rate=training.scheduled_lr(loss_config,completed-1),
+                raw_predictions=scales,
                 raw_target=check.tensor_stats(batch.raw_target),phi_calls=len(scales)//(1 if condition == "matched_transformer" else check.readouts_per_phi(model)),provenance=provenance,
                 update_and_observer_seconds=time.perf_counter()-started,
                 gpu_memory=check._memory(device) if device.type == "cuda" else None))

@@ -56,11 +56,11 @@
       "target": "src/po_jepa/losses.py",
       "sha256": "8b6b33763d6679b4b8407f1a5b088252e9e0f23b7b2d251235fc9105fcb95a43",
       "operation": "v4_modified",
-      "candidate_sha256": "8b04466f6c8b5a260f77d3ddae17fb4abcb71eb5c06fe116bd0e5935ad9433ab",
+      "candidate_sha256": "59410a9d7e30f21085dd19fcde72659930c1df26930db4b3142a97e7077fc197",
       "comment_cleanup_baseline_sha256": "8b6b33763d6679b4b8407f1a5b088252e9e0f23b7b2d251235fc9105fcb95a43",
-      "executable_ast_sha256": "b168f76e510bfa5d19d37558b6c8a854c66226be444fffcbf11c522b8390328b",
+      "executable_ast_sha256": "5f96e07e2ab2e15c42a54bedb9c9bf518197c1c3cc8061f98d214340bc3d9670",
       "prior_operation": "identical_bytes",
-      "v4_previous_candidate_sha256": "faf219f6bd51a8ccd5cbb2ac338cb74f46776f6a1c3581353e4ce1eae473e47a"
+      "v4_previous_candidate_sha256": "8b04466f6c8b5a260f77d3ddae17fb4abcb71eb5c06fe116bd0e5935ad9433ab"
     },
     {
       "source": "first_round/src/po_jepa/metrics.py",
@@ -211,12 +211,12 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "c1efa6d05c8ac465ae88470a86a4f3d0a6a3051287a0d95d4f0d33698be1e7c0",
+      "candidate_sha256": "e55c128fa5dfc0e05ab312d2b7e9a89c4a3249992660c0eff0b1774f89348133",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "99a5027b0c6239e0955e7ad29ce55029dde5623813f4345ea8f60b3eb9c8917b",
+      "executable_ast_sha256": "ebd2d8fd7cf1fef365e6ff1482f361701f6f6a865165de125bf1de0ff229d0b2",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
-      "v4_previous_candidate_sha256": "c6e45623d0bd8b50f063a542ed55e19f4f94d0d603139f04a56cab17fa7eda1f"
+      "v4_previous_candidate_sha256": "c1efa6d05c8ac465ae88470a86a4f3d0a6a3051287a0d95d4f0d33698be1e7c0"
     },
     {
       "source": "first_round/scripts/real_training_batch.py",
@@ -287,7 +287,7 @@
       "comment_cleanup_baseline_sha256": "d3d39eb924d97ab9f3be719d0d24f74235296bcb704d0428c42da552d1e4bdae",
       "executable_ast_sha256": "3ab306465d08a12cb54cc9b81c49327bdb35ad3f238adbbaf355d184be4bf47b",
       "prior_operation": "dependency_closure_and_resource_relocation",
-      "v4_previous_candidate_sha256": "209939d050cb389a0177ff149f372157d80d4cd36cdaf51e8fff682d0028b02b"
+      "v4_previous_candidate_sha256": "4e7635de3b29c2ac85381af86afde6b7db3f987f8bc37d2cc280af04cab8833c"
     },
     {
       "source": "first_round/scripts/learn_simulation.py",
@@ -359,9 +359,9 @@
         "train_step"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "e9e020cbcb8e0862662249e7e9e7ba47b6f3ac904269cf195872b5d82833a888",
+      "candidate_sha256": "23f498997b9f83bb487b0b54f3845fc6db257533b18f9d0f0c1fd12f7dd1094e",
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
-      "executable_ast_sha256": "ca9efd8367b4a0c75d3adc336ff296f904bd1e15be85045abac9c0c50467eaf8",
+      "executable_ast_sha256": "71e69a57c5a4597ae3db32389e23fe48534930e344a778bc6f8eff34e2643bc9",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "e9e020cbcb8e0862662249e7e9e7ba47b6f3ac904269cf195872b5d82833a888"
     },

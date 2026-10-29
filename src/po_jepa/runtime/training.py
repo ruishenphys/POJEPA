@@ -301,11 +301,35 @@ def train_step(model: POJEPA, optimizer: torch.optim.AdamW, batch: TrainingBatch
             raise ValueError(f"required predictor gradient missing or nonfinite: {name}")
         grad_max_abs = max(grad_max_abs, parameter.grad.detach().abs().max().item())
     grad_norm = clip_gradients([p for _, p in parameters], loss_config.grad_clip_norm)
-    optimizer.step()
+    scheduled_step(optimizer, loss_config, completed_steps)
     if any(not torch.isfinite(p).all() for _, p in parameters):
         raise ValueError("updated parameter is nonfinite; stop without rollback")
     _optimizer_finite(optimizer)
     return TrainingStepResult(completed_steps+1, {k: value.detach().item() for k, value in losses.items()}, grad_max_abs, grad_norm)
+
+BASE_LR = 1e-3
+
+def scheduled_lr(config: LossConfig, completed_steps: int) -> float:
+    """v5：第 completed_steps 次更新（从 0 计）使用的学习率；lr_decay_updates=0 时恒为 1e-3。"""
+    total = config.lr_decay_updates
+    if total == 0:
+        return BASE_LR
+    progress = min(completed_steps, total)/total
+    return config.lr_min+(BASE_LR-config.lr_min)*.5*(1+math.cos(math.pi*progress))
+
+def scheduled_step(optimizer: torch.optim.AdamW, config: LossConfig, completed_steps: int) -> None:
+    """v5：只在这一次 step 内把 lr 设为调度值，之后恢复登记的 1e-3。
+
+    AdamW 的 lr 不进入动量状态，所以调度是"步数的函数"、无额外状态：checkpoint、续训和
+    固定超参核验都不受影响，续训从 completed_steps 自动接上同一条曲线。
+    """
+    group = optimizer.param_groups[0]
+    registered = group["lr"]
+    group["lr"] = scheduled_lr(config, completed_steps)
+    try:
+        optimizer.step()
+    finally:
+        group["lr"] = registered
 
 def clip_gradients(parameters: list, max_norm: float) -> float:
     """v4：返回裁剪前的全局梯度 L2 范数；max_norm>0 时按该阈值整体缩放梯度，0 时只计算不裁剪。"""

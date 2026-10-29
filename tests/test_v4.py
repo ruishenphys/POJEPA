@@ -373,3 +373,36 @@ def test_spatial_input_scale_uses_fine_grid_input():
     assert torch.allclose(s.input_scale, var)
     expected = (s.difference.double().square().mean((1, 2))/var)/(duration**2+1e-8)
     assert torch.allclose(spatial_consistency_loss(s, config=inp).per_sample, expected, rtol=1e-10)
+
+
+# ---- v5：学习率 1e-3 → 1e-4 余弦衰减（导师 2026-10-29） ----
+
+def test_learning_rate_schedule_values_and_overlay():
+    """覆盖层默认在 2000 次更新内从 1e-3 余弦降到 1e-4；之后保持 1e-4；关闭时恒为 1e-3。"""
+    loss = checks.load_protocol()["loss"]
+    assert loss["lr_min"] == 1e-4 and loss["lr_decay_updates"] == 2000
+    cfg = LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=1e-4, lr_decay_updates=2000)
+    assert training.scheduled_lr(cfg, 0) == pytest.approx(1e-3)
+    assert training.scheduled_lr(cfg, 1000) == pytest.approx(5.5e-4)
+    assert training.scheduled_lr(cfg, 2000) == pytest.approx(1e-4) == training.scheduled_lr(cfg, 5000)
+    lrs = [training.scheduled_lr(cfg, s) for s in range(0, 2001, 50)]
+    assert all(a >= b for a, b in zip(lrs, lrs[1:]))
+    assert training.scheduled_lr(LossConfig(1., 1e-5, 1., 1., 0., 0.), 1500) == 1e-3
+    with pytest.raises(ValueError):
+        LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=2e-3)
+
+
+def test_scheduled_step_uses_scheduled_lr_and_restores_registered_lr():
+    """step 时的有效步长等于调度值（AdamW 首步 |Δθ|≈lr），之后 param_group 恢复 1e-3，优化器固定超参核验仍通过。"""
+    from po_jepa.runtime import comparison
+    model, loss = comparison.build_condition("po_jepa_no_consistency", torch.device("cpu"))
+    model.train()
+    loss = replace(loss, grad_clip_norm=0.)
+    optimizer = comparison.make_optimizer(model)
+    before = [p.detach().clone() for p in model.parameters()]
+    training.train_step(model, optimizer, _production_batch(), loss_config=loss, completed_steps=1000,
+                        condition="no_consistency")
+    step = max(float((p.detach()-b).abs().max()) for p, b in zip(model.parameters(), before))
+    assert step == pytest.approx(training.scheduled_lr(loss, 1000), rel=1e-2)
+    assert optimizer.param_groups[0]["lr"] == 1e-3
+    training._optimizer(model, optimizer)

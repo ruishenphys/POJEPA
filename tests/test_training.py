@@ -34,7 +34,7 @@ def v4_loss_fields():
     from po_jepa.runtime import checks
     loss = checks.load_protocol()["loss"]
     return dict(consistency_metric=loss["consistency_metric"], consistency_warmup_updates=loss["consistency_warmup_updates"],
-                grad_clip_norm=loss["grad_clip_norm"])
+                grad_clip_norm=loss["grad_clip_norm"], lr_min=loss["lr_min"], lr_decay_updates=loss["lr_decay_updates"])
 
 def e06_reduced(*, mean=2., dtype=torch.float64, count=2, device="cpu"):
     """独立归约夹具故意让mean不同于per_sample.mean，包装器必须保留调用者值。"""

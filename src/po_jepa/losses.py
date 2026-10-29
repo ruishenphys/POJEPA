@@ -39,6 +39,10 @@ class LossConfig:
     consistency_warmup_updates: int = 0
     # v4：全局梯度范数裁剪阈值（在 optimizer.step 前对全部预测参数做 clip_grad_norm_）；0 表示不裁剪。
     grad_clip_norm: float = 0.0
+    # v5：学习率余弦衰减，第 s 次更新用 lr_min+(1e-3-lr_min)(1+cos(pi*min(s,S)/S))/2，S=lr_decay_updates；
+    # S=0 表示恒定 1e-3（一轮/v4 行为）。只在 step 时临时设置，optimizer 的登记 lr 与状态不变，续训无需保存调度器。
+    lr_min: float = 1e-3
+    lr_decay_updates: int = 0
 
     def __post_init__(self) -> None:
         """拒绝非有限值、伪标量及偏离固定 p/LN 选择的配置。"""
@@ -46,6 +50,10 @@ class LossConfig:
             raise ValueError("consistency_metric must be 'raw_sum', 'ln_mean' or 'input_scale'")
         if type(self.consistency_warmup_updates) is not int or self.consistency_warmup_updates < 0:
             raise ValueError("consistency_warmup_updates must be a nonnegative integer")
+        if type(self.lr_decay_updates) is not int or self.lr_decay_updates < 0:
+            raise ValueError("lr_decay_updates must be a nonnegative integer")
+        if isinstance(self.lr_min, bool) or not isinstance(self.lr_min, Real) or not 0 < self.lr_min <= 1e-3:
+            raise ValueError("lr_min must be a real number in (0, 1e-3]")
         for name in ("jepa_exponent", "layer_norm_epsilon", "time_epsilon",
                      "space_epsilon", "time_weight", "space_weight", "grad_clip_norm"):
             value = getattr(self, name)
