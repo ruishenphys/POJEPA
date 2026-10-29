@@ -1,0 +1,2 @@
+# 关闭换行符转换：代码完整性校验按字节比对 SHA256，Windows 上 autocrlf 会改动文件导致 "delivery source changed"
+* -text
