@@ -17,8 +17,8 @@
   - 尺度等变性；
   - 空间项使用细网格尺度；
   - 覆盖层默认值。
-- **学习率衰减（导师 2026-10-29）：** 学习率在 2000 次更新内从 1e-3 余弦衰减到 1e-4，之后保持 1e-4。
-  - 配置：`loss.lr_min: 0.0001`、`loss.lr_decay_updates: 2000`；lr_decay_updates 设为 0 就恢复恒定 1e-3。
+- **学习率预热 + 余弦衰减（导师 2026-10-29）：** 前 100 次更新（5%）学习率从 1e-5 线性升到 1e-3，然后在剩下的 1900 次内从 1e-3 余弦衰减到 1e-4。配置项 `loss.lr_warmup_updates: 100`。
+  - 配置：`loss.lr_min: 0.0001`、`loss.lr_decay_updates: 2000`（预热加衰减的总长度）。lr_decay_updates 和 lr_warmup_updates 都设为 0，就恢复恒定 1e-3。
   - 实现：`training.scheduled_lr` / `scheduled_step`，只在每次 step 时临时设置 lr，然后恢复登记值。调度只取决于已完成的步数，没有额外状态，续训会自动接上同一条曲线。
   - 日志：每步的 `learning_rate` 写进 updates/*.json。
   - PO-JEPA 和 Transformer 用同一条曲线。

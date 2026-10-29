@@ -310,11 +310,17 @@ def train_step(model: POJEPA, optimizer: torch.optim.AdamW, batch: TrainingBatch
 BASE_LR = 1e-3
 
 def scheduled_lr(config: LossConfig, completed_steps: int) -> float:
-    """v5：第 completed_steps 次更新（从 0 计）使用的学习率；lr_decay_updates=0 时恒为 1e-3。"""
-    total = config.lr_decay_updates
+    """v5：第 completed_steps 次更新（从 0 计）使用的学习率。
+
+    前 W=lr_warmup_updates 次线性预热到 1e-3，然后在剩下的 S-W 次内余弦衰减到 lr_min（S=lr_decay_updates），
+    之后保持 lr_min；S=0 时（预热后）恒为 1e-3。
+    """
+    warmup, total = config.lr_warmup_updates, config.lr_decay_updates
+    if completed_steps < warmup:
+        return BASE_LR*(completed_steps+1)/warmup
     if total == 0:
         return BASE_LR
-    progress = min(completed_steps, total)/total
+    progress = min(completed_steps-warmup, total-warmup)/(total-warmup)
     return config.lr_min+(BASE_LR-config.lr_min)*.5*(1+math.cos(math.pi*progress))
 
 def scheduled_step(optimizer: torch.optim.AdamW, config: LossConfig, completed_steps: int) -> None:

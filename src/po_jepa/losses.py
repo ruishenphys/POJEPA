@@ -43,6 +43,8 @@ class LossConfig:
     # S=0 表示恒定 1e-3（一轮/v4 行为）。只在 step 时临时设置，optimizer 的登记 lr 与状态不变，续训无需保存调度器。
     lr_min: float = 1e-3
     lr_decay_updates: int = 0
+    # v5：前 W 次更新学习率从 1e-3/W 线性升到 1e-3（第 s 次用 1e-3*(s+1)/W），之后再做余弦衰减；0 表示不预热。
+    lr_warmup_updates: int = 0
 
     def __post_init__(self) -> None:
         """拒绝非有限值、伪标量及偏离固定 p/LN 选择的配置。"""
@@ -52,6 +54,9 @@ class LossConfig:
             raise ValueError("consistency_warmup_updates must be a nonnegative integer")
         if type(self.lr_decay_updates) is not int or self.lr_decay_updates < 0:
             raise ValueError("lr_decay_updates must be a nonnegative integer")
+        if (type(self.lr_warmup_updates) is not int or self.lr_warmup_updates < 0
+                or (self.lr_decay_updates and self.lr_warmup_updates >= self.lr_decay_updates)):
+            raise ValueError("lr_warmup_updates must be a nonnegative integer smaller than lr_decay_updates")
         if isinstance(self.lr_min, bool) or not isinstance(self.lr_min, Real) or not 0 < self.lr_min <= 1e-3:
             raise ValueError("lr_min must be a real number in (0, 1e-3]")
         for name in ("jepa_exponent", "layer_norm_epsilon", "time_epsilon",

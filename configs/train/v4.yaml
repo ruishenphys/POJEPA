@@ -24,7 +24,8 @@ loss:
   space_weight: 0.075            # P7：【待标定】python run.py calibrate 输出的 lambda_s
   consistency_warmup_updates: 200   # P7：前 10% 更新线性预热
   lr_min: 0.0001                 # v5（导师 2026-10-29）：学习率从 1e-3 余弦衰减到 1e-4
-  lr_decay_updates: 2000         # 衰减长度 = training.updates_per_condition；0 表示恒定 1e-3
+  lr_decay_updates: 2000         # 预热+衰减的总长度 = training.updates_per_condition；0 表示恒定 1e-3
+  lr_warmup_updates: 100         # 前 100 次（5%）学习率从 1e-5 线性升到 1e-3，之后余弦衰减
   grad_clip_norm: 1.0            # 全局梯度范数裁剪（optimizer.step 前）；0 表示不裁剪。v4 第一次运行第 1009 步的梯度尖峰触发了塌缩
 calibration:
   rho: 0.05                      # lambda_c = rho * E|grad L_JEPA| / E|grad L_c|；CPU 短训练中 0.2 拖慢 JEPA、0.05 不拖，先用 0.05

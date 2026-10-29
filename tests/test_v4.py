@@ -380,7 +380,7 @@ def test_spatial_input_scale_uses_fine_grid_input():
 def test_learning_rate_schedule_values_and_overlay():
     """覆盖层默认在 2000 次更新内从 1e-3 余弦降到 1e-4；之后保持 1e-4；关闭时恒为 1e-3。"""
     loss = checks.load_protocol()["loss"]
-    assert loss["lr_min"] == 1e-4 and loss["lr_decay_updates"] == 2000
+    assert loss["lr_min"] == 1e-4 and loss["lr_decay_updates"] == 2000 and loss["lr_warmup_updates"] == 100
     cfg = LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=1e-4, lr_decay_updates=2000)
     assert training.scheduled_lr(cfg, 0) == pytest.approx(1e-3)
     assert training.scheduled_lr(cfg, 1000) == pytest.approx(5.5e-4)
@@ -406,3 +406,17 @@ def test_scheduled_step_uses_scheduled_lr_and_restores_registered_lr():
     assert step == pytest.approx(training.scheduled_lr(loss, 1000), rel=1e-2)
     assert optimizer.param_groups[0]["lr"] == 1e-3
     training._optimizer(model, optimizer)
+
+
+def test_learning_rate_warmup_then_cosine():
+    """v5：前 100 次线性升到 1e-3，第 100 次起从 1e-3 余弦降到 1e-4，曲线连续。"""
+    cfg = LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=1e-4, lr_decay_updates=2000, lr_warmup_updates=100)
+    assert training.scheduled_lr(cfg, 0) == pytest.approx(1e-5)
+    assert training.scheduled_lr(cfg, 49) == pytest.approx(5e-4)
+    assert training.scheduled_lr(cfg, 99) == pytest.approx(1e-3) == training.scheduled_lr(cfg, 100)
+    assert training.scheduled_lr(cfg, 1050) == pytest.approx(5.5e-4)
+    assert training.scheduled_lr(cfg, 1999) == pytest.approx(1e-4, rel=1e-3)
+    warm = [training.scheduled_lr(cfg, s) for s in range(100)]
+    assert all(a < b for a, b in zip(warm, warm[1:]))
+    with pytest.raises(ValueError):
+        LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=1e-4, lr_decay_updates=100, lr_warmup_updates=100)
