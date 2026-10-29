@@ -10,7 +10,11 @@
 - **配置：** `configs/train/v4.yaml` 中 `loss.consistency_metric: input_scale`。`ln_mean`、`raw_sum` 仍然可选，用于对照。
 - **代码：** `losses.py`（`input_scale`、`_consistency_difference`，TemporalPredictions / SpatialPredictions 新增 `input_scale` 字段）。
 - **评价：** evaluation 新增 `tcd_normalized` = tcd_rms / s 和 `scd_normalized` = scd_rms / s，与训练用的是同一个度量。"一致性与精度的取舍"标签改为按归一化指标判断；原始范数的 `tcd_frobenius` 等列保留，作为补充。
-- **λ 必须重新标定。** 度量变了，v4 标定的 λ 不能沿用，`v4.yaml` 里的 time_weight / space_weight 仍是占位值。
+- **λ 必须重新标定。** 度量变了，v4 标定的 λ 不能沿用。
+  - `python run.py calibrate` 会把结果自动写进 `v4.yaml`，不用手动改。
+  - 权重还是占位值时，check/train/run 会在用 GPU 之前直接报错并提示先标定。
+- **运行入口：** `run.py` 把本目录的 `src` 放在子进程 PYTHONPATH 的最前面，所以不需要 `pip install -e`，也不会误用以前装过的旧版本。
+- **GPU 运行步骤：** 只看 `运行清单_给算力方.md`。下文 v4 的"在 GPU 机器上怎么跑"已经过时。
 - **测试：** `tests/test_v4.py` 新增 4 项，CPU 全量 1746 项通过。新增测试覆盖：
   - 放大捷径在 ln_mean 下使缺陷趋于 0，在 input_scale 下缺陷不变；
   - 显式公式；

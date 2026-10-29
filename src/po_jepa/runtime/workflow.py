@@ -204,6 +204,31 @@ def evaluate_conditions(features,training_root,output,device):
     cache._write_json(output/'COMPLETE.json',dict(report_sha256=cache.file_sha(output/'report.json')))
 
 
+PLACEHOLDER='【待标定】'
+OVERLAY=ROOT/'configs/train/v4.yaml'
+
+
+def require_calibrated_weights():
+    """v5：v4.yaml 的 time_weight/space_weight 仍是占位值时拒绝 check/train/run，提示先运行 calibrate。"""
+    lines=[l for l in OVERLAY.read_text(encoding='utf-8').splitlines() if l.strip().startswith(('time_weight:','space_weight:'))]
+    if len(lines)!=2 or any(PLACEHOLDER in l for l in lines):
+        raise ValueError('一致性权重还没标定：请先运行 python run.py calibrate（会自动写入 configs/train/v4.yaml）')
+
+
+def write_calibrated_weights(time_weight,space_weight,tag):
+    """v5：把标定结果直接写进 v4.yaml 的 loss 段两行，免去手动改文件；其他行原样保留。"""
+    text=OVERLAY.read_text(encoding='utf-8');out=[]
+    for line in text.splitlines(keepends=True):
+        stripped=line.lstrip()
+        for key,value in (('time_weight',time_weight),('space_weight',space_weight)):
+            if stripped.startswith(key+':'):
+                indent=line[:len(line)-len(stripped)]
+                line=f"{indent}{key}: {value!r}    # calibrate 自动填入（{tag}）\n"
+        out.append(line)
+    OVERLAY.write_text(''.join(out),encoding='utf-8')
+    require_calibrated_weights()
+
+
 def calibrate_weights(features,output,device):
     """v4 P7：初始化状态下用前 M 个训练 batch 标定 lambda_c=rho*E|grad L_JEPA|/E|grad L_c|。
 
@@ -226,10 +251,13 @@ def calibrate_weights(features,output,device):
         time_weight=rho*median['grad_jepa']/median['grad_time'],space_weight=rho*median['grad_jepa']/median['grad_space'],
         graph=dict(sigma_x=config['model']['graph']['sigma_x'],sigma_z=config['model']['graph']['sigma_z'],
                    max_modes=config['model']['graph']['max_modes']),
-        v4_overlay_sha256=cache.file_sha(ROOT/'configs/train/v4.yaml'),
-        note='把 time_weight/space_weight 填入 configs/train/v4.yaml 的 loss 段后再训练；sigma_z/K 改动后需重新标定')
+        v4_overlay_sha256_before=cache.file_sha(OVERLAY),
+        note='time_weight/space_weight 已自动写入 configs/train/v4.yaml；sigma_z/K 或一致性度量改动后需重新标定')
+    write_calibrated_weights(result['time_weight'],result['space_weight'],output.name)
+    result['v4_overlay_sha256_after']=cache.file_sha(OVERLAY)
     cache._write_json(output/'calibration.json',result)
     print(json.dumps(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],median=median),ensure_ascii=False,indent=1))
+    print('已写入 configs/train/v4.yaml，可以直接进行下一步 check。',flush=True)
     return result
 
 
@@ -246,6 +274,8 @@ def execute(args):
     stage='environment'
     try:
         cache._write_json(output/'environment.json',environment.verify_versions())
+        stage='calibration'
+        require_calibrated_weights()
         stage='preflight'
         receipt=preflight(Path(args.features_root),output/'check',device)
         if args.command in ('train','run','resume'):

@@ -20,8 +20,8 @@ model:
     diagnostic_rtol: 0.00000001
 loss:
   consistency_metric: input_scale  # v5：撤回 P3 的逐路径 LN；两路径之差的平方按 N*E 取均值后除以输入 Z_t 的方差
-  time_weight: 0.0175            # P7：【待标定】python run.py calibrate 输出的 lambda_t
-  space_weight: 0.075            # P7：【待标定】python run.py calibrate 输出的 lambda_s
+  time_weight: 0.0175            # 【待标定】python run.py calibrate 会自动改写这一行；未标定时 check/run 会拒绝运行
+  space_weight: 0.075            # 【待标定】同上
   consistency_warmup_updates: 200   # P7：前 10% 更新线性预热
   lr_min: 0.0001                 # v5（导师 2026-10-29）：学习率从 1e-3 余弦衰减到 1e-4
   lr_decay_updates: 2000         # 预热+衰减的总长度 = training.updates_per_condition；0 表示恒定 1e-3

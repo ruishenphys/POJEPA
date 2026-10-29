@@ -60,7 +60,7 @@
       "comment_cleanup_baseline_sha256": "8b6b33763d6679b4b8407f1a5b088252e9e0f23b7b2d251235fc9105fcb95a43",
       "executable_ast_sha256": "a9314b65b71b60bcf88a7ea1a6365c78894ec344196e75d8fef382a991a5a075",
       "prior_operation": "identical_bytes",
-      "v4_previous_candidate_sha256": "59410a9d7e30f21085dd19fcde72659930c1df26930db4b3142a97e7077fc197"
+      "v4_previous_candidate_sha256": "8feee95bc41b9e519c7c491084ebbd7755aea1a9f1bb763a333fa1e37e681a36"
     },
     {
       "source": "first_round/src/po_jepa/metrics.py",
@@ -363,7 +363,7 @@
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
       "executable_ast_sha256": "7f7f0dae333e95a4010670040056c2c68c9c54d4a5d2e9f11bf2f9eb0aafd81f",
       "prior_operation": "dependency_closure_and_resource_relocation",
-      "v4_previous_candidate_sha256": "23f498997b9f83bb487b0b54f3845fc6db257533b18f9d0f0c1fd12f7dd1094e"
+      "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
     },
     {
       "source": "delivery/po-jepa/src/po_jepa/runtime/workflow.py",
@@ -371,9 +371,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "e89424d2e59078ffcf5991f0994d7e95666ebd192c5b537ee3505273ab20652f",
+      "candidate_sha256": "41a35d8d77bc0b19b8bdec4446441a75b36aed1657aa02584bbcb55e7ddb72d2",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "64c4b2f62e08fa4579490094f2912f5c1eb9ea1d50ad5f5bf49ce2c41c1ff193",
+      "executable_ast_sha256": "cf6c4e30821a476464b480b5d98307e897d7a179a2288f3ec17bfb0417c7d766",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "e89424d2e59078ffcf5991f0994d7e95666ebd192c5b537ee3505273ab20652f"
     },

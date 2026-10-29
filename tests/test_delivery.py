@@ -31,6 +31,7 @@ def test_workflow_failure_stops_and_preserves_stage(monkeypatch,tmp_path,stage):
     """只模拟调度依赖；失败时不执行后续阶段、不生成成功文件。"""
     events=[]
     monkeypatch.setattr(w,'verify_bundle',lambda:'fictional')
+    monkeypatch.setattr(w,'require_calibrated_weights',lambda:None)
     def part(name,result=None):
         def call(*a,**k):
             events.append(name)
@@ -50,6 +51,7 @@ def test_workflow_failure_stops_and_preserves_stage(monkeypatch,tmp_path,stage):
 def test_workflow_calls_all_phases_once_without_old_stage_records(monkeypatch,tmp_path):
     """统一run不要求历史A—F记录；仍先实际预检再训练、评价。"""
     events=[];monkeypatch.setattr(w,'verify_bundle',lambda:'fictional')
+    monkeypatch.setattr(w,'require_calibrated_weights',lambda:None)
     monkeypatch.setattr(w,'preflight',lambda *a:(events.append('check') or dict(hardware={})))
     monkeypatch.setattr(w,'train_conditions',lambda *a:events.append('train'))
     monkeypatch.setattr(w,'evaluate_conditions',lambda *a:events.append('eval'))

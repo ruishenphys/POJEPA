@@ -210,7 +210,12 @@ def test_calibration_uses_median_of_per_batch_gradient_norms(monkeypatch, tmp_pa
     monkeypatch.setattr(w.training, "consistency_gradient_norms", lambda *a, **k: next(feed))
     real = w.checks.load_protocol
     monkeypatch.setattr(w.checks, "load_protocol", lambda: {**real(), "calibration": dict(rho=.05, batches=3)})
+    overlay = tmp_path/"v4.yaml"; overlay.write_bytes(w.OVERLAY.read_bytes())
+    monkeypatch.setattr(w, "OVERLAY", overlay)
     result = w.calibrate_weights(None, tmp_path/"cal", torch.device("cpu"))
+    written = yaml.safe_load(overlay.read_text(encoding="utf-8"))["loss"]
+    assert written["time_weight"] == result["time_weight"] and written["space_weight"] == result["space_weight"]
+    w.require_calibrated_weights()
     assert result["statistic"] == "median" and len(result["per_batch"]) == 3
     assert result["time_weight"] == pytest.approx(.05*10/2) and result["space_weight"] == pytest.approx(.05*10/4)
     assert result["mean"]["grad_jepa"] > 3000
@@ -420,3 +425,26 @@ def test_learning_rate_warmup_then_cosine():
     assert all(a < b for a, b in zip(warm, warm[1:]))
     with pytest.raises(ValueError):
         LossConfig(1., 1e-5, 1., 1., 0., 0., lr_min=1e-4, lr_decay_updates=100, lr_warmup_updates=100)
+
+
+def test_uncalibrated_overlay_blocks_check_and_run(monkeypatch, tmp_path):
+    """v5：交付的 v4.yaml 权重是占位值，check/run 在环境核验之后、用 GPU 之前就拒绝并提示先 calibrate；
+    calibrate 写入后其余配置行原样保留。"""
+    from argparse import Namespace
+    from po_jepa.runtime import workflow as w
+    overlay = tmp_path/"v4.yaml"; overlay.write_bytes(w.OVERLAY.read_bytes())
+    monkeypatch.setattr(w, "OVERLAY", overlay)
+    monkeypatch.setattr(w, "verify_bundle", lambda: "fictional")
+    monkeypatch.setattr(w.environment, "verify_versions", lambda: {})
+    monkeypatch.setattr(w, "preflight", lambda *a: pytest.fail("must stop before GPU/assets"))
+    args = Namespace(command="run", device="cuda:0", features_root=tmp_path/"absent", output=tmp_path/"run")
+    with pytest.raises(ValueError, match="calibrate"):
+        w.execute(args)
+    assert w.read(args.output/"FAILED.json")["stage"] == "calibration"
+    before = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    w.write_calibrated_weights(0.25, 0.5, "calibrate-test")
+    after = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    assert after["loss"]["time_weight"] == 0.25 and after["loss"]["space_weight"] == 0.5
+    before["loss"].update(time_weight=0.25, space_weight=0.5)
+    assert after == before
+    w.require_calibrated_weights()

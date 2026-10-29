@@ -1,5 +1,6 @@
 """推荐入口：自动捕获完整输出和真实退出码，结果目录可以直接回传。"""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -24,6 +25,8 @@ def main(argv=None):
     if args.resume_from and args.output.resolve().is_relative_to(args.resume_from.resolve()):
         parser.error('续训新输出必须位于旧训练目录之外，不能写入原证据')
     root=Path(__file__).resolve().parent
+    # 子进程固定使用本目录的 src，避免环境里以前 pip install -e 过的旧版本（如 code-v4）被导入。
+    os.environ['PYTHONPATH']=os.pathsep.join([str(root/'src'),*filter(None,[os.environ.get('PYTHONPATH')])])
     child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.cli',args.command,
         '--features-root',str(Path(args.features_root).resolve()),'--device',args.device,'--output',str(args.output.resolve()/'run')]
     if args.training_run:child+=['--training-run',str(args.training_run.resolve())]
