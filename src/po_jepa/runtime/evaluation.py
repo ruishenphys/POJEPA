@@ -71,9 +71,10 @@ class EvaluationQuery:
             return "joint_heldout" if unseen_time else "grid_heldout"
         return "time_heldout" if unseen_time else "id"
 
-    def key(self, condition, seed=1703):
-        """条件与预登记种子进入唯一键；不将同窗不同条件误认为额外轨迹。"""
-        if condition not in CONDITIONS or type(seed) is not int or seed != 1703:
+    def key(self, condition, seed=None):
+        """条件与预登记种子进入唯一键；不将同窗不同条件误认为额外轨迹。v6：默认取当前运行种子。"""
+        seed = comparison.check.model_seed() if seed is None else seed
+        if condition not in CONDITIONS or type(seed) is not int or seed != comparison.check.model_seed():
             raise ValueError("condition/seed outside F01/F05 registration")
         return (condition, seed, self.kind, self.trajectory_id, self.start_tick,
                 float(self.duration_cycles), self.grid_size, self.stratum)
@@ -285,7 +286,7 @@ def summarize_records(records, queries, conditions=CONDITIONS):
     grouped = {}
     for condition in conditions:
         for q in queries:
-            key = (condition,1703,q.kind,q.stratum,q.grid_size,float(q.duration_cycles))
+            key = (condition,comparison.check.model_seed(),q.kind,q.stratum,q.grid_size,float(q.duration_cycles))
             grouped.setdefault(key,[]).append(found.get(q.key(condition)))
     groups = []
     for (condition,seed,kind,stratum,grid,duration),rows in grouped.items():
@@ -399,7 +400,7 @@ def run_prepared_evaluation(model, condition, features, output, config, *, queri
     try:
         model.eval()
         for index,q in enumerate(queries):
-            row = dict(query=asdict(q),condition=condition,seed=1703,checkpoint=checkpoint_identity,units=metric_units(q.kind))
+            row = dict(query=asdict(q),condition=condition,seed=comparison.check.model_seed(),checkpoint=checkpoint_identity,units=metric_units(q.kind))
             try:
                 w = load_test_window(features,q,device)
                 if q.kind == "point":

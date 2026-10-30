@@ -160,8 +160,9 @@ def test_actual_resume_matches_continuous_state(monkeypatch,tmp_path,condition,s
             dict(queries=expected[offset:offset+4],values={'future_jepa_distance':[1.]*4}))
         return dict(mean=1.,windows=400,metric='future_jepa_distance')
     monkeypatch.setattr(c,'validate_condition',validate)
+    # v6：每步都量一致性梯度占比，续训仍须与连续训练逐位一致（测量不改参数、优化器或 RNG）。
     monkeypatch.setattr(w.checks,'load_protocol',lambda:{'validation':{'interval_updates':2},
-        'loss':asdict(e06_config())})
+        'loss':asdict(e06_config()),'monitoring':{'consistency_interval':1},'calibration':{'rho':.05}})
     original=c.condition_step; active={'fail':False}; attempted=[]
     def step(*a,**k):
         completed=a[-1];attempted.append(completed)
@@ -179,6 +180,11 @@ def test_actual_resume_matches_continuous_state(monkeypatch,tmp_path,condition,s
     random.seed(31);np.random.seed(31);torch.manual_seed(31)
     reference,reference_optimizer,_=run(tmp_path/'continuous')
     reference_rng=(random.getstate(),np.random.get_state(),torch.get_rng_state().clone())
+    first=w.read(tmp_path/'continuous/updates/0001.json')['consistency_gradient']
+    if condition=='matched_transformer':assert first is None
+    else:
+        assert set(first['share'])=={'time','space'} and first['grad_jepa']>0
+        if condition=='po_jepa_no_consistency':assert first['share']=={'time':0.,'space':0.}
     random.seed(31);np.random.seed(31);torch.manual_seed(31);active['fail']=True
     with pytest.raises(RuntimeError,match='interruption'):run(tmp_path/'interrupted')
     failure_sha=w.cache.file_sha(tmp_path/'interrupted/FAILED.json')

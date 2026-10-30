@@ -59,7 +59,31 @@ def load_protocol() -> dict:
     data.cache.verify_fixed_protocol()
     base = yaml.safe_load((ROOT/"configs/train/default.yaml").read_text(encoding="utf-8"))
     overlay = yaml.safe_load((ROOT/"configs/train/v4.yaml").read_text(encoding="utf-8"))
-    return _merge_v4(base, {k: v for k, v in overlay.items() if k not in ("schema_version", "protocol_id")})
+    return _apply_seed(_merge_v4(base, {k: v for k, v in overlay.items() if k not in ("schema_version", "protocol_id")}))
+
+SEED_ENV = "PO_JEPA_SEED"
+
+def _apply_seed(config: dict) -> dict:
+    """v6 多种子：环境变量 PO_JEPA_SEED 只能取 default.yaml 预登记的 1703 或 later_robustness_seeds。
+
+    同时改模型初始化种子与训练查询序列种子（window_seed 平移同样的量）；验证/测试窗口固定不变。
+    未设置时与 v5 完全相同。
+    """
+    value = os.environ.get(SEED_ENV)
+    if value is None:
+        return config
+    training = config["training"]
+    base_seed = training["initial_model_seed"]
+    allowed = [base_seed, *training["later_robustness_seeds"]]
+    if not value.isdigit() or int(value) not in allowed:
+        raise ValueError(f"{SEED_ENV} must be one of the preregistered seeds {allowed}")
+    seed = int(value)
+    return dict(config, training=dict(training, initial_model_seed=seed),
+                randomness=dict(config["randomness"], window_seed=config["randomness"]["window_seed"]+seed-base_seed))
+
+def model_seed() -> int:
+    """当前运行的模型初始化种子（默认 1703），写进登记、评价行和汇总。"""
+    return load_protocol()["training"]["initial_model_seed"]
 
 def _merge_v4(base: dict, overlay: dict) -> dict:
     """v4 覆盖层深度合并：字典逐键递归，其他值整体替换；不修改输入。"""

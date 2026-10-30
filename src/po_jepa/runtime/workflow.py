@@ -205,58 +205,84 @@ def evaluate_conditions(features,training_root,output,device):
 
 
 PLACEHOLDER='【待标定】'
+CALIBRATED_MARK='calibrate 自动填入（v6'
 OVERLAY=ROOT/'configs/train/v4.yaml'
 
 
 def require_calibrated_weights():
-    """v5：v4.yaml 的 time_weight/space_weight 仍是占位值时拒绝 check/train/run，提示先运行 calibrate。"""
+    """v6：v4.yaml 的 time_weight/space_weight 必须是 v6 calibrate 写入的值；占位值或 v5 旧标定都拒绝运行。"""
     lines=[l for l in OVERLAY.read_text(encoding='utf-8').splitlines() if l.strip().startswith(('time_weight:','space_weight:'))]
-    if len(lines)!=2 or any(PLACEHOLDER in l for l in lines):
-        raise ValueError('一致性权重还没标定：请先运行 python run.py calibrate（会自动写入 configs/train/v4.yaml）')
+    if len(lines)!=2 or any(PLACEHOLDER in l or CALIBRATED_MARK not in l for l in lines):
+        raise ValueError('一致性权重还没按 v6 方式标定：请先运行 python run.py calibrate（会自动写入 configs/train/v4.yaml）')
 
 
 def write_calibrated_weights(time_weight,space_weight,tag):
-    """v5：把标定结果直接写进 v4.yaml 的 loss 段两行，免去手动改文件；其他行原样保留。"""
+    """把标定结果直接写进 v4.yaml 的 loss 段两行，免去手动改文件；其他行原样保留。"""
     text=OVERLAY.read_text(encoding='utf-8');out=[]
     for line in text.splitlines(keepends=True):
         stripped=line.lstrip()
         for key,value in (('time_weight',time_weight),('space_weight',space_weight)):
             if stripped.startswith(key+':'):
                 indent=line[:len(line)-len(stripped)]
-                line=f"{indent}{key}: {value!r}    # calibrate 自动填入（{tag}）\n"
+                line=f"{indent}{key}: {value!r}    # {CALIBRATED_MARK}，{tag}）\n"
         out.append(line)
     OVERLAY.write_text(''.join(out),encoding='utf-8')
     require_calibrated_weights()
 
 
-def calibrate_weights(features,output,device):
-    """v4 P7：初始化状态下用前 M 个训练 batch 标定 lambda_c=rho*E|grad L_JEPA|/E|grad L_c|。
+def _gradient_rows(model,sequence,features,device,loss):
+    """逐 batch 求 JEPA/时间/空间三项各自的梯度范数，不更新参数。"""
+    return [training.consistency_gradient_norms(model,data.load_training_batch(features,q,device=str(device)),loss_config=loss)
+            for q in sequence]
 
-    只做前向/反向，不更新参数、不写 checkpoint；结果写 calibration.json，供填入 configs/train/v4.yaml。
+
+def calibrate_weights(features,output,device):
+    """v6 λ 标定：lambda_c=rho*median|grad L_JEPA|/median|grad L_c|，在“只用 JEPA 训练 pretrain_updates 步之后”的模型上量。
+
+    v5 在初始化状态下量：那时 P_out 读出很大、一致性损失是训练后的上千倍，梯度比 JEPA 大 100–800 倍，
+    λ 被压到 1e-4 量级，正式训练中加权一致性只占总损失约 1e-6，full 与无一致性实际是同一个模型。
+    这里先用与正式训练完全相同的初始化、查询序列、学习率调度和裁剪，只用 JEPA（λ=0，即无一致性条件）
+    训练 pretrain_updates 步，越过初始化瞬态后，再在紧接着的 batches 个训练 batch 上量梯度。
+    初始化状态的数值也一并记录，便于对照。不写 checkpoint；结果写 calibration.json 并自动写入 v4.yaml。
     """
     output.mkdir(parents=True,exist_ok=False)
     config=checks.load_protocol();cal=config['calibration']
-    model,loss=comparison.build_condition('po_jepa_full',device)
-    model.train()
+    pre,count=cal['pretrain_updates'],cal['batches']
     sequence,_=comparison.learning.make_query_sequence(config)
-    rows=[]
-    for queries in sequence[:cal['batches']]:
-        batch=data.load_training_batch(features,queries,device=str(device))
-        rows.append(training.consistency_gradient_norms(model,batch,loss_config=loss))
-    mean={k:sum(r[k] for r in rows)/len(rows) for k in rows[0]}
-    # v4：权重按逐 batch 梯度范数的中位数计算，单个离群 batch 不再把 lambda 拉偏；均值只作参考记录。
-    median={k:statistics.median(r[k] for r in rows) for k in rows[0]}
-    rho=cal['rho']
-    result=dict(rho=rho,batches=len(rows),statistic='median',per_batch=rows,median=median,mean=mean,
+    if pre+count>len(sequence):raise ValueError('pretrain_updates+batches exceeds the training sequence')
+    model,loss=comparison.build_condition('po_jepa_no_consistency',device)
+    model.train()
+    initial=_gradient_rows(model,sequence[:count],features,device,loss)
+    optimizer=comparison.make_optimizer(model);history=[]
+    for step in range(pre):
+        batch=data.load_training_batch(features,sequence[step],device=str(device))
+        result=training.train_step(model,optimizer,batch,loss_config=loss,completed_steps=step,condition='no_consistency')
+        history.append(dict(step=result.completed_steps,grad_norm_before_clip=result.grad_norm,**result.loss_values))
+        if result.completed_steps%50==0:print(f'calibrate pretrain {result.completed_steps}/{pre} jepa={result.loss_values["jepa"]:.4f}',flush=True)
+    rows=_gradient_rows(model,sequence[pre:pre+count],features,device,loss)
+    def summary(items):
+        return dict(median={k:statistics.median(r[k] for r in items) for k in items[0]},
+                    mean={k:sum(r[k] for r in items)/len(items) for k in items[0]})
+    after,before=summary(rows),summary(initial)
+    median=after['median'];rho=cal['rho']
+    result=dict(rho=rho,batches=len(rows),statistic='median',method='v6_after_jepa_pretraining',
+        pretrain_updates=pre,pretrain_history=history,per_batch=rows,median=median,mean=after['mean'],
+        initial_state=dict(per_batch=initial,**before,
+            time_weight=rho*before['median']['grad_jepa']/before['median']['grad_time'],
+            space_weight=rho*before['median']['grad_jepa']/before['median']['grad_space']),
         time_weight=rho*median['grad_jepa']/median['grad_time'],space_weight=rho*median['grad_jepa']/median['grad_space'],
         graph=dict(sigma_x=config['model']['graph']['sigma_x'],sigma_z=config['model']['graph']['sigma_z'],
                    max_modes=config['model']['graph']['max_modes']),
         v4_overlay_sha256_before=cache.file_sha(OVERLAY),
-        note='time_weight/space_weight 已自动写入 configs/train/v4.yaml；sigma_z/K 或一致性度量改动后需重新标定')
-    write_calibrated_weights(result['time_weight'],result['space_weight'],output.name)
+        note='time_weight/space_weight 已自动写入 configs/train/v4.yaml；三个种子共用这一组 λ')
+    for key in ('time_weight','space_weight'):
+        if not (result[key]>0 and result[key]<float('inf')):raise ValueError('calibrated weight must be finite and positive: '+key)
+    write_calibrated_weights(result['time_weight'],result['space_weight'],f'JEPA 预训练 {pre} 步后；{output.name}')
     result['v4_overlay_sha256_after']=cache.file_sha(OVERLAY)
     cache._write_json(output/'calibration.json',result)
-    print(json.dumps(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],median=median),ensure_ascii=False,indent=1))
+    print(json.dumps(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],median=median,
+        initial_state_weights=dict(time=result['initial_state']['time_weight'],space=result['initial_state']['space_weight'])),
+        ensure_ascii=False,indent=1))
     print('已写入 configs/train/v4.yaml，可以直接进行下一步 check。',flush=True)
     return result
 

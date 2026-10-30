@@ -28,5 +28,8 @@ loss:
   lr_warmup_updates: 100         # 前 100 次（5%）学习率从 1e-5 线性升到 1e-3，之后余弦衰减
   grad_clip_norm: 1.0            # 全局梯度范数裁剪（optimizer.step 前）；0 表示不裁剪。v4 第一次运行第 1009 步的梯度尖峰触发了塌缩
 calibration:
-  rho: 0.05                      # lambda_c = rho * E|grad L_JEPA| / E|grad L_c|；CPU 短训练中 0.2 拖慢 JEPA、0.05 不拖，先用 0.05
-  batches: 32                    # 初始化状态下前 32 个训练 batch，取逐 batch 梯度范数的中位数（单个离群 batch 曾把均值拉偏约 7 倍）
+  rho: 0.05                      # lambda_c = rho * median|grad L_JEPA| / median|grad L_c|，即加权一致性梯度约为 JEPA 梯度的 5%
+  pretrain_updates: 300          # v6：先只用 JEPA 按正式训练的同一初始化/查询/学习率训练 300 步，越过初始化瞬态后再量梯度
+  batches: 32                    # 紧接着的 32 个训练 batch，取逐 batch 梯度范数的中位数（单个离群 batch 曾把均值拉偏约 7 倍）
+monitoring:
+  consistency_interval: 20       # v6：full 条件每 20 次更新量一次加权一致性梯度/JEPA 梯度之比，写进 updates/*.json

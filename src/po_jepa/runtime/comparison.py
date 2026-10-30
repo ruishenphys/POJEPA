@@ -22,6 +22,8 @@ from pathlib import Path
 
 import random
 
+import statistics
+
 import tempfile
 
 import time
@@ -100,9 +102,9 @@ def parameter_counts(model) -> dict:
     return dict(total=sum(groups.values()), modules=groups)
 
 def _make_transformer(spec, device):
-    """CPU局部seed1703构造后转指定设备；不消耗全局初始化/采样RNG。"""
+    """CPU局部种子（默认1703，v6 多种子时为当前种子）构造后转指定设备；不消耗全局初始化/采样RNG。"""
     with torch.random.fork_rng(devices=[]):
-        torch.random.default_generator.manual_seed(1703)
+        torch.random.default_generator.manual_seed(check.model_seed())
         model = TokenTransformer(spec)
     return model.to(device)
 
@@ -130,6 +132,7 @@ def preregister():
     matching = choose_architecture()
     sequence, state = learning.make_query_sequence(check.load_protocol())
     return dict(schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
+        model_seed=check.model_seed(),
         parameter_match=matching, query_sequence_sha256=sequence_sha(sequence),
         consumer_sha256=consumer_sources(),
         generator_state_stage="after_complete_sequence_pre_generation",
@@ -471,20 +474,28 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
             result,scales = _observed_update(condition,model,optimizer,batch,loss_config,completed)
             completed = result.completed_steps
             if device.type == "cuda": torch.cuda.synchronize(device)
+            seconds = time.perf_counter()-started
+            share = consistency_share(condition, model, batch, loss_config, completed)
             data.cache._write_json(output/"updates"/f"{completed:04d}.json",dict(condition=condition,
                 completed_updates=completed,next_batch_index=completed,queries=[asdict(q) for q in rows],
                 losses=result.loss_values,grad_max_abs=result.grad_max_abs,grad_norm_before_clip=result.grad_norm,
                 grad_clip_norm=loss_config.grad_clip_norm,learning_rate=training.scheduled_lr(loss_config,completed-1),
                 raw_predictions=scales,
                 raw_target=check.tensor_stats(batch.raw_target),phi_calls=len(scales)//(1 if condition == "matched_transformer" else check.readouts_per_phi(model)),provenance=provenance,
-                update_and_observer_seconds=time.perf_counter()-started,
+                update_and_observer_seconds=seconds,consistency_gradient=share,
                 gpu_memory=check._memory(device) if device.type == "cuda" else None))
             del batch
             if completed % validation_interval == 0 or completed == len(sequence):
                 row,best = _selection(condition,model,optimizer,features,output,device,loss_config,
                     completed,generator_state,provenance,best)
                 validations.append(row)
+        monitor = consistency_monitor_summary(output, condition, loss_config)
+        if monitor is not None and not monitor["active"]:
+            detail = (f"中位数只有 {monitor['median_share']}，低于 rho/10={monitor['threshold']}"
+                      if monitor["measurements"] else "一致性预热结束后没有任何测量")
+            print(f"警告：{condition} 的加权一致性梯度占 JEPA 梯度的比例{detail}，一致性项可能没有真正参与训练", flush=True)
         report = dict(status="completed_prepared_condition_only",condition=condition,evidence_role=role,
+            consistency_monitor=monitor,
             completed_updates=completed,query_sequence_sha256=registration["query_sequence_sha256"],
             preregistration_sha256=hashlib.sha256(data.cache._json_bytes(registration)).hexdigest(),
             best=best,validations=validations,future_error_decreased=best["step"]>0,
@@ -497,6 +508,35 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
             attempted_update=attempted,query_sequence_sha256=registration["query_sequence_sha256"],best=best,
             error_type=type(error).__name__,error=str(error),retry_performed=False,failed_step_may_have_modified_optimizer=True))
         raise
+
+def consistency_share(condition, model, batch, loss_config, completed):
+    """v6：每 monitoring.consistency_interval 次更新，在本步 batch 上分别求三项梯度范数（不改参数/优化器/RNG）。
+
+    share = λ·w(s)·|grad L_c| / |grad L_JEPA|，即加权一致性梯度相对 JEPA 梯度的实际比例；
+    标定时按中位数令其等于 rho。无一致性条件只记录梯度范数（share=0），Transformer 不计算。
+    """
+    interval = check.load_protocol()["monitoring"]["consistency_interval"]
+    if condition == "matched_transformer" or completed % interval:
+        return None
+    norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config)
+    scale = training.consistency_warmup_scale(loss_config, completed)
+    weights = dict(time=loss_config.time_weight, space=loss_config.space_weight)
+    return dict(**norms, warmup_scale=scale,
+        share={k: w*scale*norms["grad_"+k]/norms["grad_jepa"] if norms["grad_jepa"] > 0 else None for k, w in weights.items()})
+
+def consistency_monitor_summary(output, condition, loss_config):
+    """v6：读本条件全部更新记录，取一致性预热结束后各次测量的中位数；低于 rho/10 判为“没有真正参与”。"""
+    if condition != "po_jepa_full":
+        return None
+    config = check.load_protocol()
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((Path(output)/"updates").glob("*.json"))]
+    rows = [r for r in rows if r.get("consistency_gradient") and r["completed_updates"] >= loss_config.consistency_warmup_updates]
+    if not rows:
+        return dict(measurements=0, active=False, median_share=None, threshold=config["calibration"]["rho"]/10)
+    median = {k: statistics.median(r["consistency_gradient"]["share"][k] for r in rows) for k in ("time", "space")}
+    threshold = config["calibration"]["rho"]/10
+    return dict(measurements=len(rows), rho=config["calibration"]["rho"], threshold=threshold,
+                median_share=median, active=all(v >= threshold for v in median.values()))
 
 def comparison_table(reports, identity, registration):
     """只整理各自验证集选中点，不用TCD/SCD选模型，不将表格自动解释成因果收益。"""

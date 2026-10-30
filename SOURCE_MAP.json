@@ -149,9 +149,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "19a2e334872eef2f6ee1fb19285f419698898cd4f7ed1606efeed0a481cec426",
+      "candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "8d1692371aec2e43f032a87a22776078339bdc623bcfc22cf1dd24d0f0a3422e",
+      "executable_ast_sha256": "75d7fdaa8dad8b1ff51a758c969bdcf6d83827ec8fc7e1d7df5416642df5532b",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "19a2e334872eef2f6ee1fb19285f419698898cd4f7ed1606efeed0a481cec426"
     },
@@ -161,9 +161,9 @@
       "sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "65db66a2c94b605607c41ac587f9fd70dc02eef967b60e8b29c77735abe1f530",
+      "candidate_sha256": "f5a0492b6975934b86287616db5ce42217ea7fc49dbf2e478725f0ecda967a3d",
       "comment_cleanup_baseline_sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
-      "executable_ast_sha256": "25a64c5e8194d5b8758a8a9e6be2b26196eeeaed836809f5879f5f3f980308f0",
+      "executable_ast_sha256": "98f95e6a5b2c5a3f360d7bb52b596645484411cf5fa764acbe60beed48982b63",
       "prior_operation": "existing_v3_runtime",
       "cleanup_history": [
         {
@@ -211,10 +211,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "e55c128fa5dfc0e05ab312d2b7e9a89c4a3249992660c0eff0b1774f89348133",
+      "candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "ebd2d8fd7cf1fef365e6ff1482f361701f6f6a865165de125bf1de0ff229d0b2",
+      "executable_ast_sha256": "fbec6266940cff2e8a94d9be59942290d638c012771024b088d38e81c918d410",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "e55c128fa5dfc0e05ab312d2b7e9a89c4a3249992660c0eff0b1774f89348133"
     },
@@ -283,9 +283,9 @@
         "summarize_records"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "4e7635de3b29c2ac85381af86afde6b7db3f987f8bc37d2cc280af04cab8833c",
+      "candidate_sha256": "6a0c67f40a5ba28bdb553d0222ac7251ef58b374a700f4e9338227b2103178a5",
       "comment_cleanup_baseline_sha256": "d3d39eb924d97ab9f3be719d0d24f74235296bcb704d0428c42da552d1e4bdae",
-      "executable_ast_sha256": "3ab306465d08a12cb54cc9b81c49327bdb35ad3f238adbbaf355d184be4bf47b",
+      "executable_ast_sha256": "a96fcd350cdf2e549937c79812a33bc59992d222745b1a0c1f342da4bfe87c9f",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "4e7635de3b29c2ac85381af86afde6b7db3f987f8bc37d2cc280af04cab8833c"
     },
@@ -371,11 +371,11 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "41a35d8d77bc0b19b8bdec4446441a75b36aed1657aa02584bbcb55e7ddb72d2",
+      "candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "cf6c4e30821a476464b480b5d98307e897d7a179a2288f3ec17bfb0417c7d766",
+      "executable_ast_sha256": "84dc358b5ecc1fa1f558bf9d019d54d5f86b29ade7e35aabf259a4d6c95a55e7",
       "prior_operation": "existing_v3_runtime",
-      "v4_previous_candidate_sha256": "e89424d2e59078ffcf5991f0994d7e95666ebd192c5b537ee3505273ab20652f"
+      "v4_previous_candidate_sha256": "41a35d8d77bc0b19b8bdec4446441a75b36aed1657aa02584bbcb55e7ddb72d2"
     },
     {
       "source": "first_round/src/po_jepa/simulation.py",

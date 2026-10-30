@@ -10,14 +10,18 @@ def main(argv=None):
     for command,help_text in (('check','核依赖、设备、完整梯度、100更新及400窗成本'),('train','预检后训练三个条件'),
         ('resume','从明确旧训练目录恢复到新目录，不覆盖失败证据'),
         ('evaluate','只评价已完成训练的选中点'),('run','预检、训练、留出评价全部顺序执行'),
-        ('calibrate','v4：初始化状态下按梯度比标定一致性权重 lambda_t/lambda_s，不训练')):
+        ('calibrate','v6：先只用 JEPA 预训练若干步，再按梯度比标定一致性权重 lambda_t/lambda_s')):
         task=sub.add_parser(command,help=help_text)
         task.add_argument('--features-root',type=Path,required=True,help='交接包内已包含的冻结特征缓存根目录')
         task.add_argument('--device',default='cuda:0',help='4090/A100的显式cuda:N')
         task.add_argument('--output',type=Path,required=True,help='必须不存在的新结果目录')
+        task.add_argument('--seed',type=int,choices=(1703,1704,1705),default=1703,help='v6：预登记的模型初始化/查询序列种子')
         if command=='evaluate':task.add_argument('--training-run',type=Path,required=True)
         if command=='resume':task.add_argument('--resume-from',type=Path,required=True,help='旧结果/run/training目录；仅支持同版源码与环境')
     args=parser.parse_args(argv)
+    import os
+    from .checks import SEED_ENV
+    os.environ[SEED_ENV]=str(args.seed)
     from .workflow import execute
     return execute(args)
 

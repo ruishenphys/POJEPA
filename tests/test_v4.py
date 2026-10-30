@@ -1,5 +1,6 @@
 """v4 整改（导师确认的 P1–P7）的 CPU 单元测试：编码器特征建图、固定 K、残差读出、LN 空间一致性、预热与标定。"""
 from dataclasses import replace
+import json
 import math
 
 import pytest
@@ -199,26 +200,79 @@ def test_training_loop_observed_update_accepts_residual_readout_on_cpu(condition
 
 # ---- v4 第一次 GPU 运行后的纯代码修复（C2/C3/C5/C7/E02/E03/E04） ----
 
-def test_calibration_uses_median_of_per_batch_gradient_norms(monkeypatch, tmp_path):
-    """C2：一个离群 batch 不再把 lambda 拉偏；结果里保留逐 batch 数值、中位数和均值。"""
+def test_calibration_pretrains_with_jepa_then_uses_median_of_per_batch_gradient_norms(monkeypatch, tmp_path):
+    """v6：先用无一致性条件按正式序列训练 pretrain_updates 步，再在紧接着的 batch 上取梯度范数中位数；
+    初始化状态的数值只作对照记录。一个离群 batch 不会把 lambda 拉偏。"""
+    from types import SimpleNamespace
     from po_jepa.runtime import workflow as w
-    rows = [dict(jepa=1., time=1., space=1., grad_jepa=g, grad_time=2., grad_space=4.) for g in (10., 10., 10000.)]
-    feed = iter(rows)
-    monkeypatch.setattr(w.comparison, "build_condition", lambda *a: (torch.nn.Linear(1, 1), None))
-    monkeypatch.setattr(w.comparison.learning, "make_query_sequence", lambda c: ([[None]]*3, None))
-    monkeypatch.setattr(w.data, "load_training_batch", lambda *a, **k: None)
+    init = [dict(jepa=1., time=1., space=1., grad_jepa=10., grad_time=1000., grad_space=8000.)]*3
+    after = [dict(jepa=1., time=1., space=1., grad_jepa=g, grad_time=2., grad_space=4.) for g in (10., 10., 10000.)]
+    feed = iter(init+after); calls = []; built = []
+    monkeypatch.setattr(w.comparison, "build_condition", lambda c, d: built.append(c) or (torch.nn.Linear(1, 1), None))
+    monkeypatch.setattr(w.comparison, "make_optimizer", lambda m: None)
+    monkeypatch.setattr(w.comparison.learning, "make_query_sequence", lambda c: ([[i] for i in range(10)], None))
+    monkeypatch.setattr(w.data, "load_training_batch", lambda f, q, **k: q)
     monkeypatch.setattr(w.training, "consistency_gradient_norms", lambda *a, **k: next(feed))
+    def step(model, optimizer, batch, *, loss_config, completed_steps, condition):
+        calls.append((batch, completed_steps, condition))
+        return SimpleNamespace(completed_steps=completed_steps+1, grad_norm=1., loss_values=dict(jepa=.5))
+    monkeypatch.setattr(w.training, "train_step", step)
     real = w.checks.load_protocol
-    monkeypatch.setattr(w.checks, "load_protocol", lambda: {**real(), "calibration": dict(rho=.05, batches=3)})
+    monkeypatch.setattr(w.checks, "load_protocol", lambda: {**real(), "calibration": dict(rho=.05, batches=3, pretrain_updates=2)})
     overlay = tmp_path/"v4.yaml"; overlay.write_bytes(w.OVERLAY.read_bytes())
     monkeypatch.setattr(w, "OVERLAY", overlay)
+    with pytest.raises(ValueError, match="v6"):
+        w.require_calibrated_weights()
     result = w.calibrate_weights(None, tmp_path/"cal", torch.device("cpu"))
+    assert built == ["po_jepa_no_consistency"]
+    assert calls == [([0], 0, "no_consistency"), ([1], 1, "no_consistency")]
     written = yaml.safe_load(overlay.read_text(encoding="utf-8"))["loss"]
     assert written["time_weight"] == result["time_weight"] and written["space_weight"] == result["space_weight"]
     w.require_calibrated_weights()
-    assert result["statistic"] == "median" and len(result["per_batch"]) == 3
+    assert result["method"] == "v6_after_jepa_pretraining" and result["pretrain_updates"] == 2
+    assert len(result["per_batch"]) == 3 and len(result["pretrain_history"]) == 2
     assert result["time_weight"] == pytest.approx(.05*10/2) and result["space_weight"] == pytest.approx(.05*10/4)
+    assert result["initial_state"]["time_weight"] == pytest.approx(.05*10/1000)
     assert result["mean"]["grad_jepa"] > 3000
+
+
+def test_old_v5_calibration_is_rejected(monkeypatch, tmp_path):
+    """v6：v5 在初始化状态下标定的旧 λ（注释不带 v6 标记）不能直接用于 v6 训练。"""
+    from po_jepa.runtime import workflow as w
+    overlay = tmp_path/"v4.yaml"
+    lines = []
+    for line in w.OVERLAY.read_text(encoding="utf-8").splitlines(keepends=True):
+        for key, value in (("time_weight", "0.000477"), ("space_weight", "6.0e-05")):
+            if line.strip().startswith(key+":"):
+                line = f"  {key}: {value}    # calibrate 自动填入（calibrate-v5）\n"
+        lines.append(line)
+    overlay.write_text("".join(lines), encoding="utf-8")
+    monkeypatch.setattr(w, "OVERLAY", overlay)
+    assert "待标定" not in overlay.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="v6"):
+        w.require_calibrated_weights()
+
+
+def test_seed_override_accepts_only_preregistered_seeds(monkeypatch):
+    """v6 多种子：PO_JEPA_SEED 只改模型初始化与训练查询序列种子，且只能取预登记的 1703/1704/1705。"""
+    from po_jepa.runtime import comparison
+    monkeypatch.delenv(checks.SEED_ENV, raising=False)
+    base = checks.load_protocol()
+    sequence, _ = comparison.learning.make_query_sequence(base)
+    model = checks.build_full_model(base, torch.device("cpu"))
+    monkeypatch.setenv(checks.SEED_ENV, "1704")
+    other = checks.load_protocol()
+    assert other["training"]["initial_model_seed"] == 1704 and checks.model_seed() == 1704
+    assert other["randomness"]["window_seed"] == base["randomness"]["window_seed"]+1
+    assert {k: v for k, v in other.items() if k not in ("training", "randomness")} == {k: v for k, v in base.items() if k not in ("training", "randomness")}
+    assert comparison.learning.make_query_sequence(other)[0] != sequence
+    changed = checks.build_full_model(other, torch.device("cpu"))
+    assert not torch.equal(model.p_in.weight, changed.p_in.weight)
+    assert comparison.preregister()[0]["model_seed"] == 1704
+    for bad in ("1706", "abc", "-1"):
+        monkeypatch.setenv(checks.SEED_ENV, bad)
+        with pytest.raises(ValueError, match="preregistered"):
+            checks.load_protocol()
 
 
 def test_v4_overlay_enables_clipping_and_32_calibration_batches():
@@ -448,3 +502,46 @@ def test_uncalibrated_overlay_blocks_check_and_run(monkeypatch, tmp_path):
     before["loss"].update(time_weight=0.25, space_weight=0.5)
     assert after == before
     w.require_calibrated_weights()
+
+
+def test_consistency_monitor_summary_flags_inactive_consistency(monkeypatch, tmp_path):
+    """v6：一致性预热结束后各次测量的占比中位数低于 rho/10 时判为没有真正参与训练（v5 的情形约 1e-5）。"""
+    from po_jepa.runtime import comparison
+    real = checks.load_protocol()
+    monkeypatch.setattr(comparison.check, "load_protocol", lambda: {**real, "calibration": dict(rho=.05)})
+    config = LossConfig(1., 1e-5, 1., 1., 0., 0., consistency_warmup_updates=2)
+    def write(folder, shares):
+        (folder/"updates").mkdir(parents=True)
+        for step, share in enumerate(shares, 1):
+            row = dict(completed_updates=step, consistency_gradient=None if share is None else dict(share=dict(time=share, space=share)))
+            (folder/"updates"/f"{step:04d}.json").write_text(json.dumps(row), encoding="utf-8")
+    write(tmp_path/"ok", [1e-6, None, .04, .06, .05])
+    summary = comparison.consistency_monitor_summary(tmp_path/"ok", "po_jepa_full", config)
+    assert summary["measurements"] == 3 and summary["median_share"] == dict(time=.05, space=.05) and summary["active"]
+    write(tmp_path/"off", [.05, None, 1e-5, 2e-5, 1e-5])
+    assert not comparison.consistency_monitor_summary(tmp_path/"off", "po_jepa_full", config)["active"]
+    assert comparison.consistency_monitor_summary(tmp_path/"off", "po_jepa_no_consistency", config) is None
+
+
+def test_seed_summary_tool_pairs_trajectories(tmp_path):
+    """v6 多种子汇总脚本：轨迹层面配对、拒绝重复种子。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("summarize_seeds", checks.ROOT/"tools/summarize_seeds.py")
+    tool = importlib.util.module_from_spec(spec); spec.loader.exec_module(tool)
+    def run(name, seed, offset):
+        for condition, base in (("po_jepa_full", .20+offset), ("po_jepa_no_consistency", .21), ("matched_transformer", .25), ("identity", .22)):
+            folder = tmp_path/name/"run/evaluation"/condition/"rows"; folder.mkdir(parents=True)
+            for t in range(180, 183):
+                row = dict(status="ok", seed=seed, query=dict(kind="point", trajectory_id=t),
+                           values=dict(future_jepa_distance=base+t*1e-4, tcd_normalized=.03, delta_act=0.))
+                (folder/f"{t}.json").write_text(json.dumps(row), encoding="utf-8")
+        (tmp_path/name/"run/evaluation/COMPLETE.json").write_text("{}", encoding="utf-8")
+    run("a", 1703, 0.); run("b", 1704, .001)
+    assert tool.main([str(tmp_path/"a"), str(tmp_path/"b")]) == 0
+    result = json.loads((tmp_path/"seeds-summary.json").read_text(encoding="utf-8"))
+    pair = result["seed_averaged_paired"]["po_jepa_full - po_jepa_no_consistency"]
+    assert pair["mean_difference"] == pytest.approx(-.0095) and pair["better_trajectories"] == 3
+    assert result["full_better_than_no_consistency_in_seeds"] == "2/2"
+    run("c", 1703, 0.)
+    with pytest.raises(SystemExit):
+        tool.main([str(tmp_path/"a"), str(tmp_path/"c")])
