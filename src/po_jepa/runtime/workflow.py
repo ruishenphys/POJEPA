@@ -206,28 +206,85 @@ def evaluate_conditions(features,training_root,output,device):
 
 PLACEHOLDER='【待标定】'
 CALIBRATED_MARK='calibrate 自动填入（v6'
+SWEPT_MARK='sweep 选定'
 OVERLAY=ROOT/'configs/train/v4.yaml'
 
 
-def require_calibrated_weights():
-    """v6：v4.yaml 的 time_weight/space_weight 必须是 v6 calibrate 写入的值；占位值或 v5 旧标定都拒绝运行。"""
+def require_calibrated_weights(swept=False):
+    """v6：v4.yaml 的 time_weight/space_weight 必须是 v6 calibrate 写入的值；占位值或 v5 旧标定都拒绝运行。
+
+    swept=True（train/run/resume/evaluate）时还要求 sweep 已经按验证集选定 rho。
+    """
     lines=[l for l in OVERLAY.read_text(encoding='utf-8').splitlines() if l.strip().startswith(('time_weight:','space_weight:'))]
     if len(lines)!=2 or any(PLACEHOLDER in l or CALIBRATED_MARK not in l for l in lines):
         raise ValueError('一致性权重还没按 v6 方式标定：请先运行 python run.py calibrate（会自动写入 configs/train/v4.yaml）')
+    if swept and any(SWEPT_MARK not in l for l in lines):
+        raise ValueError('一致性权重还没有经过 sweep 选定：请先运行 python run.py sweep（会自动写入 configs/train/v4.yaml）')
 
 
-def write_calibrated_weights(time_weight,space_weight,tag):
-    """把标定结果直接写进 v4.yaml 的 loss 段两行，免去手动改文件；其他行原样保留。"""
+def write_calibrated_weights(time_weight,space_weight,tag,rho=None):
+    """把标定结果直接写进 v4.yaml 的 loss 段两行（sweep 时连同 calibration.rho 一行），免去手动改文件；其他行原样保留。"""
     text=OVERLAY.read_text(encoding='utf-8');out=[]
+    values=[('time_weight',time_weight,f'{CALIBRATED_MARK}，{tag}）'),('space_weight',space_weight,f'{CALIBRATED_MARK}，{tag}）')]
+    if rho is not None:values.append(('rho',rho,f'{SWEPT_MARK}（{tag}）；lambda_c = rho * median|grad L_JEPA| / median|grad L_c|'))
     for line in text.splitlines(keepends=True):
         stripped=line.lstrip()
-        for key,value in (('time_weight',time_weight),('space_weight',space_weight)):
+        for key,value,comment in values:
             if stripped.startswith(key+':'):
                 indent=line[:len(line)-len(stripped)]
-                line=f"{indent}{key}: {value!r}    # {CALIBRATED_MARK}，{tag}）\n"
+                line=f"{indent}{key}: {value!r}    # {comment}\n"
         out.append(line)
     OVERLAY.write_text(''.join(out),encoding='utf-8')
-    require_calibrated_weights()
+    require_calibrated_weights(swept=rho is not None)
+
+
+def sweep_rho(features,output,device):
+    """v6 消融：种子 1703 上，按 calibration.rho_grid 的每个 rho 各完整训练一次 full（2000 步、同一验证计划），
+    按验证集最佳 future_jepa_distance 选 rho（不看测试集），把 rho 与对应 λ 写进 v4.yaml。
+
+    λ 与 rho 成正比：λ(rho) = λ_标定 · rho / rho_标定，梯度中位数只在 calibrate 量一次。
+    某个 rho 在第 early_check_updates 步被判为一致性太弱时停止该候选，不参与选择；其余候选照常跑。
+    """
+    output.mkdir(parents=True,exist_ok=False)
+    config=checks.load_protocol();cal=config['calibration']
+    if checks.model_seed()!=config['training']['initial_model_seed'] or checks.model_seed()!=1703:
+        raise ValueError('sweep 只在种子 1703 上做')
+    base=config['loss'];rho0=cal['rho']
+    registration,sequence,state=comparison.preregister()
+    registration['delivery_manifest_sha256']=verify_bundle()
+    cache._write_json(output/'preregistration.json',registration)
+    rows=[]
+    for rho in cal['rho_grid']:
+        weights=dict(time_weight=base['time_weight']*rho/rho0,space_weight=base['space_weight']*rho/rho0)
+        print(f'sweep rho={rho} λ_t={weights["time_weight"]:.4g} λ_s={weights["space_weight"]:.4g}',flush=True)
+        model,loss=comparison.build_condition('po_jepa_full',device)
+        loss=comparison.replace(loss,**weights)
+        row=dict(rho=rho,**weights,output=f'rho-{rho}')
+        try:
+            report=comparison.run_prepared_condition('po_jepa_full',model,comparison.make_optimizer(model),
+                sequence=sequence,generator_state=state,registration=registration,features=features,
+                output=output/row['output'],device=device,loss_config=loss,
+                validation_interval=config['validation']['interval_updates'],target_rho=rho)
+            row.update(status='completed',best_validation=report['best']['mean'],best_step=report['best']['step'],
+                       consistency_monitor=report['consistency_monitor'])
+        except comparison.ConsistencyTooWeak as error:
+            row.update(status='consistency_too_weak',error=str(error))
+        rows.append(row);del model
+        cache._write_json(output/f"{row['output']}-result.json",row)
+    eligible=[r for r in rows if r['status']=='completed' and r['consistency_monitor']['active']]
+    if not eligible:
+        cache._write_json(output/'sweep.json',dict(rows=rows,selected=None))
+        raise ValueError('sweep 中所有 rho 的一致性都太弱或没跑完，停下把结果传回给 Jerry')
+    best=min(eligible,key=lambda r:(r['best_validation'],r['rho']))
+    result=dict(rows=rows,selected=best['rho'],rule='最小验证集 future_jepa_distance；并列取较小 rho；一致性太弱的候选不参与',
+                v4_overlay_sha256_before=cache.file_sha(OVERLAY))
+    write_calibrated_weights(best['time_weight'],best['space_weight'],f'JEPA 预训练后标定，sweep 选定 rho={best["rho"]}；{output.name}',rho=best['rho'])
+    result['v4_overlay_sha256_after']=cache.file_sha(OVERLAY)
+    cache._write_json(output/'sweep.json',result)
+    for r in rows:
+        print(f"rho={r['rho']}: {r['status']}"+(f"，验证集最佳 {r['best_validation']:.5f}（第 {r['best_step']} 步）" if r['status']=='completed' else ''),flush=True)
+    print(f"已选定 rho={best['rho']} 并写入 configs/train/v4.yaml，可以开始三个种子的正式实验。",flush=True)
+    return result
 
 
 def _gradient_rows(model,sequence,features,device,loss):
@@ -301,9 +358,12 @@ def execute(args):
     try:
         cache._write_json(output/'environment.json',environment.verify_versions())
         stage='calibration'
-        require_calibrated_weights()
+        require_calibrated_weights(swept=args.command not in ('check','sweep'))
         stage='preflight'
         receipt=preflight(Path(args.features_root),output/'check',device)
+        if args.command=='sweep':
+            stage='sweep'
+            sweep_rho(Path(args.features_root),output/'sweep',device)
         if args.command in ('train','run','resume'):
             stage='training'
             if args.command=='resume':

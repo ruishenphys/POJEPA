@@ -5,7 +5,9 @@
 - **原因：** v5 结果里 full 与无一致性几乎一样（测试 0.2061 vs 0.2059）。原因是 λ 在初始化状态下标定：那时一致性损失是训练 200 步后的上千倍，梯度是 JEPA 的 100–800 倍，λ 被定成 4.8e-4 / 6.0e-5。正式训练中加权一致性只占总损失约 1e-6，两个条件实际是同一个模型。
 - **新的标定（`run.py calibrate`）：** 先用与正式训练完全相同的初始化、查询序列、学习率调度和梯度裁剪，只用 JEPA 训练 `calibration.pretrain_updates: 300` 步（v5 日志显示初始化瞬态在约 150–200 步结束），再在紧接着的 32 个训练 batch 上量梯度范数中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ=0.05 不变。初始化状态下的数值也写进 calibration.json 作对照。v5 的旧标定会被拒绝。
   - 这与 P7 原文"初始化状态下标定"不同，需要和导师确认。
-- **监测（`monitoring.consistency_interval: 20`）：** full 条件每 20 次更新，在当次 batch 上分别量三项梯度范数（不改参数、优化器或随机数状态，续训仍逐位一致），把 share = λ·w(s)·|∇L_c|/|∇L_JEPA| 写进 `updates/*.json` 的 `consistency_gradient`。训练结束时 `report.json` 的 `consistency_monitor` 给出一致性预热之后的中位数；低于 ρ/10 时打印警告，并标记 `active: false`。
+- **监测（`monitoring.consistency_interval: 20`）：** full 条件每 20 次更新，在当次 batch 上分别量三项梯度范数（不改参数、优化器或随机数状态，续训仍逐位一致），把 share = λ·w(s)·|∇L_c|/|∇L_JEPA| 写进 `updates/*.json` 的 `consistency_gradient`。训练结束时 `report.json` 的 `consistency_monitor` 给出一致性预热之后的中位数；任一项低于 `monitoring.min_share: 0.005`（0.5%，v5 约 0.001%）时打印警告，并标记 `active: false`。门槛是绝对比例：CPU 冒烟中实际占比稳定在 ρ 的 1/10–1/5，按 ρ 的比例判会误杀正常候选。
+- **λ 消融（`run.py sweep`）：** 在种子 1703 上按 `calibration.rho_grid: [0.05, 0.2, 1.0]` 各完整训练一次 full（λ 与 ρ 成正比，梯度中位数只在 calibrate 量一次），按验证集最佳 future_jepa_distance 选 ρ（不看测试集，并列取较小 ρ），把 ρ 与对应 λ 写回 v4.yaml。train/run/resume/evaluate 要求先完成 sweep。原因：v5 中无一致性模型自己的一致性损失也只有约 1e-3（JEPA 0.23），JEPA 训练后的模型本来就近似满足一致性，ρ 太小时一致性对解几乎没有影响，所以必须让数据在几个有意义的强度里选。
+- **提前检查（`monitoring.early_check_updates: 400`）：** full 条件在第 400 步（一致性预热 200 步之后的 11 次测量）检查占比中位数，任一项低于 0.5% 立即停止（`ConsistencyTooWeak`，写 `early-check.json`），不再花完整训练时间。sweep 中被停下的候选不参与选择。
 - **多种子：** `run.py --seed 1703|1704|1705`（`default.yaml` 预登记的 `initial_model_seed` 与 `later_robustness_seeds`）。种子同时改模型初始化（PO-JEPA 和 Transformer）与训练查询序列（window_seed 平移相同的量）；验证与测试窗口不变。full 与无一致性在同一个种子内初始权重仍完全相同。三个种子共用一组 λ。
 - **汇总：** `tools/summarize_seeds.py` 读取各种子的评价结果，按 20 条测试轨迹配对比较（均值差、标准误、更好的轨迹数、符号检验），并给出三个种子平均后的结果。
 - **动作没被用上：** v5 中 PO-JEPA 与 Transformer 的 delta_act 都约为 0（Transformer 中位数正好是 0），说明不是 PO-JEPA 代码的问题，v6 不改。可能的原因是每个控制周期内动作造成的位移最多约 6 像素，不到一个 16 像素 token 的一半，V-JEPA 特征上的差别很小。是否加大动作幅度或更换评价方式，需要导师决定。

@@ -505,10 +505,11 @@ def test_uncalibrated_overlay_blocks_check_and_run(monkeypatch, tmp_path):
 
 
 def test_consistency_monitor_summary_flags_inactive_consistency(monkeypatch, tmp_path):
-    """v6：一致性预热结束后各次测量的占比中位数低于 rho/10 时判为没有真正参与训练（v5 的情形约 1e-5）。"""
+    """v6：一致性预热结束后各次测量的占比中位数低于 min_share（0.5%）时判为没有真正参与训练（v5 的情形约 1e-5）。"""
     from po_jepa.runtime import comparison
     real = checks.load_protocol()
-    monkeypatch.setattr(comparison.check, "load_protocol", lambda: {**real, "calibration": dict(rho=.05)})
+    monkeypatch.setattr(comparison.check, "load_protocol", lambda: {**real, "calibration": dict(rho=.05),
+                                                                   "monitoring": dict(min_share=.005)})
     config = LossConfig(1., 1e-5, 1., 1., 0., 0., consistency_warmup_updates=2)
     def write(folder, shares):
         (folder/"updates").mkdir(parents=True)
@@ -545,3 +546,63 @@ def test_seed_summary_tool_pairs_trajectories(tmp_path):
     run("c", 1703, 0.)
     with pytest.raises(SystemExit):
         tool.main([str(tmp_path/"a"), str(tmp_path/"c")])
+
+
+def test_early_check_stops_full_condition_when_consistency_is_too_weak(monkeypatch, tmp_path):
+    """v6：第 early_check_updates 步检查一次；占比中位数低于 min_share 抛 ConsistencyTooWeak，并留下 early-check.json。"""
+    from po_jepa.runtime import comparison
+    real = checks.load_protocol()
+    monkeypatch.setattr(comparison.check, "load_protocol",
+                        lambda: {**real, "calibration": dict(rho=.05), "monitoring": dict(consistency_interval=1, early_check_updates=4, min_share=.005)})
+    config = LossConfig(1., 1e-5, 1., 1., 0., 0., consistency_warmup_updates=2)
+    for name, share in (("weak", 1e-5), ("ok", .05)):
+        (tmp_path/name/"updates").mkdir(parents=True)
+        for step in range(1, 5):
+            row = dict(completed_updates=step, consistency_gradient=dict(share=dict(time=share, space=share)))
+            (tmp_path/name/"updates"/f"{step:04d}.json").write_text(json.dumps(row), encoding="utf-8")
+    comparison.early_check(tmp_path/"weak", "po_jepa_full", config, 3)            # 不是检查步，不动作
+    assert not (tmp_path/"weak/early-check.json").exists()
+    with pytest.raises(comparison.ConsistencyTooWeak, match="一致性太弱"):
+        comparison.early_check(tmp_path/"weak", "po_jepa_full", config, 4)
+    assert json.loads((tmp_path/"weak/early-check.json").read_text(encoding="utf-8"))["active"] is False
+    comparison.early_check(tmp_path/"ok", "po_jepa_full", config, 4)
+    comparison.early_check(tmp_path/"weak", "po_jepa_no_consistency", config, 4)  # 只检查 full
+    (tmp_path/"ok/early-check.json").unlink()                                    # 门槛是绝对比例，不随 rho 变
+    comparison.early_check(tmp_path/"ok", "po_jepa_full", config, 4, target_rho=1.)
+    assert json.loads((tmp_path/"ok/early-check.json").read_text(encoding="utf-8"))["rho"] == 1.
+
+
+def test_sweep_selects_rho_by_validation_and_skips_too_weak_candidates(monkeypatch, tmp_path):
+    """v6：λ 按 rho 等比例缩放；一致性太弱的候选不参与；按验证集最小误差选 rho，写回 v4.yaml 的 rho 与 λ。"""
+    from po_jepa.runtime import workflow as w
+    overlay = tmp_path/"v4.yaml"; overlay.write_bytes(w.OVERLAY.read_bytes())
+    monkeypatch.setattr(w, "OVERLAY", overlay)
+    w.write_calibrated_weights(.002, .004, "calibrate-test")
+    with pytest.raises(ValueError, match="sweep"):
+        w.require_calibrated_weights(swept=True)
+    real = w.checks.load_protocol
+    def protocol():
+        config = real()
+        loaded = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+        config["loss"] = {**config["loss"], **{k: loaded["loss"][k] for k in ("time_weight", "space_weight")}}
+        config["calibration"] = {**config["calibration"], "rho": loaded["calibration"]["rho"], "rho_grid": [.05, .2, 1.]}
+        return config
+    monkeypatch.setattr(w.checks, "load_protocol", protocol)
+    monkeypatch.setattr(w.comparison, "preregister", lambda: ({}, [], None))
+    monkeypatch.setattr(w, "verify_bundle", lambda: "fictional")
+    monkeypatch.setattr(w.comparison, "build_condition", lambda c, d: (torch.nn.Linear(1, 1), LossConfig(1., 1e-5, 1., 1., .002, .004)))
+    monkeypatch.setattr(w.comparison, "make_optimizer", lambda m: None)
+    seen = []
+    def run(condition, model, optimizer, *, loss_config, target_rho, output, **k):
+        seen.append((target_rho, loss_config.time_weight, loss_config.space_weight))
+        if target_rho == .05:
+            raise w.comparison.ConsistencyTooWeak("一致性太弱")
+        return dict(best=dict(mean={.2: .21, 1.: .20}[target_rho], step=2000), consistency_monitor=dict(active=True))
+    monkeypatch.setattr(w.comparison, "run_prepared_condition", run)
+    result = w.sweep_rho(None, tmp_path/"sweep", torch.device("cpu"))
+    assert [s[0] for s in seen] == [.05, .2, 1.]
+    assert seen[1][1:] == pytest.approx((.002*4, .004*4)) and seen[2][1:] == pytest.approx((.002*20, .004*20))
+    assert result["selected"] == 1. and result["rows"][0]["status"] == "consistency_too_weak"
+    written = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    assert written["calibration"]["rho"] == 1. and written["loss"]["time_weight"] == pytest.approx(.04)
+    w.require_calibrated_weights(swept=True)

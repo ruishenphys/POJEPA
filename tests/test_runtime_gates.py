@@ -162,7 +162,7 @@ def test_actual_resume_matches_continuous_state(monkeypatch,tmp_path,condition,s
     monkeypatch.setattr(c,'validate_condition',validate)
     # v6：每步都量一致性梯度占比，续训仍须与连续训练逐位一致（测量不改参数、优化器或 RNG）。
     monkeypatch.setattr(w.checks,'load_protocol',lambda:{'validation':{'interval_updates':2},
-        'loss':asdict(e06_config()),'monitoring':{'consistency_interval':1},'calibration':{'rho':.05}})
+        'loss':asdict(e06_config()),'monitoring':{'consistency_interval':1,'early_check_updates':10**6,'min_share':.005},'calibration':{'rho':.05}})
     original=c.condition_step; active={'fail':False}; attempted=[]
     def step(*a,**k):
         completed=a[-1];attempted.append(completed)

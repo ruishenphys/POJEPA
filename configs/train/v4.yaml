@@ -31,5 +31,8 @@ calibration:
   rho: 0.05                      # lambda_c = rho * median|grad L_JEPA| / median|grad L_c|，即加权一致性梯度约为 JEPA 梯度的 5%
   pretrain_updates: 300          # v6：先只用 JEPA 按正式训练的同一初始化/查询/学习率训练 300 步，越过初始化瞬态后再量梯度
   batches: 32                    # 紧接着的 32 个训练 batch，取逐 batch 梯度范数的中位数（单个离群 batch 曾把均值拉偏约 7 倍）
+  rho_grid: [0.05, 0.2, 1.0]     # v6：sweep 在种子 1703 上按这三个 rho 各训练一次 full，按验证集误差选一个，改写上面的 rho 与 λ
 monitoring:
   consistency_interval: 20       # v6：full 条件每 20 次更新量一次加权一致性梯度/JEPA 梯度之比，写进 updates/*.json
+  early_check_updates: 400       # v6：第 400 步（一致性预热 200 步之后的 11 次测量）检查；任一项占比中位数低于 min_share 立即停止
+  min_share: 0.005               # v6：加权一致性梯度至少是 JEPA 梯度的 0.5% 才算参与训练（v5 约 0.001%）

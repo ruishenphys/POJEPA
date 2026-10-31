@@ -153,7 +153,7 @@
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
       "executable_ast_sha256": "75d7fdaa8dad8b1ff51a758c969bdcf6d83827ec8fc7e1d7df5416642df5532b",
       "prior_operation": "dependency_closure_and_resource_relocation",
-      "v4_previous_candidate_sha256": "19a2e334872eef2f6ee1fb19285f419698898cd4f7ed1606efeed0a481cec426"
+      "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
     },
     {
       "source": "delivery/po-jepa/src/po_jepa/runtime/cli.py",
@@ -161,9 +161,9 @@
       "sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "f5a0492b6975934b86287616db5ce42217ea7fc49dbf2e478725f0ecda967a3d",
+      "candidate_sha256": "855cf3a5c01e5065fe0e3958c7927e4ca1568b1515428a89d32abbae3ec31c56",
       "comment_cleanup_baseline_sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
-      "executable_ast_sha256": "98f95e6a5b2c5a3f360d7bb52b596645484411cf5fa764acbe60beed48982b63",
+      "executable_ast_sha256": "ac60725444474fc5fe0ee2539573ed8360a962cccdc59dee63052c0d39b52207",
       "prior_operation": "existing_v3_runtime",
       "cleanup_history": [
         {
@@ -177,7 +177,7 @@
         }
       ],
       "executable_ast_basis": "R09 limited import/help delta from afcba055ceabb5a16a89c4d6a5f1bb450427eedc",
-      "v4_previous_candidate_sha256": "65db66a2c94b605607c41ac587f9fd70dc02eef967b60e8b29c77735abe1f530"
+      "v4_previous_candidate_sha256": "f5a0492b6975934b86287616db5ce42217ea7fc49dbf2e478725f0ecda967a3d"
     },
     {
       "source": "first_round/scripts/compare_simulation.py",
@@ -211,12 +211,12 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
+      "candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "fbec6266940cff2e8a94d9be59942290d638c012771024b088d38e81c918d410",
+      "executable_ast_sha256": "a32604039f865e9d486eb3187fc4ebde03198b597a9dbca2c6300edcbc8599ce",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
-      "v4_previous_candidate_sha256": "e55c128fa5dfc0e05ab312d2b7e9a89c4a3249992660c0eff0b1774f89348133"
+      "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925"
     },
     {
       "source": "first_round/scripts/real_training_batch.py",
@@ -287,7 +287,7 @@
       "comment_cleanup_baseline_sha256": "d3d39eb924d97ab9f3be719d0d24f74235296bcb704d0428c42da552d1e4bdae",
       "executable_ast_sha256": "a96fcd350cdf2e549937c79812a33bc59992d222745b1a0c1f342da4bfe87c9f",
       "prior_operation": "dependency_closure_and_resource_relocation",
-      "v4_previous_candidate_sha256": "4e7635de3b29c2ac85381af86afde6b7db3f987f8bc37d2cc280af04cab8833c"
+      "v4_previous_candidate_sha256": "6a0c67f40a5ba28bdb553d0222ac7251ef58b374a700f4e9338227b2103178a5"
     },
     {
       "source": "first_round/scripts/learn_simulation.py",
@@ -371,11 +371,11 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
+      "candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "84dc358b5ecc1fa1f558bf9d019d54d5f86b29ade7e35aabf259a4d6c95a55e7",
+      "executable_ast_sha256": "1c9bc4495dd7086de28c713e792b1a459b5f2378ee09770086ee1f1b928931f4",
       "prior_operation": "existing_v3_runtime",
-      "v4_previous_candidate_sha256": "41a35d8d77bc0b19b8bdec4446441a75b36aed1657aa02584bbcb55e7ddb72d2"
+      "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418"
     },
     {
       "source": "first_round/src/po_jepa/simulation.py",

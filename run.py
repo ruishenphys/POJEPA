@@ -9,7 +9,7 @@ import sys
 def main(argv=None):
     """只启动当前解释器的唯一运行实现；help没有缓存、权重或GPU访问。"""
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate'))
+    parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate','sweep'))
     parser.add_argument('--features-root',required=True)
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--output',type=Path,required=True)
@@ -23,7 +23,7 @@ def main(argv=None):
     if args.command=='evaluate' and args.training_run is None:parser.error('evaluate需要--training-run')
     if args.command=='resume' and args.resume_from is None:parser.error('resume需要--resume-from')
     if args.command!='resume' and args.resume_from is not None:parser.error('--resume-from仅用于resume')
-    if args.command=='calibrate' and args.seed!=1703:parser.error('calibrate只用种子1703；三个种子共用同一组λ')
+    if args.command in ('calibrate','sweep') and args.seed!=1703:parser.error('calibrate/sweep只用种子1703；三个种子共用同一组λ')
     if args.resume_from and args.output.resolve().is_relative_to(args.resume_from.resolve()):
         parser.error('续训新输出必须位于旧训练目录之外，不能写入原证据')
     root=Path(__file__).resolve().parent

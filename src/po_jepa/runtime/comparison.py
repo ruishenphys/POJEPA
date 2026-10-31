@@ -435,7 +435,8 @@ def _observed_update(condition, model, optimizer, batch, config, completed):
     return result, scales
 
 def run_prepared_condition(condition, model, optimizer, *, sequence, generator_state, registration,
-                           features, output, device, loss_config, validation_interval, resume_from=None):
+                           features, output, device, loss_config, validation_interval, resume_from=None,
+                           target_rho=None):
     """一次持有一个条件模型，连续计步、验证和保存；调用者须先核资源门槛。
 
     三条件传同一实际查询序列；旧来源不得重标后复用。各步同步计时，
@@ -485,13 +486,14 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
                 update_and_observer_seconds=seconds,consistency_gradient=share,
                 gpu_memory=check._memory(device) if device.type == "cuda" else None))
             del batch
+            early_check(output, condition, loss_config, completed, target_rho)
             if completed % validation_interval == 0 or completed == len(sequence):
                 row,best = _selection(condition,model,optimizer,features,output,device,loss_config,
                     completed,generator_state,provenance,best)
                 validations.append(row)
-        monitor = consistency_monitor_summary(output, condition, loss_config)
+        monitor = consistency_monitor_summary(output, condition, loss_config, target_rho)
         if monitor is not None and not monitor["active"]:
-            detail = (f"中位数只有 {monitor['median_share']}，低于 rho/10={monitor['threshold']}"
+            detail = (f"中位数只有 {monitor['median_share']}，低于门槛 {monitor['threshold']}"
                       if monitor["measurements"] else "一致性预热结束后没有任何测量")
             print(f"警告：{condition} 的加权一致性梯度占 JEPA 梯度的比例{detail}，一致性项可能没有真正参与训练", flush=True)
         report = dict(status="completed_prepared_condition_only",condition=condition,evidence_role=role,
@@ -524,19 +526,40 @@ def consistency_share(condition, model, batch, loss_config, completed):
     return dict(**norms, warmup_scale=scale,
         share={k: w*scale*norms["grad_"+k]/norms["grad_jepa"] if norms["grad_jepa"] > 0 else None for k, w in weights.items()})
 
-def consistency_monitor_summary(output, condition, loss_config):
-    """v6：读本条件全部更新记录，取一致性预热结束后各次测量的中位数；低于 rho/10 判为“没有真正参与”。"""
+def consistency_monitor_summary(output, condition, loss_config, target_rho=None):
+    """v6：读本条件全部更新记录，取一致性预热结束后各次测量的中位数；任一项低于 monitoring.min_share 判为“没有真正参与”。
+
+    门槛是绝对比例（默认 0.5%，v5 约 0.001%），不随 rho 变：CPU 冒烟里实际占比稳定在 rho 的 1/10–1/5
+    （标定点之后一致性梯度相对变小），按 rho 的比例判会误杀正常候选。rho 只作记录，默认取 v4.yaml 的 calibration.rho。
+    """
     if condition != "po_jepa_full":
         return None
     config = check.load_protocol()
+    rho = config["calibration"]["rho"] if target_rho is None else target_rho
+    threshold = config["monitoring"]["min_share"]
     rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((Path(output)/"updates").glob("*.json"))]
     rows = [r for r in rows if r.get("consistency_gradient") and r["completed_updates"] >= loss_config.consistency_warmup_updates]
     if not rows:
-        return dict(measurements=0, active=False, median_share=None, threshold=config["calibration"]["rho"]/10)
+        return dict(measurements=0, rho=rho, active=False, median_share=None, threshold=threshold)
     median = {k: statistics.median(r["consistency_gradient"]["share"][k] for r in rows) for k in ("time", "space")}
-    threshold = config["calibration"]["rho"]/10
-    return dict(measurements=len(rows), rho=config["calibration"]["rho"], threshold=threshold,
+    return dict(measurements=len(rows), rho=rho, threshold=threshold,
                 median_share=median, active=all(v >= threshold for v in median.values()))
+
+class ConsistencyTooWeak(ValueError):
+    """v6 提前检查：一致性预热结束后，加权一致性梯度明显小于设定比例，继续训练没有意义。"""
+
+def early_check(output, condition, loss_config, completed, target_rho=None):
+    """v6：full 条件在第 monitoring.early_check_updates 次更新后检查一次；占比中位数低于 min_share 立即停止，
+    不再花完整训练时间去跑一个“一致性没参与”的模型（v5 的情形约 1e-5）。"""
+    step = check.load_protocol()["monitoring"]["early_check_updates"]
+    if condition != "po_jepa_full" or completed != step:
+        return
+    monitor = consistency_monitor_summary(output, condition, loss_config, target_rho)
+    data.cache._write_json(Path(output)/"early-check.json", dict(completed_updates=completed, **monitor))
+    print(f"一致性提前检查（第 {completed} 步）：占比中位数 {monitor['median_share']}，设定 rho={monitor['rho']}", flush=True)
+    if not monitor["active"]:
+        raise ConsistencyTooWeak(f"一致性太弱：第 {completed} 步时加权一致性梯度占 JEPA 梯度的中位数为 "
+                                 f"{monitor['median_share']}，低于门槛 {monitor['threshold']}，已停止该条件")
 
 def comparison_table(reports, identity, registration):
     """只整理各自验证集选中点，不用TCD/SCD选模型，不将表格自动解释成因果收益。"""

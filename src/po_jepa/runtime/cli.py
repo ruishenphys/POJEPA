@@ -10,7 +10,8 @@ def main(argv=None):
     for command,help_text in (('check','核依赖、设备、完整梯度、100更新及400窗成本'),('train','预检后训练三个条件'),
         ('resume','从明确旧训练目录恢复到新目录，不覆盖失败证据'),
         ('evaluate','只评价已完成训练的选中点'),('run','预检、训练、留出评价全部顺序执行'),
-        ('calibrate','v6：先只用 JEPA 预训练若干步，再按梯度比标定一致性权重 lambda_t/lambda_s')):
+        ('calibrate','v6：先只用 JEPA 预训练若干步，再按梯度比标定一致性权重 lambda_t/lambda_s'),
+        ('sweep','v6：种子1703上按 rho_grid 各训练一次 full，按验证集选 rho 并写入 v4.yaml')):
         task=sub.add_parser(command,help=help_text)
         task.add_argument('--features-root',type=Path,required=True,help='交接包内已包含的冻结特征缓存根目录')
         task.add_argument('--device',default='cuda:0',help='4090/A100的显式cuda:N')
