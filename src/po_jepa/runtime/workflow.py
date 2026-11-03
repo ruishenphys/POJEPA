@@ -127,15 +127,15 @@ def verify_selection(root,report):
     if steps[-1]!=budget:steps.append(budget)
     if [r['step'] for r in report['validations']]!=steps:raise ValueError('validation schedule differs')
     for row in report['validations']:
-        if row['windows']!=400 or row['metric']!='future_jepa_distance':raise ValueError('validation metric/count differs')
+        if row['windows']!=len(expected) or row['metric']!='future_jepa_distance':raise ValueError('validation metric/count differs')
         folder=root/'validations'/f"{row['step']:04d}";total=0.
-        for offset in range(0,400,4):
+        for offset in range(0,len(expected),4):
             batch=read(folder/f'{offset:04d}.json')
             if batch['queries']!=expected[offset:offset+4]:raise ValueError('validation query differs')
             values=torch.tensor(batch['values']['future_jepa_distance'],dtype=torch.float64)
             if values.shape!=(4,) or not torch.isfinite(values).all() or (values<0).any():raise ValueError('invalid validation values')
             total+=values.sum().item()
-        if total/400!=row['mean']:raise ValueError('validation mean differs from original 400 values')
+        if total/len(expected)!=row['mean']:raise ValueError('validation mean differs from original 400 values')
     best=min(report['validations'],key=lambda r:(r['mean'],r['step']))
     if best!=report['best']:raise ValueError('selected checkpoint differs from fixed future-only rule')
     return best
@@ -221,7 +221,7 @@ def require_calibrated_weights(swept=False):
     if checks.is_v7():
         path=checks.v7_calibration_path()
         if not path.exists() or checks.load_protocol().get('v7_uncalibrated'):
-            raise ValueError(f'v7：{data.datasets.active().tag}（{checks.v7_updates()} 步）还没标定：请先运行 python run.py calibrate（会写入 {path.relative_to(ROOT).as_posix()}）')
+            raise ValueError(f'v7：{data.datasets.active().tag}（{checks.v7_updates()} 步）还没标定：请先运行 python run.py calibrate（会写入 {path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else path}）')
         return
     lines=[l for l in OVERLAY.read_text(encoding='utf-8').splitlines() if l.strip().startswith(('time_weight:','space_weight:'))]
     if len(lines)!=2 or any(PLACEHOLDER in l or CALIBRATED_MARK not in l for l in lines):
@@ -250,7 +250,7 @@ def write_v7_calibration(values,source):
     """v7：把 σ_z / λ 写进本数据集的标定文件（整份重写，保留已有键）。"""
     path=checks.v7_calibration_path();path.parent.mkdir(parents=True,exist_ok=True)
     current=yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {}
-    current=dict(dict(time_weight=None,space_weight=None,sigma_z=None),**current,**values)
+    current={**dict(time_weight=None,space_weight=None,sigma_z=None),**current,**values}
     current['source']=source
     header=f'# v7 标定（run.py calibrate 自动写入，勿手改）：{data.datasets.active().tag}，{checks.v7_updates()} 步\n'
     path.write_text(header+yaml.safe_dump(current,allow_unicode=True,sort_keys=True),encoding='utf-8')
@@ -386,7 +386,7 @@ def calibrate_weights(features,output,device):
     if checks.is_v7():
         path=write_v7_calibration(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],rho=rho),
                                   f'JEPA 预训练 {pre} 步后标定；{output.name}')
-        result['v7_calibration_file']=path.relative_to(ROOT).as_posix()
+        result['v7_calibration_file']=path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
         result['note']=f'σ_z 与 λ 已写入 {result["v7_calibration_file"]}；三个种子共用'
     else:
         write_calibrated_weights(result['time_weight'],result['space_weight'],f'JEPA 预训练 {pre} 步后；{output.name}')

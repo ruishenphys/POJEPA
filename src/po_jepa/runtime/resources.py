@@ -54,7 +54,7 @@ def resource_check(features, output, device):
     synchronize(device); seconds=time.perf_counter()-started
     memory=checks._memory(device) if device.type=='cuda' else None
     validation=comparison.validate_condition(model,features,output/'validation',device,config)
-    if (completed!=100 or validation['windows']!=400 or not math.isfinite(seconds) or seconds<=0
+    if (completed!=100 or validation['windows']!=4*5*len(data.datasets.validation_ids()) or not math.isfinite(seconds) or seconds<=0
         or not math.isfinite(validation['seconds']) or validation['seconds']<=0
         or not math.isfinite(validation['mean']) or validation['mean']<0):
         raise ValueError('incomplete/nonfinite resource acceptance')

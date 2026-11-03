@@ -364,7 +364,7 @@ def validate_condition(model, features, output, device, config):
     try:
         model.eval()
         with torch.no_grad():
-            for offset in range(0,400,4):
+            for offset in range(0,len(queries),4):
                 rows = queries[offset:offset+4]
                 windows = data.load_windows(features, rows, split="validation", device=str(device))
                 for window in windows: data._window_boundary(window, windows[0])
@@ -384,7 +384,7 @@ def validate_condition(model, features, output, device, config):
     finally:
         for module, mode in modes.items(): module.training = mode
     if device.type == "cuda": torch.cuda.synchronize(device)
-    if count != 400 or check._parameter_identity(model) != identity:
+    if count != len(queries) or check._parameter_identity(model) != identity:
         raise ValueError("validation count or unchanged parameter/gradient contract failed")
     means = {name:value/count for name,value in totals.items()}
     return dict(metric="future_jepa_distance", mean=means["future_jepa_distance"], means=means,

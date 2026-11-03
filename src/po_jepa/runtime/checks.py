@@ -381,7 +381,7 @@ def validation_cost(model, features, output, device, config) -> dict:
         for module, mode in modes.items():
             module.training = mode
     torch.cuda.synchronize(device)
-    if count != 400 or _parameter_identity(model) != identity:
+    if count != len(queries) or _parameter_identity(model) != identity:
         raise ValueError("validation count or unchanged parameter/gradient contract failed")
     return dict(windows=count, batch=4, metric="future_jepa_distance", mean=total/count,
                 seconds=time.perf_counter()-start_time, includes_loading_and_validation_logging=True,
