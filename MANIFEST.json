@@ -94,6 +94,7 @@
     "tools/v4_validation/short_train_v4_result_rho005.json": "b24adee1b03ac0b3bf66fabaafee62e3bbc47788cb9caf123fe2164c83eb955b",
     "tools/v4_validation/short_train_v4_result_space_only.json": "eadc31327d7295a8b61af84787f491a92a72f5f730e38d0b3bcd239ba6d06b04",
     "tools/v4_validation/short_train_v4_result_time_only.json": "682b58761b41e9c10bcb2e3a70ba631292044749b55f364a8b70fc73eb21afb1",
+    "运行清单_正式运行.md": "377e860c8e771cac2fff1b5beb144640fbe5aa4a87f33fb6f0b8e36f65d5d8a6",
     "运行清单_给算力方.md": "c5355665ce9837b72859966eb2977f82fec7ddd2e6dbf637b7153dfd03507a7e"
   }
 }
