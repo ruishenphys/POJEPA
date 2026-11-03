@@ -34,6 +34,7 @@ from po_jepa.actions import ControlSpec,ActionSegments,from_physical_segments,cl
 from po_jepa.geometry import GridSpec,regular_grid,build_spatial_transfer
 
 from po_jepa.simulation import TrajectoryControls,sample_controls,split_for
+from po_jepa import datasets
 
 PAPER_SHA="d851778ecf4a1f160da9c681a831b3bc9333dae2b60eaeefa6090c0af44aaff1"
 
@@ -133,6 +134,10 @@ def _read_complete_cache_uncached(path: Path) -> tuple[np.ndarray,dict,str]:
     manifest_sha=file_sha(path/"manifest.json")
     if complete.get("manifest_sha256")!=manifest_sha:raise ValueError("manifest SHA mismatch")
     m=json.loads((path/"manifest.json").read_bytes());verify_fixed_protocol()
+    if m.get("schema_version")==V7_SCHEMA:
+        return _read_v7_cache(path,m,manifest_sha)
+    if not datasets.active().is_v6_default:
+        raise ValueError("v6 cache (200 double-well trajectories) used with a different v7 dataset; check --system/--trajectories")
     if (m.get("schema_version")!=1 or m.get("status")!="complete" or m.get("feature_file")!="raw_z.npy"
         or m.get("shape")!=[33,256,1408] or m.get("dtype")!="float32"
         or m.get("grid")!=[16,16] or m.get("token_order")!="row_major"
@@ -171,6 +176,55 @@ def _read_complete_cache_uncached(path: Path) -> tuple[np.ndarray,dict,str]:
     if m["preprocess_sha256"]!=expected_preprocess:raise ValueError("preprocess metadata SHA mismatch")
     return raw,m,manifest_sha
 
+V7_SCHEMA=2
+V7_DTYPES={"float16":np.float16,"float32":np.float32}
+
+def _read_v7_cache(path: Path,m: dict,manifest_sha: str) -> tuple[np.ndarray,dict,str]:
+    """v7 缓存（tools/encode_v7.py 写出）：按系统/条数/划分、特征 SHA、控制与逐帧来源核验。
+
+    与 v6 相同的冻结编码器（同一权重 SHA、同一上游提交、同一预处理）；区别是物理系统、
+    轨迹条数可变，特征可存 float16（读取窗口时转回 float32）。
+    """
+    spec=datasets.active()
+    if (m.get("status")!="complete" or m.get("feature_file")!="raw_z.npy"
+        or m.get("system")!=spec.system or m.get("dataset_count")!=spec.count
+        or m.get("shape")!=[33,256,1408] or m.get("dtype") not in V7_DTYPES
+        or m.get("grid")!=[16,16] or m.get("token_order")!="row_major"
+        or m.get("split")!=split_for(m["trajectory_id"]) or m.get("observation_variant")!="canonical"
+        or m.get("preprocess_sha256")!=v7_preprocess_sha256()):
+        raise ValueError("v7 cache schema/system/count/split mismatch (check --system/--trajectories)")
+    g=m["generation"]
+    if (g.get("evidence_role")!="real_frozen_encoder" or g.get("encoder_checkpoint_sha256")!=CHECKPOINT_SHA
+        or g.get("upstream_commit")!=vjepa.UPSTREAM_COMMIT or g.get("preprocess")!=_v7_preprocess_record()):
+        raise ValueError("v7 cache encoder/preprocess provenance mismatch")
+    report=g["encoder_load_report"]
+    if (report["sha256"]!=CHECKPOINT_SHA or report["encoder_key"]!="target_encoder" or report["strict"] is not True
+        or report["missing_keys"] or report["unexpected_keys"]):raise ValueError("invalid real encoder provenance")
+    if file_sha(path/"raw_z.npy")!=m["feature_sha256"]:raise ValueError("feature SHA mismatch")
+    raw=np.load(path/"raw_z.npy",allow_pickle=False,mmap_mode="r")
+    if raw.dtype!=V7_DTYPES[m["dtype"]] or raw.shape!=(33,256,1408) or not np.isfinite(raw).all():
+        raise ValueError("invalid actual raw Z array")
+    expected=sample_controls(m["trajectory_id"]);c=m["controls"]
+    if any(not np.array_equal(np.asarray(c[key]),value) for key,value in
+        (("starts_ticks",expected.starts_ticks),("ends_ticks",expected.ends_ticks),("values",expected.values))):
+        raise ValueError("v7 cache controls differ from the registered random stream of this system")
+    if len(m["frames"])!=33:raise ValueError("incomplete endpoint provenance")
+    for tick,f in enumerate(m["frames"]):
+        if (f.get("tick")!=tick or f.get("time_seconds")!=tick*.25 or type(f.get("image_sha256")) is not str
+            or len(f["image_sha256"])!=64):raise ValueError("endpoint source mismatch")
+    return raw,m,manifest_sha
+
+def v7_preprocess_sha256() -> str:
+    """v7 预处理摘要：固定 DROID 变换 + “每帧前重置同轨迹 generator”规则。"""
+    return hashlib.sha256(_json_bytes(dict(spec=_v7_preprocess_record(),
+        rule="reset_same_trajectory_generator_state_before_each_single_frame"))).hexdigest()
+
+def _v7_preprocess_record() -> dict:
+    """写入 v7 manifest 的预处理描述（与 v6 相同的固定 DROID 变换）。"""
+    p=preprocess_spec()
+    return dict(input_dtype=str(p.input_dtype),input_range=list(p.input_range),crop_size=p.crop_size,
+        crop_scale=list(p.crop_scale),crop_ratio=list(p.crop_ratio),mean=list(p.mean),std=list(p.std),source=p.source)
+
 def _window_controls(m: dict,start_tick: int,total: float,device: str):
     """物理控制转换后裁剪，局部周期从0开始，保留起点物理秒原点。"""
     data=m["controls"];c=TrajectoryControls(m["trajectory_id"],np.array(data["starts_ticks"],dtype=np.int64),
@@ -197,8 +251,9 @@ def read_window(path: Path,*,start_tick: int,duration_cycles: float,expected_spl
     if m["split"]!=expected_split:raise ValueError("cross-split cache/window request")
     with torch.inference_mode(False),torch.no_grad():
         # 显式复制离开memmap/外层inference，后续可训练投影允许用其输入反传。
-        z=torch.from_numpy(np.array(raw[start_tick:start_tick+1],copy=True)).to(device).clone()
-        target=torch.from_numpy(np.array(raw[end:end+1],copy=True)).to(device).clone()
+        # v7：float16 缓存在这里转回 float32；v6 float32 缓存逐位不变。
+        z=torch.from_numpy(np.array(raw[start_tick:start_tick+1],dtype=np.float32,copy=True)).to(device).clone()
+        target=torch.from_numpy(np.array(raw[end:end+1],dtype=np.float32,copy=True)).to(device).clone()
         duration=torch.tensor([float(duration_cycles)],dtype=torch.float64,device="cpu")
         observed=torch.tensor([start_tick*.25],dtype=torch.float64,device="cpu")
         controls=_window_controls(m,start_tick,float(duration_cycles),device)

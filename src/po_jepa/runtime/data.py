@@ -36,6 +36,8 @@ def consumer_sources() -> dict:
 
 def approved_cache_metadata(root: Path) -> dict:
     """核已封存的整套冻结缓存摘要，不重新编码或复跑数值门槛。"""
+    if not datasets.active().is_v6_default:
+        return _v7_cache_metadata(Path(root))
     record_path = ROOT/"reference/cache_asset.json"
     accepted = json.loads(record_path.read_bytes())
     if not accepted["approved"]:
@@ -53,6 +55,24 @@ def approved_cache_metadata(root: Path) -> dict:
     if len(records) != datasets.active().count or set(manifests) != set(range(datasets.active().count)):
         raise ValueError("approved F02 trajectory manifest inventory incomplete")
     return dict(accepted_record_sha256=cache.file_sha(record_path), encode_report_sha256=expected,
+                manifest_sha256_by_id=manifests)
+
+def _v7_cache_metadata(root: Path) -> dict:
+    """v7：核 tools/encode_v7.py 写出的整套缓存（根目录 report.json + COMPLETE.json），系统与条数须与当前数据集一致。"""
+    spec = datasets.active()
+    report_path = root/"report.json"
+    report = json.loads(report_path.read_bytes())
+    complete = json.loads((root/"COMPLETE.json").read_bytes())
+    digest = cache.file_sha(report_path)
+    if (complete.get("report_sha256") != digest or report.get("status") != "passed"
+        or report.get("mode") != "encode_v7" or report.get("system") != spec.system
+        or report.get("dataset_count") != spec.count):
+        raise ValueError(f"v7 feature root is not a complete encode of {spec.tag}; run encode/finalize first")
+    records = report["records"]
+    manifests = {row["trajectory_id"]: row["manifest_sha256"] for row in records}
+    if len(records) != spec.count or set(manifests) != set(range(spec.count)):
+        raise ValueError("v7 trajectory manifest inventory incomplete")
+    return dict(encode_report_sha256=digest, system=spec.system, dataset_count=spec.count,
                 manifest_sha256_by_id=manifests)
 
 @dataclass(frozen=True)
