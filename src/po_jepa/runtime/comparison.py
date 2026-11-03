@@ -5,6 +5,7 @@
 """
 
 import argparse
+import functools
 
 from dataclasses import asdict, fields, replace
 
@@ -55,12 +56,22 @@ from po_jepa.model import POJEPA
 ROOT = Path(__file__).resolve().parents[3]
 
 CONDITIONS = ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full")
+# v7：外部基线 V-JEPA 2-AC 两个版本（官方规模微调 / 参数匹配缩小版）；只在 v7 协议下可用
+from po_jepa.ac_baseline import AC_CONDITIONS, ACPredictor
+V7_CONDITIONS = (*CONDITIONS, *AC_CONDITIONS)
+
+def is_ac(condition) -> bool:
+    return condition in AC_CONDITIONS
 
 def consumer_sources():
     """当前消费者的.py摘要，与冻结编码生成来源及独立YAML摘要分开。"""
     sources = data.consumer_sources()
-    for name in ("src/po_jepa/runtime/learning.py", "src/po_jepa/baselines.py",
-                 "src/po_jepa/runtime/comparison.py"):
+    names = ["src/po_jepa/runtime/learning.py", "src/po_jepa/baselines.py", "src/po_jepa/runtime/comparison.py"]
+    if check.is_v7():   # v7：AC 基线、独立任务入口也进预登记，同一 (数据集, 种子) 的各任务必须用同一份代码
+        names += ["src/po_jepa/ac_baseline.py", "src/po_jepa/third_party/vjepa2_ac.py", "src/po_jepa/runtime/ac_training.py",
+                  "src/po_jepa/runtime/v7jobs.py", "src/po_jepa/runtime/plots.py", "src/po_jepa/systems.py",
+                  "src/po_jepa/datasets.py"]
+    for name in names:
         sources[name] = data.cache.file_sha(ROOT/name)
     return sources
 
@@ -117,7 +128,7 @@ def choose_architecture() -> dict:
     for width in config["feedforward_candidates"]:
         spec = TransformerSpec(encoder_dim=config["encoder_dim"], action_dim=config["action_dim"],
             width=config["width"], heads=config["heads"], layers=config["layers"], feedforward=width,
-            dropout=config["dropout"], layer_norm_epsilon=config["layer_norm_epsilon"])
+            dropout=config["dropout"], layer_norm_epsilon=config["layer_norm_epsilon"], residual=check.is_v7())
         counts = parameter_counts(_make_transformer(spec, torch.device("cpu")))
         rows.append(dict(spec=asdict(spec), counts=counts, **parameter_match(po_counts["total"], counts["total"])))
     if not rows:
@@ -127,11 +138,26 @@ def choose_architecture() -> dict:
         po_modules=po_counts["modules"], transformer_modules=winner["counts"]["modules"],
         selected=winner["spec"], candidates=rows, selection=load_comparison_config()["selection"])
 
+@functools.lru_cache(maxsize=1)
+def _ac_parameter_counts():
+    """AC 参数量：CPU 上构造一次再计数（官方代码的 drop-path 初始化不支持 meta 设备）；不扰动全局随机状态。"""
+    from po_jepa import ac_baseline
+    with torch.random.fork_rng(devices=[]):
+        return {c: ac_baseline.parameter_count(ac_baseline.ACPredictor(ac_baseline.spec_for(c))) for c in AC_CONDITIONS}
+
+
 def preregister():
     """只构造CPU模型计数并生成共用查询，不编码、训练或评价；返回登记/序列/末状态。"""
     matching = choose_architecture()
     sequence, state = learning.make_query_sequence(check.load_protocol())
-    return dict(schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
+    extra = {}
+    if check.is_v7():
+        from po_jepa import ac_baseline, datasets
+        counts = _ac_parameter_counts()
+        extra = dict(protocol="v7", dataset=datasets.active().tag, updates=check.v7_updates(),
+                     ac_parameters=counts, ac_baselines={c: ac_baseline.describe(c) for c in AC_CONDITIONS},
+                     ac_small_parameter_match=parameter_match(matching["po_parameters"], counts["vjepa2_ac_small"]))
+    return dict(**extra, schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
         model_seed=check.model_seed(),
         parameter_match=matching, query_sequence_sha256=sequence_sha(sequence),
         consumer_sha256=consumer_sources(),
@@ -145,6 +171,13 @@ def build_condition(condition: str, device):
     loss = LossConfig(**{f.name:config["loss"][f.name] for f in fields(LossConfig)})
     if condition == "identity":
         return IdentityPredictor().to(device), loss
+    if is_ac(condition):
+        if not check.is_v7():
+            raise ValueError("V-JEPA 2-AC baselines exist only in the v7 protocol")
+        from . import ac_training
+        model, info = ac_training.build(condition, device)
+        model.ac_condition, model.ac_info = condition, info
+        return model, replace(loss, time_weight=0., space_weight=0.)
     if condition not in CONDITIONS:
         raise ValueError("unapproved condition")
     if condition == "matched_transformer":
@@ -171,6 +204,9 @@ def _tf_parameters(model) -> list:
 
 def make_optimizer(model):
     """全部预测器参数恰一次进入原AdamW设置；identity没有优化器。"""
+    if isinstance(model, ACPredictor):
+        from . import ac_training
+        return ac_training.make_optimizer(model, model.ac_condition)
     if isinstance(model, POJEPA):
         return training.make_optimizer(model)
     parameters = _tf_parameters(model)
@@ -259,7 +295,7 @@ def evaluate_batch(model, raw, controls, duration, transfer, target, loss_config
         temporal = temporal_predictions(model, raw, controls, tau, sigma, transfer.source)
         spatial = spatial_predictions(model, raw, controls, duration, transfer)
     else:
-        if not isinstance(model, (TokenTransformer, IdentityPredictor)):
+        if not isinstance(model, (TokenTransformer, IdentityPredictor, ACPredictor)):
             raise TypeError("unregistered evaluation predictor")
         pair = split_action_segments(controls, tau=tau, sigma=sigma)
         direct = model(raw, concatenate_action_segments(pair.first, pair.second), duration, transfer.source)
@@ -290,6 +326,10 @@ def save_checkpoint(condition, path, model, optimizer, config, completed, sampli
         return training.save_training_checkpoint(path, model=model, optimizer=optimizer, loss_config=config,
             condition="full" if condition == "po_jepa_full" else "no_consistency", completed_steps=completed,
             sampling_state=sampling, provenance=provenance)
+    if is_ac(condition):
+        from . import ac_training
+        training._count(completed, "completed_steps")
+        return ac_training.save_checkpoint(condition, path, model, optimizer, completed, sampling, provenance, model.ac_info)
     if condition != "matched_transformer":
         raise ValueError("only trainable registered conditions can checkpoint")
     parameters = _tf_optimizer(model, optimizer)
@@ -393,8 +433,16 @@ def validate_condition(model, features, output, device, config):
 
 def _validate_registration(condition, model, sequence, registration):
     """先核实际模型计数、封存查询/源码/配置；容量不匹配或身份过时则不创建运行目录。"""
-    if condition not in CONDITIONS or not sequence or any(not rows for rows in sequence):
+    if condition not in V7_CONDITIONS or not sequence or any(not rows for rows in sequence):
         raise ValueError("registered trainable condition and nonempty sequence required")
+    if is_ac(condition):
+        expected = registration["ac_parameters"][condition]
+        if parameter_counts(model)["total"] != expected:
+            raise ValueError("actual AC model count differs from preregistration")
+        if (sequence_sha(sequence) != registration["query_sequence_sha256"]
+            or registration["consumer_sha256"] != consumer_sources()):
+            raise ValueError("shared queries/consumer source differs")
+        return
     match = registration["parameter_match"]
     if not parameter_match(match["po_parameters"], match["transformer_parameters"])["matched"]:
         raise ValueError("capacity matching failed; fixed 1% unchanged")
@@ -418,6 +466,20 @@ def _selection(condition, model, optimizer, features, output, device, config, st
                checkpoint_sha256=digest, checkpoint_provenance=provenance)
     data.cache._write_json(output/"validations"/f"selection-{step:04d}.json", row)
     return row, row if best is None or row["mean"] < best["mean"] else best
+
+def _observed_update_ac(condition, model, optimizer, features, rows, device, config, completed):
+    """v7：V-JEPA 2-AC 一步（官方 teacher forcing + 2 步自回归），记录读出尺度与本步学习率。"""
+    from . import ac_training
+    clips, actions = ac_training.load_clips(features, rows, device)
+    scales = []
+    handle = model.core.predictor_proj.register_forward_hook(lambda owner,args,value:scales.append(check.tensor_stats(value.float())))
+    try:
+        result, lr = ac_training.train_step(condition, model, optimizer, clips, actions, config, completed)
+    finally:
+        handle.remove()
+    if result.completed_steps != completed+1 or not math.isfinite(result.grad_max_abs):
+        raise ValueError("AC update count/finite diagnostics mismatch")
+    return result, scales, lr
 
 def _observed_update(condition, model, optimizer, batch, config, completed):
     """记录实际raw读出（TF 1次；PO-JEPA 5次Phi，残差读出时每次2次），不加额外前向/backward；TF未算的缺陷为None。"""
@@ -472,17 +534,21 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
                 validations.append(row)
             if device.type == "cuda": torch.cuda.synchronize(device); torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
-            result,scales = _observed_update(condition,model,optimizer,batch,loss_config,completed)
+            if is_ac(condition):
+                result,scales,ac_lr = _observed_update_ac(condition,model,optimizer,features,rows,device,loss_config,completed)
+            else:
+                result,scales = _observed_update(condition,model,optimizer,batch,loss_config,completed)
+                ac_lr = None
             completed = result.completed_steps
             if device.type == "cuda": torch.cuda.synchronize(device)
             seconds = time.perf_counter()-started
-            share = consistency_share(condition, model, batch, loss_config, completed)
+            share = None if is_ac(condition) else consistency_share(condition, model, batch, loss_config, completed)
             data.cache._write_json(output/"updates"/f"{completed:04d}.json",dict(condition=condition,
                 completed_updates=completed,next_batch_index=completed,queries=[asdict(q) for q in rows],
                 losses=result.loss_values,grad_max_abs=result.grad_max_abs,grad_norm_before_clip=result.grad_norm,
-                grad_clip_norm=loss_config.grad_clip_norm,learning_rate=training.scheduled_lr(loss_config,completed-1),
+                grad_clip_norm=loss_config.grad_clip_norm,learning_rate=ac_lr if ac_lr is not None else training.scheduled_lr(loss_config,completed-1),
                 raw_predictions=scales,
-                raw_target=check.tensor_stats(batch.raw_target),phi_calls=len(scales)//(1 if condition == "matched_transformer" else check.readouts_per_phi(model)),provenance=provenance,
+                raw_target=check.tensor_stats(batch.raw_target),phi_calls=None if is_ac(condition) else len(scales)//(1 if condition == "matched_transformer" else check.readouts_per_phi(model)),provenance=provenance,
                 update_and_observer_seconds=seconds,consistency_gradient=share,
                 gpu_memory=check._memory(device) if device.type == "cuda" else None))
             del batch

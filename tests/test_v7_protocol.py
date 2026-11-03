@@ -21,7 +21,7 @@ def test_v6_default_unchanged(monkeypatch):
     assert config["training"]["updates_per_condition"] == 2000 and "v7_uncalibrated" not in config
 
 
-@pytest.mark.parametrize("updates,interval,warm", [("2000", 200, 200), ("10000", 1000, 1000)])
+@pytest.mark.parametrize("updates,interval,warm", [("2000", 200, 200), ("10000", 500, 1000)])
 def test_v7_schedules(v7, monkeypatch, updates, interval, warm):
     monkeypatch.setenv(checks.UPDATES_ENV, updates)
     config = checks.load_protocol()

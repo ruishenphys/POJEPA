@@ -17,6 +17,7 @@ def main(argv=None):
         task.add_argument('--device',default='cuda:0',help='4090/A100的显式cuda:N')
         task.add_argument('--output',type=Path,required=True,help='必须不存在的新结果目录')
         task.add_argument('--seed',type=int,choices=(1703,1704,1705),default=1703,help='v6：预登记的模型初始化/查询序列种子')
+        task.add_argument('--condition',default=None,help='v7：run/resume/evaluate 每次只跑一个条件（见 runtime/v7jobs.py）')
         if command=='evaluate':task.add_argument('--training-run',type=Path,required=True)
         if command=='resume':task.add_argument('--resume-from',type=Path,required=True,help='旧结果/run/training目录；仅支持同版源码与环境')
     args=parser.parse_args(argv)

@@ -23,12 +23,17 @@ class TransformerSpec:
     feedforward: int = 128
     dropout: float = 0.
     layer_norm_epsilon: float = 1e-5
+    # v7：残差读出 output = Z + P_out(·)，P_out 零初始化（起点恰为 identity）。与 PO-JEPA 的残差读出对等；
+    # v6 的非残差版本要从 64 维瓶颈重建全部 1408 维特征，连 identity 都追不上（v6 测试 0.249 vs identity 0.213）。
+    residual: bool = False
 
     def __post_init__(self):
         """分配前拒绝非法整数/精度设置；不提供AMP或隐式结构降配。"""
         if any(type(v) is not int or v <= 0 for v in
                (self.encoder_dim, self.action_dim, self.width, self.heads, self.layers, self.feedforward)):
             raise ValueError("positive integer dimensions required")
+        if type(self.residual) is not bool:
+            raise ValueError("residual must be bool")
         if self.action_dim != 2 or self.width % self.heads or self.dropout != 0. or self.layer_norm_epsilon != 1e-5:
             raise ValueError("F05 requires two actions, divisible heads, zero dropout and fixed LayerNorm epsilon")
 
@@ -73,6 +78,8 @@ class TokenTransformer(nn.Module):
             batch_first=True, norm_first=False)
         self.encoder = nn.TransformerEncoder(layer, spec.layers, enable_nested_tensor=False)
         self.p_out = nn.Linear(spec.width, spec.encoder_dim)
+        if spec.residual:   # 先按原样构造（随机数消耗不变）再置零
+            nn.init.zeros_(self.p_out.weight); nn.init.zeros_(self.p_out.bias)
 
     def action_tokens(self, controls: ActionSegments, duration: Tensor) -> tuple[Tensor, Tensor]:
         """只取查询前缀，保留逐段值/起止周期；先where清padding，再投影，绝不NaN乘零。"""
@@ -97,6 +104,8 @@ class TokenTransformer(nn.Module):
         tokens = torch.cat((spatial, self.action_embed(actions)), 1)
         padding = torch.cat((torch.zeros(raw.shape[:2], dtype=torch.bool, device=raw.device), ~valid), 1)
         output = self.p_out(self.encoder(tokens, src_key_padding_mask=padding)[:, :raw.shape[1]])
+        if self.spec.residual:
+            output = raw+output
         if not torch.isfinite(output).all():
             raise ValueError("nonfinite Transformer raw prediction")
         return output

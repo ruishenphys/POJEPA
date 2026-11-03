@@ -23,11 +23,13 @@ def main():
     p.add_argument("--features-root", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--updates", type=int, default=6)
-    p.add_argument("--conditions", default="")
+    p.add_argument("--jobs", default="", help="逗号分隔的条件：走 v7 独立任务入口（v7jobs.run_job）而不是旧的一次训练全部条件")
+    p.add_argument("--seed", type=int, default=1703)
     a = p.parse_args()
     os.environ["PO_JEPA_PROTOCOL"] = "v7"
     os.environ["PO_JEPA_DATASET"] = f"{a.system}:{a.trajectories}"
     os.environ["PO_JEPA_UPDATES"] = "2000"
+    os.environ["PO_JEPA_SEED"] = str(a.seed)
     sys.path.insert(0, str(ROOT/"src"))
     import torch
     from po_jepa.runtime import cache, checks, comparison, workflow
@@ -61,8 +63,16 @@ def main():
     device = torch.device("cpu")
     workflow.calibrate_weights(a.features_root, a.output/"calibrate", device)
     workflow.require_calibrated_weights(swept=True)
-    workflow.train_conditions(a.features_root, a.output/"training", device)
-    workflow.evaluate_conditions(a.features_root, a.output/"training", a.output/"evaluation", device)
+    if a.jobs:
+        from po_jepa.runtime import v7jobs
+        for condition in a.jobs.split(","):
+            v7jobs.run_job(a.features_root, a.output/"jobs"/condition, device, condition)
+            if condition != "identity":   # 再走一遍“只评测”入口（与 run.py evaluate --training-run 相同）
+                v7jobs.run_job(a.features_root, a.output/"jobs"/f"{condition}-evaluate", device, condition,
+                               training_run=a.output/"jobs"/condition)
+    else:
+        workflow.train_conditions(a.features_root, a.output/"training", device)
+        workflow.evaluate_conditions(a.features_root, a.output/"training", a.output/"evaluation", device)
     print(json.dumps(dict(ok=True, output=str(a.output)), ensure_ascii=False))
 
 

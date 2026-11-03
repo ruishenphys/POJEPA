@@ -25,7 +25,7 @@ from po_jepa import metrics
 
 ROOT = Path(__file__).resolve().parents[3]
 
-CONDITIONS = (*comparison.CONDITIONS, "identity")
+CONDITIONS = (*comparison.CONDITIONS, "identity", *comparison.AC_CONDITIONS)
 
 TRAIN_TIMES = (1., 2., 4., 8.)
 
@@ -309,7 +309,7 @@ def _tradeoff(future_difference, consistency_difference):
 
 def paired_comparisons(records, queries):
     """full-reference逐键配对；未运行/失败也列出，不只保存共同成功窗口。"""
-    found = _record_map(records,queries,CONDITIONS)
+    found = _record_map(records,queries,(*comparison.CONDITIONS,"identity"))
     results = []
     for reference in ("matched_transformer","po_jepa_no_consistency","identity"):
         paired, unmatched = [], []
@@ -338,7 +338,7 @@ def load_selected_checkpoint(condition, selected, *, model, optimizer, config, e
 
     测试指标不得影响 checkpoint 选择；调用者负责完整训练证据准入。
     """
-    if condition not in comparison.CONDITIONS or type(selected.get("step")) is not int or selected["step"] < 0:
+    if condition not in comparison.V7_CONDITIONS or type(selected.get("step")) is not int or selected["step"] < 0:
         raise ValueError("trained condition and explicit successful validation step required")
     if type(selected["mean"]) not in (int,float) or not math.isfinite(selected["mean"]) or selected["mean"] < 0 or selected["checkpoint_provenance"] != expected_provenance:
         raise ValueError("invalid validation future mean or original checkpoint provenance")
@@ -350,7 +350,11 @@ def load_selected_checkpoint(condition, selected, *, model, optimizer, config, e
     payload = torch.load(io.BytesIO(raw),map_location="cpu",weights_only=True)
     if payload["completed_steps"] != selected["step"]:
         raise ValueError("selected successful step differs before any state restore")
-    if condition == "matched_transformer":
+    if comparison.is_ac(condition):
+        from . import ac_training
+        progress = ac_training.load_checkpoint(condition,path,selected["checkpoint_sha256"],model,optimizer,
+                                               comparison._provenance(expected_provenance))
+    elif condition == "matched_transformer":
         if payload["loss_config"] != comparison.training._loss_config(config,"no_consistency"):
             raise ValueError("selected transformer JEPA configuration differs")
         progress = comparison.load_transformer_checkpoint(path,selected["checkpoint_sha256"],model,optimizer,expected_provenance)
@@ -386,7 +390,8 @@ def run_prepared_evaluation(model, condition, features, output, config, *, queri
     queries = build_index() if queries is None else list(queries)
     if not queries: raise ValueError("nonempty explicit evaluation queries required")
     _record_map([],queries,(condition,))
-    expected_type = comparison.IdentityPredictor if condition=="identity" else comparison.TokenTransformer if condition=="matched_transformer" else comparison.POJEPA
+    expected_type = (comparison.IdentityPredictor if condition=="identity" else comparison.TokenTransformer if condition=="matched_transformer"
+                     else comparison.ACPredictor if comparison.is_ac(condition) else comparison.POJEPA)
     if not isinstance(model,expected_type): raise TypeError("condition/model type mismatch")
     if condition != "identity" and not checkpoint_identity: raise ValueError("selected checkpoint identity required")
     # identity没有参数，必须由调用者明确设备，不能把无参数误判为CPU运行。

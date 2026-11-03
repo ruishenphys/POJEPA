@@ -13,7 +13,7 @@ schedules:
     training: {updates_per_condition: 10000}
     # 与 v6 同比例：学习率预热 5%、一致性预热 10%、早检在一致性预热结束后 20%
     loss: {lr_decay_updates: 10000, lr_warmup_updates: 500, consistency_warmup_updates: 1000}
-    validation: {interval_updates: 1000}
+    validation: {interval_updates: 500}     # 收敛曲线 20 个验证点（每次约 1 分钟）
     monitoring: {early_check_updates: 1400, consistency_interval: 50}
 # v6 sweep 中 rho 0.05/0.2/1.0 对验证误差几乎没有影响，选中 1.0；v7 固定 rho=1.0，不再 sweep，每个系统只标定一次
 calibration:

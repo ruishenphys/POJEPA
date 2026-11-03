@@ -20,6 +20,9 @@ def main(argv=None):
                         help='v7：物理系统')
     parser.add_argument('--trajectories',type=int,required=True,choices=(200,2000),help='v7：轨迹总条数（划分 80/10/10）')
     parser.add_argument('--updates',type=int,required=True,choices=(2000,10000),help='v7：每个条件的训练步数（2000 试跑，10000 正式）')
+    parser.add_argument('--condition',choices=('po_jepa_full','po_jepa_no_consistency','matched_transformer','identity',
+                        'vjepa2_ac_small','vjepa2_ac'),help='v7：run/resume/evaluate 每次只跑一个条件，可并行提交')
+    parser.add_argument('--ac-checkpoint',type=Path,help='v7：vjepa2_ac 需要的官方权重 vjepa2-ac-vitg.pt')
     args=parser.parse_args(argv)
     # 子进程的工作目录是代码根目录，相对路径须先按调用者当前目录解析成绝对路径。
     if not Path(args.features_root).resolve().is_dir():parser.error(f'--features-root不存在：{Path(args.features_root).resolve()}')
@@ -28,6 +31,10 @@ def main(argv=None):
     if args.command=='resume' and args.resume_from is None:parser.error('resume需要--resume-from')
     if args.command!='resume' and args.resume_from is not None:parser.error('--resume-from仅用于resume')
     if args.command in ('calibrate','sweep') and args.seed!=1703:parser.error('calibrate只用种子1703；三个种子共用同一组λ')
+    if args.command in ('run','resume','evaluate') and args.condition is None:parser.error('v7 的 run/resume/evaluate 需要 --condition')
+    if args.command=='train':parser.error('v7 用 run --condition <条件>，每个条件单独提交')
+    if args.condition=='vjepa2_ac' and (args.ac_checkpoint is None or not args.ac_checkpoint.resolve().is_file()):
+        parser.error('vjepa2_ac 需要 --ac-checkpoint <vjepa2-ac-vitg.pt>')
     if args.command=='sweep':parser.error('v7 不再 sweep：rho 固定为 1.0，只需 calibrate')
     if args.resume_from and args.output.resolve().is_relative_to(args.resume_from.resolve()):
         parser.error('续训新输出必须位于旧训练目录之外，不能写入原证据')
@@ -39,9 +46,11 @@ def main(argv=None):
     env['PO_JEPA_PROTOCOL']='v7'
     env['PO_JEPA_DATASET']=f'{args.system}:{args.trajectories}'
     env['PO_JEPA_UPDATES']=str(args.updates)
+    if args.ac_checkpoint:env['PO_JEPA_AC_CHECKPOINT']=str(args.ac_checkpoint.resolve())
     child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.cli',args.command,
         '--features-root',str(Path(args.features_root).resolve()),'--device',args.device,'--output',str(args.output.resolve()/'run')]
     child+=['--seed',str(args.seed)]
+    if args.condition:child+=['--condition',args.condition]
     if args.training_run:child+=['--training-run',str(args.training_run.resolve())]
     if args.resume_from:child+=['--resume-from',str(args.resume_from.resolve())]
     command=[sys.executable,'-B','-X','utf8',str(root/'tools/capture.py'),'--cwd',str(root),
