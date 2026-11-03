@@ -55,12 +55,49 @@ from po_jepa.spectral import GraphConfig, GraphSpectrum
 
 ROOT = Path(__file__).resolve().parents[3]
 
+PROTOCOL_ENV = "PO_JEPA_PROTOCOL"
+UPDATES_ENV = "PO_JEPA_UPDATES"
+V7_UPDATES = (2000, 10000)
+
+def is_v7() -> bool:
+    """run.py 的 v7 命令设置 PO_JEPA_PROTOCOL=v7；未设置时与 v6 完全相同。"""
+    value = os.environ.get(PROTOCOL_ENV, "v6")
+    if value not in ("v6", "v7"):
+        raise ValueError(f"{PROTOCOL_ENV} must be v6 or v7")
+    return value == "v7"
+
+def v7_updates() -> int:
+    value = os.environ.get(UPDATES_ENV, "10000")
+    if not value.isdigit() or int(value) not in V7_UPDATES:
+        raise ValueError(f"{UPDATES_ENV} must be one of {V7_UPDATES}")
+    return int(value)
+
+def v7_calibration_path() -> Path:
+    """每个数据集（系统+条数）和训练步数各自一份标定：λ_time、λ_space、σ_z。"""
+    return ROOT/"configs/calibration"/f"{datasets.active().tag}-u{v7_updates()}.yaml"
+
 def load_protocol() -> dict:
     """核原稿与固定协议原字节，缺项或改动报错，不补默认研究参数。"""
     data.cache.verify_fixed_protocol()
     base = yaml.safe_load((ROOT/"configs/train/default.yaml").read_text(encoding="utf-8"))
     overlay = yaml.safe_load((ROOT/"configs/train/v4.yaml").read_text(encoding="utf-8"))
-    return _apply_seed(_merge_v4(base, {k: v for k, v in overlay.items() if k not in ("schema_version", "protocol_id")}))
+    merged = _merge_v4(base, {k: v for k, v in overlay.items() if k not in ("schema_version", "protocol_id")})
+    if is_v7():
+        v7 = yaml.safe_load((ROOT/"configs/train/v7.yaml").read_text(encoding="utf-8"))
+        merged = _merge_v4(merged, v7["schedules"][v7_updates()])
+        merged = _merge_v4(merged, dict(calibration=v7["calibration"]))
+        path = v7_calibration_path()
+        if path.exists():
+            cal = yaml.safe_load(path.read_text(encoding="utf-8"))
+            merged = _merge_v4(merged, dict(model=dict(graph=dict(sigma_z=cal["sigma_z"]))))
+            if cal.get("time_weight") is not None:
+                merged = _merge_v4(merged, dict(loss=dict(time_weight=cal["time_weight"], space_weight=cal["space_weight"])))
+            else:
+                merged = _merge_v4(merged, dict(v7_uncalibrated=True))
+        else:
+            # 未标定：λ 保持 v4.yaml 的占位/旧值，正式命令会被 require_v7_calibration 拒绝
+            merged = _merge_v4(merged, dict(v7_uncalibrated=True))
+    return _apply_seed(merged)
 
 SEED_ENV = "PO_JEPA_SEED"
 
@@ -136,6 +173,11 @@ def validate_target_device(record: dict) -> int:
         capacity = 96
         if record["mig_mode"].lower() not in ("[n/a]", "n/a", "disabled", "not supported"):
             raise ValueError("RTX PRO 6000 MIG/partition identity is not resolved")
+    elif is_v7() and any(label in name for label in ("H100", "H200", "H800", "A800", "L40S")):
+        # v7：放开数据中心卡；容量按型号最小规格核（H100/H800/A800 80GB 版、H200 141GB、L40S 48GB）
+        capacity = 141 if "H200" in name else 48 if "L40S" in name else 40 if ("A800" in name and "40GB" in name) else 80
+        if record["mig_mode"].lower() not in ("[n/a]", "n/a", "disabled", "not supported"):
+            raise ValueError("v7 data-center GPU must be a full card with MIG disabled")
     elif "A100" in name and any(label in name for label in ("40GB", "80GB")):
         capacity = 80 if "80GB" in name else 40
         if record["mig_mode"].lower() != "disabled":

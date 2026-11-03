@@ -9,6 +9,7 @@ import sys
 import traceback
 
 import torch
+import yaml
 from . import cache, checks, comparison, data, environment, evaluation, resources, training
 
 ROOT=Path(__file__).resolve().parents[3]
@@ -211,10 +212,17 @@ OVERLAY=ROOT/'configs/train/v4.yaml'
 
 
 def require_calibrated_weights(swept=False):
-    """v6：v4.yaml 的 time_weight/space_weight 必须是 v6 calibrate 写入的值；占位值或 v5 旧标定都拒绝运行。
+    """v7：改为核 configs/calibration/<系统>-<条数>-u<步数>.yaml（λ 与 σ_z 都已标定），不需要 sweep。
+
+    v6：v6：v4.yaml 的 time_weight/space_weight 必须是 v6 calibrate 写入的值；占位值或 v5 旧标定都拒绝运行。
 
     swept=True（train/run/resume/evaluate）时还要求 sweep 已经按验证集选定 rho。
     """
+    if checks.is_v7():
+        path=checks.v7_calibration_path()
+        if not path.exists() or checks.load_protocol().get('v7_uncalibrated'):
+            raise ValueError(f'v7：{data.datasets.active().tag}（{checks.v7_updates()} 步）还没标定：请先运行 python run.py calibrate（会写入 {path.relative_to(ROOT).as_posix()}）')
+        return
     lines=[l for l in OVERLAY.read_text(encoding='utf-8').splitlines() if l.strip().startswith(('time_weight:','space_weight:'))]
     if len(lines)!=2 or any(PLACEHOLDER in l or CALIBRATED_MARK not in l for l in lines):
         raise ValueError('一致性权重还没按 v6 方式标定：请先运行 python run.py calibrate（会自动写入 configs/train/v4.yaml）')
@@ -238,6 +246,40 @@ def write_calibrated_weights(time_weight,space_weight,tag,rho=None):
     require_calibrated_weights(swept=rho is not None)
 
 
+def write_v7_calibration(values,source):
+    """v7：把 σ_z / λ 写进本数据集的标定文件（整份重写，保留已有键）。"""
+    path=checks.v7_calibration_path();path.parent.mkdir(parents=True,exist_ok=True)
+    current=yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {}
+    current=dict(dict(time_weight=None,space_weight=None,sigma_z=None),**current,**values)
+    current['source']=source
+    header=f'# v7 标定（run.py calibrate 自动写入，勿手改）：{data.datasets.active().tag}，{checks.v7_updates()} 步\n'
+    path.write_text(header+yaml.safe_dump(current,allow_unicode=True,sort_keys=True),encoding='utf-8')
+    return path
+
+
+def calibrate_sigma_z(features,config):
+    """v7：在本数据集训练段的真实特征上标定建图带宽 σ_z（与 v4 real_feature_probe 相同规则）。
+
+    W_ij 的特征项是 exp(-|Q Z_i - Q Z_j|^2/σ_z^2)，Q 是固定随机正交 16×1408（种子 1703）。
+    取训练段内等距 8 条轨迹 × 帧 0/10/20，σ_z = sqrt(所有帧内 token 两两平方距离的中位数)。
+    不同系统画面差别很大，沿用双势阱的 12.46 会让建图失去意义，所以每个系统各标一次。
+    """
+    cal=config['calibration'];train=data.datasets.active().train
+    ids=[int(i*train/cal['sigma_z_ids']) for i in range(cal['sigma_z_ids'])]
+    g=torch.Generator().manual_seed(config['model']['graph']['q_seed'])
+    u,r=torch.linalg.qr(torch.randn(1408,config['model']['graph']['q_dim'],generator=g,dtype=torch.float64))
+    q=(u*torch.where(r.diagonal()<0,-1.,1.)).T
+    off=~torch.eye(256,dtype=torch.bool);pairs=[]
+    for tid in ids:
+        for tick in cal['sigma_z_ticks']:
+            w=data.cache.read_window(Path(features)/f'{tid:04d}',start_tick=tick,duration_cycles=1.,expected_split='train',device='cpu')
+            z=w.inputs.raw_z[0].double()@q.T
+            pairs.append((z[:,None]-z[None]).square().sum(-1)[off])
+    pairs=torch.cat(pairs)
+    return dict(sigma_z=float(pairs.median().sqrt()),sigma_z_ids=ids,sigma_z_ticks=list(cal['sigma_z_ticks']),
+                featsq_quantiles_5_50_95=[float(pairs.quantile(x)) for x in (.05,.5,.95)])
+
+
 def sweep_rho(features,output,device):
     """v6 消融：种子 1703 上，按 calibration.rho_grid 的每个 rho 各完整训练一次 full（2000 步、同一验证计划），
     按验证集最佳 future_jepa_distance 选 rho（不看测试集），把 rho 与对应 λ 写进 v4.yaml。
@@ -245,6 +287,8 @@ def sweep_rho(features,output,device):
     λ 与 rho 成正比：λ(rho) = λ_标定 · rho / rho_标定，梯度中位数只在 calibrate 量一次。
     某个 rho 在第 early_check_updates 步被判为一致性太弱时停止该候选，不参与选择；其余候选照常跑。
     """
+    if checks.is_v7():
+        raise ValueError('v7 不做 sweep：rho 固定为 1.0（v6 sweep 显示 rho 对验证误差没有可测影响），只需 calibrate')
     output.mkdir(parents=True,exist_ok=False)
     config=checks.load_protocol();cal=config['calibration']
     if checks.model_seed()!=config['training']['initial_model_seed'] or checks.model_seed()!=1703:
@@ -303,6 +347,11 @@ def calibrate_weights(features,output,device):
     初始化状态的数值也一并记录，便于对照。不写 checkpoint；结果写 calibration.json 并自动写入 v4.yaml。
     """
     output.mkdir(parents=True,exist_ok=False)
+    if checks.is_v7():
+        sigma=calibrate_sigma_z(features,checks.load_protocol())
+        print(f"v7 σ_z 标定：{sigma['sigma_z']:.4f}（{data.datasets.active().tag}）",flush=True)
+        write_v7_calibration(dict(sigma_z=sigma['sigma_z'],time_weight=None,space_weight=None),f'σ_z 已标定，λ 标定中；{output.name}')
+        cache._write_json(output/'sigma_z.json',sigma)
     config=checks.load_protocol();cal=config['calibration']
     pre,count=cal['pretrain_updates'],cal['batches']
     sequence,_=comparison.learning.make_query_sequence(config)
@@ -334,13 +383,19 @@ def calibrate_weights(features,output,device):
         note='time_weight/space_weight 已自动写入 configs/train/v4.yaml；三个种子共用这一组 λ')
     for key in ('time_weight','space_weight'):
         if not (result[key]>0 and result[key]<float('inf')):raise ValueError('calibrated weight must be finite and positive: '+key)
-    write_calibrated_weights(result['time_weight'],result['space_weight'],f'JEPA 预训练 {pre} 步后；{output.name}')
+    if checks.is_v7():
+        path=write_v7_calibration(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],rho=rho),
+                                  f'JEPA 预训练 {pre} 步后标定；{output.name}')
+        result['v7_calibration_file']=path.relative_to(ROOT).as_posix()
+        result['note']=f'σ_z 与 λ 已写入 {result["v7_calibration_file"]}；三个种子共用'
+    else:
+        write_calibrated_weights(result['time_weight'],result['space_weight'],f'JEPA 预训练 {pre} 步后；{output.name}')
     result['v4_overlay_sha256_after']=cache.file_sha(OVERLAY)
     cache._write_json(output/'calibration.json',result)
     print(json.dumps(dict(time_weight=result['time_weight'],space_weight=result['space_weight'],median=median,
         initial_state_weights=dict(time=result['initial_state']['time_weight'],space=result['initial_state']['space_weight'])),
         ensure_ascii=False,indent=1))
-    print('已写入 configs/train/v4.yaml，可以直接进行下一步 check。',flush=True)
+    print('已写入 '+(result.get('v7_calibration_file') or 'configs/train/v4.yaml')+'，可以直接进行下一步 check。',flush=True)
     return result
 
 

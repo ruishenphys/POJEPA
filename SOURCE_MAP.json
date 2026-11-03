@@ -113,9 +113,9 @@
         "verify_fixed_protocol"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "43b135ca0ea79ba4f7264bb4a233bfb8572fe4f0f3f5fbd9eaf2d27579e80e37",
+      "candidate_sha256": "63e18e4ec946cc63845a630320c4b764502c6993999efabb34fe5e67f205f480",
       "comment_cleanup_baseline_sha256": "ed4d4830dc6fcd73181e07fc7e380a0b19cac8fec729ec8e54d6bd033660fcc8",
-      "executable_ast_sha256": "2fb11907918e7209cdce08477875bad2903d0c676ddde5ab3aadc7c2e943fc61",
+      "executable_ast_sha256": "6bfd52e59309cff44d0ea6351079d6d294dac5dac0880f3219938f0b5aa0bc57",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "cleanup_history": [
         {
@@ -129,7 +129,8 @@
         }
       ],
       "executable_ast_basis": "R09 limited import/help delta from afcba055ceabb5a16a89c4d6a5f1bb450427eedc",
-      "v4_previous_candidate_sha256": "43b135ca0ea79ba4f7264bb4a233bfb8572fe4f0f3f5fbd9eaf2d27579e80e37"
+      "v4_previous_candidate_sha256": "43b135ca0ea79ba4f7264bb4a233bfb8572fe4f0f3f5fbd9eaf2d27579e80e37",
+      "v7_previous_candidate_sha256": "43b135ca0ea79ba4f7264bb4a233bfb8572fe4f0f3f5fbd9eaf2d27579e80e37"
     },
     {
       "source": "first_round/scripts/check_real_training.py",
@@ -149,9 +150,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "0385b26beb9f137db24df6f872fed7dc287df912e1892e0799f01a96819dea48",
+      "candidate_sha256": "62e3c447b20d8a40c0a3b59b9685337a8ceabdafc02aba5d15dedb707c68bbc3",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "02b772c731a2d7d726f39b6b72a712f66ec1673c99de253a2f370461ec51684c",
+      "executable_ast_sha256": "8873f6455018d026694987ee9e2f68891a1a2e6aba45f87f17d49d5ab38b9f07",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -238,9 +239,9 @@
         "write_collections"
       ],
       "operation": "comments_and_docstrings_only",
-      "candidate_sha256": "9de9906b7b60ed601cf6198353ed63141c12b8c472660837193f16b10a5277eb",
+      "candidate_sha256": "5c836b51cd102a45b8c8a91dd5862ddb3872f5dcac87c9af16c70bca808eab5c",
       "comment_cleanup_baseline_sha256": "8e2faf147defcc9bd20b7ff1b44eba71a407c07dd3a38d8d2bb8e62d614510c2",
-      "executable_ast_sha256": "342f04df67fd3ae4d8b6e070b8c2e6ea15a662eb19d1fb36b87f16ca5139f0f3",
+      "executable_ast_sha256": "db4566dcfd6051bc037d5568e9ad9ff2a1d9218d0478922d545ae089a04decd3",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v7_previous_candidate_sha256": "428ab318d77c251d315f71a50ee9f7ce41893c1c3159625b096a49f7bd6eae71"
     },
@@ -376,9 +377,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "f28ad145184ef95835709b4a77cec05bc9fc840d9c07504f2607e680be763977",
+      "candidate_sha256": "fd067f3f158ec60d7c5db306fd248c45e4ed21e739b3712c60046cf634a7b321",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "7c9787efd280937b64cd1b1a7cdf2081602a3c3c1fb46a4f381b708b84f80490",
+      "executable_ast_sha256": "5d0d5d2231ce501dce62ced88fa822d9138307575f838a62538bb382a90b822f",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "v7_previous_candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df"
@@ -478,6 +479,7 @@
   },
   "v7_changes": {
     "files_changed_since_v6": [
+      "src/po_jepa/runtime/cache.py",
       "src/po_jepa/runtime/checks.py",
       "src/po_jepa/runtime/comparison.py",
       "src/po_jepa/runtime/data.py",

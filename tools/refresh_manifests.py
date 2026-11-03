@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDE_DIRS = {"results", "features", "__pycache__", ".git", ".pytest_cache"}
+EXCLUDE_DIRS = {"results", "features", "__pycache__", ".git", ".pytest_cache", "calibration"}
 MANIFEST_SUFFIXES = {".py", ".yaml", ".md", ".json", ".toml", ".tex"}
 # 运行时会被 calibrate 改写的配置不进清单（与 v4–v6 相同）。
 MUTABLE = {"configs/train/v4.yaml", "configs/train/v7_calibration.yaml"}

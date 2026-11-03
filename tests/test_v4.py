@@ -313,12 +313,17 @@ def test_run_entry_resolves_relative_features_root(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("v4_run_entry", w.ROOT/"run.py")
     entry = importlib.util.module_from_spec(spec); spec.loader.exec_module(entry)
     (tmp_path/"feats").mkdir(); monkeypatch.chdir(tmp_path); seen = []
-    monkeypatch.setattr(subprocess, "run", lambda command, check: seen.append(command) or subprocess.CompletedProcess(command, 0))
-    assert entry.main(["check", "--features-root", "feats", "--device", "cpu", "--output", "out"]) == 0
+    envs = []
+    monkeypatch.setattr(subprocess, "run", lambda command, check, env: seen.append(command) or envs.append(env) or subprocess.CompletedProcess(command, 0))
+    v7 = ["--system", "van_der_pol", "--trajectories", "2000", "--updates", "10000"]
+    assert entry.main(["check", "--features-root", "feats", "--device", "cpu", "--output", "out", *v7]) == 0
     child = seen[0]
     assert child[child.index("--features-root")+1] == str((tmp_path/"feats").resolve())
+    # v7：协议/数据集/步数只传给子进程，不污染调用者进程
+    assert envs[0]["PO_JEPA_PROTOCOL"] == "v7" and envs[0]["PO_JEPA_DATASET"] == "van_der_pol:2000"
+    assert envs[0]["PO_JEPA_UPDATES"] == "10000" and "PO_JEPA_PROTOCOL" not in __import__("os").environ
     with pytest.raises(SystemExit):
-        entry.main(["check", "--features-root", "missing", "--output", "out2"])
+        entry.main(["check", "--features-root", "missing", "--output", "out2", *v7])
 
 
 def test_evaluation_runtime_comparison_reports_differences(tmp_path):
