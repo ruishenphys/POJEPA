@@ -76,9 +76,9 @@ class TrajectoryControls:
         durations=self.ends_ticks-self.starts_ticks
         if (self.starts_ticks[0]!=0 or self.ends_ticks[-1]!=32
             or not np.array_equal(self.ends_ticks[:-1],self.starts_ticks[1:])
-            or np.any(durations<=0) or not np.isin(durations[:-1],[1,4,8]).all()
+            or np.any(durations<=0) or not np.isin(durations[:-1],[1,2,4,8]).all()
             or durations[-1]>8):
-            raise ValueError("controls must exactly cover [0,32) with the F01 segment lengths")
+            raise ValueError("controls must exactly cover [0,32) with the F01 segment lengths (v7 variants also allow 2)")
 
 
 def sample_controls(trajectory_id: int) -> TrajectoryControls:

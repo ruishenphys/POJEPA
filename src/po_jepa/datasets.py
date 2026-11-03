@@ -13,7 +13,7 @@ ENV = "PO_JEPA_DATASET"
 DEFAULT_SYSTEM = "double_well"
 DEFAULT_COUNT = 200
 # v7 登记的系统名；仿真与渲染见 po_jepa.systems。
-SYSTEMS = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion")
+SYSTEMS = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape")
 # 允许的轨迹条数；划分固定为 80% / 10% / 10% 的完整轨迹，按编号顺序切。
 COUNTS = (40, 200, 500, 2000)
 
@@ -23,12 +23,23 @@ class DatasetSpec:
     """系统名、总条数与三段划分（按编号连续切分，划分单位是完整轨迹）。"""
     system: str
     count: int
+    # v7 可调数据集：规范化的调节项字符串（见 po_jepa.variants），空 = 基础场景
+    variant: str = ""
 
     def __post_init__(self):
         if self.system not in SYSTEMS:
             raise ValueError(f"unknown system {self.system!r}; registered: {SYSTEMS}")
         if type(self.count) is not int or self.count not in COUNTS:
             raise ValueError(f"trajectory count must be one of {COUNTS}")
+        from . import variants
+        if variants.format(self.system, variants.parse(self.system, self.variant)) != self.variant:
+            raise ValueError(f"调节项须写成规范形式：{variants.format(self.system, variants.parse(self.system, self.variant))!r}")
+
+    @property
+    def knobs(self):
+        """解析后的调节项（po_jepa.variants.Variant）。"""
+        from . import variants
+        return variants.parse(self.system, self.variant)
 
     @property
     def train(self) -> int:
@@ -65,20 +76,29 @@ class DatasetSpec:
     @property
     def is_v6_default(self) -> bool:
         """v6 原始数据（双势阱 200 条）：沿用 v6 的缓存格式和来源核验。"""
-        return self.system == DEFAULT_SYSTEM and self.count == DEFAULT_COUNT
+        return self.system == DEFAULT_SYSTEM and self.count == DEFAULT_COUNT and not self.variant
+
+    @property
+    def scene(self) -> str:
+        """场景名（系统 + 调节项），不含条数。"""
+        return self.system if not self.variant else f"{self.system}~{self.variant}"
 
     @property
     def tag(self) -> str:
-        return f"{self.system}-{self.count}"
+        return f"{self.scene}-{self.count}"
 
 
 def parse(value: str | None) -> DatasetSpec:
     if not value:
         return DatasetSpec(DEFAULT_SYSTEM, DEFAULT_COUNT)
-    system, sep, count = value.partition(":")
+    scene, sep, count = value.rpartition(":")
     if not sep or not count.isdigit():
-        raise ValueError(f"{ENV} must look like 'double_well:2000', got {value!r}")
-    return DatasetSpec(system, int(count))
+        raise ValueError(f"{ENV} must look like 'double_well:2000' or 'double_well~gain=2:2000', got {value!r}")
+    system, _, knobs = scene.partition("~")
+    from . import variants
+    if system not in SYSTEMS:
+        raise ValueError(f"unknown system {system!r}; registered: {SYSTEMS}")
+    return DatasetSpec(system, int(count), variants.format(system, variants.parse(system, knobs)))
 
 
 _ACTIVE = parse(os.environ.get(ENV))

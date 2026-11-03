@@ -123,3 +123,74 @@ def run_job(features, output, device, condition, *, resume_from=None, training_r
     cache._write_json(output/"report.json", report)
     cache._write_json(output/"COMPLETE.json", dict(report_sha256=cache.file_sha(output/"report.json")))
     return report
+
+
+def transfer_job(features, output, device, condition, *, training_run, test_variant):
+    """v7 可调数据集的分布外评测：用基础场景上训练好的模型（training_run 是它的任务目录），
+    不再训练，直接在“换了调节项”的测试集上评测（features 是 encode_v7.py --variant … --splits test 的输出）。
+
+    测试集与基础场景的测试段编号一一对应（同初始状态、同下达动作，除非调节项改的就是动作抽样），所以可以逐条配对。
+    """
+    from .workflow import verify_bundle, verify_selection, read
+    from po_jepa import variants
+    if condition not in JOB_CONDITIONS:
+        raise ValueError(f"--condition 必须是 {JOB_CONDITIONS} 之一")
+    base = data.datasets.active()
+    # 测试调节项叠加在训练数据集的调节项上（同名的以测试为准），例如训练 landscape~shape=multi_well、测试 depth=2
+    merged = dict(item.split("=", 1) for item in base.variant.split(",") if item)
+    merged.update(item.split("=", 1) for item in test_variant.split(",") if item)
+    text = ",".join(f"{k}={v}" for k, v in merged.items())
+    test_spec = data.datasets.DatasetSpec(base.system, base.count,
+                                          variants.format(base.system, variants.parse(base.system, text)))
+    if test_spec == base:
+        raise ValueError("--test-variant 与训练用的数据集相同；这不是分布外评测")
+    features, output = Path(features), Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    registration, _, _ = comparison.preregister()
+    registration["delivery_manifest_sha256"] = verify_bundle()
+    selected, root = None, None
+    model, loss = comparison.build_condition(condition, device)
+    if condition != "identity":
+        old = _job_dir(training_run)
+        job0 = read(old/"job.json")
+        if job0["condition"] != condition or job0["dataset"] != base.tag or job0["seed"] != checks.model_seed():
+            raise ValueError("training run 的条件/数据集/种子与本次参数不一致")
+        if read(old/"preregistration.json") != registration:
+            raise ValueError("training run 的预登记与当前代码/配置不一致")
+        root = old/"training"/condition
+        if not (root/"COMPLETE.json").exists() and job0.get("training_run"):
+            root = _job_dir(job0["training_run"])/"training"/condition
+        train_report = read(root/"report.json")
+        verify_selection(root, train_report)
+        selected = train_report["best"]
+        optimizer = comparison.make_optimizer(model)
+        evaluation.load_selected_checkpoint(condition, selected, model=model, optimizer=optimizer, config=loss,
+                                            expected_provenance=selected["checkpoint_provenance"], root=root)
+        del optimizer
+    job = dict(kind="transfer", condition=condition, dataset=test_spec.tag, train_dataset=base.tag,
+               test_variant=test_spec.variant, seed=checks.model_seed(), updates=checks.v7_updates(),
+               training_run=str(training_run) if training_run else None)
+    cache._write_json(output/"job.json", job)
+    old_spec = data.datasets._set_for_tests(test_spec)
+    try:
+        receipt = _light_preflight_test(features, output/"preflight", device)
+        print(f"transfer-evaluating {condition}: {base.tag} → {test_spec.tag}", flush=True)
+        # 分布外评测只看 16×16 网格上的单点预测（6 个时长，含留出时长 3/12）：问题是换物理/控制/外观，不是换网格；成本约为完整评测的 1/5
+        queries = [q for q in evaluation.build_index() if q.kind == "point" and q.grid_size == 16]
+        eval_report = evaluation.run_prepared_evaluation(model, condition, features, output/"evaluation"/condition, loss,
+                                                         queries=queries, checkpoint_identity=selected, device=device)
+    finally:
+        data.datasets._set_for_tests(old_spec)
+    report = dict(job=job, preflight=receipt, best=selected,
+                  registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest(),
+                  evaluation=dict(status=eval_report["status"], counts=eval_report["counts"]),
+                  training=dict(), initial_model_sha256=None, figures={}, scientific_conclusions_verified=False)
+    cache._write_json(output/"report.json", report)
+    cache._write_json(output/"COMPLETE.json", dict(report_sha256=cache.file_sha(output/"report.json")))
+    return report
+
+
+def _light_preflight_test(features, output, device):
+    output.mkdir(parents=True, exist_ok=False)
+    hardware = checks.device_metadata(device, output) if device.type == "cuda" else dict(device="cpu")
+    return dict(hardware=hardware, cache_identity=data.approved_cache_metadata(features, splits=("test",)))

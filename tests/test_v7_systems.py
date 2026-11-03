@@ -7,7 +7,7 @@ from po_jepa import datasets, simulation, systems
 
 @pytest.fixture(params=datasets.SYSTEMS)
 def system(request):
-    old = datasets._set_for_tests(datasets.DatasetSpec(request.param, 200))
+    old = datasets._set_for_tests(datasets.DatasetSpec(request.param, 200, "shape=multi_well" if request.param == "landscape" else ""))
     yield systems.get()
     datasets._set_for_tests(old)
 
@@ -33,7 +33,7 @@ def test_double_well_is_v6():
 def test_systems_use_distinct_random_streams():
     values = []
     for name in datasets.SYSTEMS:
-        old = datasets._set_for_tests(datasets.DatasetSpec(name, 200))
+        old = datasets._set_for_tests(datasets.DatasetSpec(name, 200, "shape=multi_well" if name == "landscape" else ""))
         try:
             values.append(simulation.sample_controls(0).values.ravel().tolist())
         finally:

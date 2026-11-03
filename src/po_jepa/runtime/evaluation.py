@@ -103,7 +103,7 @@ def load_test_window(features, query, device):
     if not isinstance(query, EvaluationQuery):
         raise TypeError("explicit EvaluationQuery required before I/O")
     query.__post_init__()
-    approved = comparison.data.approved_cache_metadata(features)
+    approved = comparison.data.approved_cache_metadata(features, splits=("test",))
     window = comparison.data.cache.read_window(Path(features)/f"{query.trajectory_id:04d}",
         start_tick=query.start_tick,duration_cycles=query.duration_cycles,expected_split="test",device=str(device))
     x, y, p = window.inputs, window.target, window.provenance

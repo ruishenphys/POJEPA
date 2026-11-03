@@ -30,6 +30,7 @@ def _parse():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--system", required=True)
     p.add_argument("--trajectories", type=int, required=True)
+    p.add_argument("--variant", default="", help="可调数据集的调节项（与 encode_v7.py 相同写法）")
     p.add_argument("--upstream-root", type=Path)
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--features-root", type=Path)
@@ -43,6 +44,18 @@ def _parse():
 def counterfactual_end(system, simulation, tid, donor, start, duration):
     """从 tid 的真实起点状态出发，用 donor 在 [start, start+duration) 的控制仿真 → (真实终点状态, 反事实终点状态, 反事实终点画面)。"""
     import numpy as np
+    from po_jepa import datasets, systems
+    v = datasets.active().knobs
+    if not v.is_default:      # v7 可调数据集：同一套可调仿真与渲染
+        controls = systems.commanded_controls(donor)
+        if system.name == "advection_diffusion":
+            fields = system.variant_fields(tid, v)
+            field = system.variant_fields(tid, v, controls=controls, start=start, field=fields[start], ticks=duration)[-1]
+            pool = lambda f: f.reshape(16, 16, 16, 16).mean((1, 3)).reshape(-1)
+            return pool(fields[start+duration]), pool(field), system.draw_fields(field[None], tid, v)[0]
+        states = system.variant_trajectory(tid, v)
+        q = system.variant_trajectory(tid, v, controls=controls, start=start, state=states[start], ticks=duration)[-1]
+        return states[start+duration], q, system.draw(q[None], tid, v)[0]
     controls = simulation.sample_controls(donor)
     if system.name == "advection_diffusion":
         fields = system.fields(tid)
@@ -70,7 +83,7 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
 
 def main():
     a = _parse()
-    os.environ["PO_JEPA_DATASET"] = f"{a.system}:{a.trajectories}"
+    os.environ["PO_JEPA_DATASET"] = f"{a.system}{'~'+a.variant if a.variant else ''}:{a.trajectories}"
     sys.path.insert(0, str(ROOT/"src")); sys.path.insert(0, str(ROOT/"tools"))
     import numpy as np
     import torch

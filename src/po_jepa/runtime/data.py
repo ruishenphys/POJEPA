@@ -34,10 +34,13 @@ def consumer_sources() -> dict:
                    ("training.py", "cache.py", "data.py", "checks.py"))
     return cache._source_hashes(names)
 
-def approved_cache_metadata(root: Path) -> dict:
-    """核已封存的整套冻结缓存摘要，不重新编码或复跑数值门槛。"""
+def approved_cache_metadata(root: Path, *, splits=("train", "validation", "test")) -> dict:
+    """核已封存的整套冻结缓存摘要，不重新编码或复跑数值门槛。
+
+    v7：splits 是这次要用到的划分；只编码了测试段的“变体测试集”（encode_v7.py --splits test）只能用于评测。
+    """
     if not datasets.active().is_v6_default:
-        return _v7_cache_metadata(Path(root))
+        return _v7_cache_metadata(Path(root), splits)
     record_path = ROOT/"reference/cache_asset.json"
     accepted = json.loads(record_path.read_bytes())
     if not accepted["approved"]:
@@ -57,7 +60,7 @@ def approved_cache_metadata(root: Path) -> dict:
     return dict(accepted_record_sha256=cache.file_sha(record_path), encode_report_sha256=expected,
                 manifest_sha256_by_id=manifests)
 
-def _v7_cache_metadata(root: Path) -> dict:
+def _v7_cache_metadata(root: Path, splits=("train", "validation", "test")) -> dict:
     """v7：核 tools/encode_v7.py 写出的整套缓存（根目录 report.json + COMPLETE.json），系统与条数须与当前数据集一致。"""
     spec = datasets.active()
     report_path = root/"report.json"
@@ -66,14 +69,18 @@ def _v7_cache_metadata(root: Path) -> dict:
     digest = cache.file_sha(report_path)
     if (complete.get("report_sha256") != digest or report.get("status") != "passed"
         or report.get("mode") != "encode_v7" or report.get("system") != spec.system
-        or report.get("dataset_count") != spec.count):
+        or report.get("dataset_count") != spec.count or report.get("variant", "") != spec.variant):
         raise ValueError(f"v7 feature root is not a complete encode of {spec.tag}; run encode/finalize first")
     records = report["records"]
     manifests = {row["trajectory_id"]: row["manifest_sha256"] for row in records}
-    if len(records) != spec.count or set(manifests) != set(range(spec.count)):
+    encoded = tuple(report.get("splits_encoded", ("train", "validation", "test")))
+    if not set(splits) <= set(encoded):
+        raise ValueError(f"{spec.tag} 只编码了 {encoded}，不能用于 {tuple(splits)}（变体测试集只能评测）")
+    expected = {t for name in encoded for t in spec.split_range(name)}
+    if len(records) != len(expected) or set(manifests) != expected:
         raise ValueError("v7 trajectory manifest inventory incomplete")
     return dict(encode_report_sha256=digest, system=spec.system, dataset_count=spec.count,
-                manifest_sha256_by_id=manifests)
+                **({"variant": spec.variant} if spec.variant else {}), manifest_sha256_by_id=manifests)
 
 @dataclass(frozen=True)
 class WindowQuery:

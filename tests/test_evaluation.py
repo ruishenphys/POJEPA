@@ -58,7 +58,7 @@ def test_new_test_loader_and_old_train_boundary(api,monkeypatch,tmp_path):
     w=replace(w,inputs=replace(w.inputs,raw_z=raw),target=replace(w.target,raw_z=raw.clone()))
     calls=[]
     def reader(path,**kw): calls.append((path,kw)); return w
-    monkeypatch.setattr(api.comparison.data,"approved_cache_metadata",lambda p:dict(manifest_sha256_by_id={180:"manifest-180"}))
+    monkeypatch.setattr(api.comparison.data,"approved_cache_metadata",lambda p,**kw:dict(manifest_sha256_by_id={180:"manifest-180"}))
     monkeypatch.setattr(api.comparison.data.cache,"read_window",reader)
     assert api.load_test_window(tmp_path,q,"cpu").inputs.trajectory_id==180
     assert calls[0][1]["expected_split"]=="test"

@@ -31,12 +31,15 @@ def _parse():
     parser.add_argument("mode", choices=("encode", "finalize"))
     parser.add_argument("--system", required=True)
     parser.add_argument("--trajectories", type=int, required=True)
+    parser.add_argument("--variant", default="", help="可调数据集的调节项，例如 gain=2,axes=x（见 src/po_jepa/variants.py）")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--upstream-root", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--shard", default="0/1", help="i/n：只编码 trajectory_id %% n == i 的轨迹")
     parser.add_argument("--dtype", choices=("float16", "float32"), default="float16")
+    parser.add_argument("--splits", default="train,validation,test",
+                        help="只编码这些划分；变体测试集用 --splits test（只能用于评测，编号与基础场景测试段一一对应）")
     parser.add_argument("--batch", type=int, default=33, help="每次送进编码器的帧数")
     parser.add_argument("--fake-encoder", action="store_true",
                         help="仅供 CPU 流程测试：用确定性随机投影代替编码器，产物标记为 synthetic，训练入口会拒绝")
@@ -45,7 +48,7 @@ def _parse():
 
 def main():
     args = _parse()
-    os.environ["PO_JEPA_DATASET"] = f"{args.system}:{args.trajectories}"
+    os.environ["PO_JEPA_DATASET"] = f"{args.system}{'~'+args.variant if args.variant else ''}:{args.trajectories}"
     sys.path.insert(0, str(ROOT/"src"))
     import numpy as np
     import torch
@@ -56,7 +59,7 @@ def main():
     out = args.output.resolve()
 
     if args.mode == "finalize":
-        return finalize(out, spec, cache)
+        return finalize(out, spec, cache, _splits(args.splits))
 
     index, _, total = args.shard.partition("/")
     index, total = int(index), int(total)
@@ -89,12 +92,13 @@ def main():
         role = "real_frozen_encoder"
 
     generator_sources = {name: cache.file_sha(ROOT/name) for name in
-                         ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/vjepa.py",
+                         ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
                           "src/po_jepa/datasets.py", "tools/encode_v7.py")}
     environment = dict(python=sys.version.split()[0], torch=torch.__version__, cuda_runtime=torch.version.cuda,
                        numpy=np.__version__, platform=platform.platform(), encoder_device=str(device),
                        device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
-    ids = [t for t in range(spec.count) if t % total == index]
+    wanted = _splits(args.splits)
+    ids = [t for t in range(spec.count) if t % total == index and spec.split_for(t) in wanted]
     started = time.perf_counter(); done = 0
     for tid in ids:
         folder = out/f"{tid:04d}"
@@ -111,9 +115,10 @@ def main():
         rounding = float(np.abs(stored.astype(np.float64)-raw).max()/max(np.abs(raw).max(), 1e-12))
         np.save(folder/"raw_z.npy", stored, allow_pickle=False)
         np.save(folder/"states.npy", states, allow_pickle=False)
-        controls = simulation.sample_controls(tid)
+        controls = systems.commanded_controls(tid)
         manifest = dict(
             schema_version=cache.V7_SCHEMA, status="complete", system=spec.system, dataset_count=spec.count,
+            **({"variant": spec.variant} if spec.variant else {}),
             trajectory_id=tid, split=spec.split_for(tid), shape=list(stored.shape), dtype=args.dtype,
             feature_file="raw_z.npy", feature_sha256=cache.file_sha(folder/"raw_z.npy"),
             states_file="states.npy", states_sha256=cache.file_sha(folder/"states.npy"),
@@ -172,9 +177,16 @@ def _fake_encoder(torch):
     return encode
 
 
-def finalize(out, spec, cache):
+def _splits(text):
+    names = tuple(s for s in ("train", "validation", "test") if s in text.split(","))
+    if not names or set(text.split(",")) - set(names):
+        raise SystemExit("--splits 只能是 train/validation/test 的逗号组合")
+    return names
+
+
+def finalize(out, spec, cache, splits=("train", "validation", "test")):
     records, missing = [], []
-    for tid in range(spec.count):
+    for tid in (t for t in range(spec.count) if spec.split_for(t) in splits):
         folder = out/f"{tid:04d}"
         if not (folder/"COMPLETE.json").exists():
             missing.append(tid); continue
@@ -182,7 +194,7 @@ def finalize(out, spec, cache):
         if complete["manifest_sha256"] != cache.file_sha(folder/"manifest.json"):
             raise ValueError(f"trajectory {tid}: manifest SHA mismatch")
         m = json.loads((folder/"manifest.json").read_bytes())
-        if m["system"] != spec.system or m["dataset_count"] != spec.count:
+        if m["system"] != spec.system or m["dataset_count"] != spec.count or m.get("variant", "") != spec.variant:
             raise ValueError(f"trajectory {tid}: encoded for {m['system']}-{m['dataset_count']}")
         records.append(dict(trajectory_id=tid, split=m["split"], manifest_sha256=complete["manifest_sha256"],
                             evidence_role=m["generation"]["evidence_role"],
@@ -192,7 +204,9 @@ def finalize(out, spec, cache):
         raise SystemExit(f"还有 {len(missing)} 条没编码完（例如 {missing[:5]}），先把所有分片跑完")
     roles = {r["evidence_role"] for r in records}
     report = dict(mode="encode_v7", status="passed", system=spec.system, dataset_count=spec.count,
+                  **({"variant": spec.variant} if spec.variant else {}),
                   splits=dict(train=spec.train, validation=spec.validation, test=spec.test),
+                  **({"splits_encoded": list(splits)} if tuple(splits) != ("train", "validation", "test") else {}),
                   evidence_roles=sorted(roles), records=records,
                   max_abs=max(r["max_abs"] for r in records),
                   max_relative_rounding_error=max(r["relative_rounding_error"] for r in records))

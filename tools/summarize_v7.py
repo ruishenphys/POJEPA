@@ -100,10 +100,10 @@ def main():
     jobs = [load_job(f) for f in find_jobs(a.results)]
     if not jobs:
         raise SystemExit(f"{a.results} 下没有完成的 v7 任务")
-    groups = defaultdict(dict)        # (dataset, updates, seed) -> condition -> job
+    groups = defaultdict(dict)        # (测试数据集, 步数, 种子) -> condition -> job；分布外评测的测试数据集带调节项
     duplicates = []
     for j in jobs:
-        key = (j["job"]["dataset"], j["job"]["updates"], j["job"]["seed"])
+        key = (_label(j["job"]), j["job"]["updates"], j["job"]["seed"])
         c = j["job"]["condition"]
         if c in groups[key]:
             duplicates.append(dict(key=list(key), condition=c, kept=groups[key][c]["folder"], ignored=j["folder"]))
@@ -174,10 +174,50 @@ def main():
             series_l, f"{dataset}（{updates} 步）训练 JEPA 损失（第一个种子，滑动平均）", "更新步数", "JEPA loss", log_y=True))
 
     summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across,
+                   transfer=transfer_drops(groups), planning=planning_reports(a.results),
                    problems=problems, missing=missing, duplicates=duplicates, scientific_conclusions_verified=False)
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
     print(f"{len(jobs)} 个任务；问题 {len(problems)} 个；缺失 {len(missing)} 个 → {a.output/'SUMMARY.md'}")
+
+
+def _label(job):
+    """普通任务：数据集；分布外评测：训练数据集 → 测试数据集。"""
+    return job["dataset"] if job.get("kind") != "transfer" else f"{job['train_dataset']} → {job['dataset']}"
+
+
+def transfer_drops(groups):
+    """分布外评测相对基础测试集的变化（同一条件、同一种子、同编号窗口逐条配对）：正数 = 换了调节项后变差。"""
+    out = []
+    for (label, updates, seed), by_c in sorted(groups.items()):
+        if " → " not in label:
+            continue
+        base_label = label.split(" → ")[0]
+        base = groups.get((base_label, updates, seed), {})
+        for c, j in by_c.items():
+            if c in base:
+                d = paired(j, base[c])
+                if d:
+                    out.append(dict(transfer=label, updates=updates, seed=seed, condition=c, change=d["mean"], se=d["se"],
+                                    trajectories=d["trajectories"]))
+    return out
+
+
+def planning_reports(root):
+    rows = []
+    for path in sorted(Path(root).rglob("*.json")):
+        if path.stat().st_size > 50_000_000:
+            continue
+        try:
+            r = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(r, dict) and r.get("kind") == "planning":
+            rows.append(dict(file=str(path), dataset=r["dataset"], train_dataset=r["train_dataset"], condition=r["condition"],
+                             seed=r["seed"], episodes=len(r["episodes"]), horizon=r["horizon_ticks"],
+                             **{f"{k}_success": (r[k] or {}).get("success_rate") for k in ("model", "oracle", "random")},
+                             model_error_px=r["model"]["mean_error_px"], zero_error=r["zero"]["mean_error"]))
+    return rows
 
 
 def _f(x, digits=5):
@@ -201,6 +241,16 @@ def _markdown(s):
             traj = ", ".join(f"{w}/{n}" for w, n in zip(r["trajectories_full_better"], r["trajectories"]))
             lines.append(f"| {r['dataset']} | {r['updates']} | {r['comparison']} | {r['seeds']} | {_f(r['mean'])} | "
                          f"{_f(r['seed_std'])} | {r['seeds_full_better']}/{r['seeds']} | {traj} |")
+    if s["transfer"]:
+        lines += ["", "## 分布外评测：换调节项后的变化（正数 = 变差；同编号窗口配对）", "",
+                  "| 训练 → 测试 | 步数 | 种子 | 条件 | 未来误差变化 | SE | 轨迹数 |", "|---|---|---|---|---|---|---|"]
+        lines += [f"| {r['transfer']} | {r['updates']} | {r['seed']} | {r['condition']} | {_f(r['change'])} | {_f(r['se'])} | {r['trajectories']} |"
+                  for r in s["transfer"]]
+    if s["planning"]:
+        lines += ["", "## 规划：推到目标的成功率（误差 ≤ 0.5 × 不动时的误差）", "",
+                  "| 场景 | 训练数据集 | 条件 | 种子 | 回合 | 模型规划 | 真值规划（上界） | 随机 | 模型规划误差（像素） |", "|---|---|---|---|---|---|---|---|---|"]
+        lines += [f"| {r['dataset']} | {r['train_dataset']} | {r['condition']} | {r['seed']} | {r['episodes']} | {_f(r['model_success'], 2)} | "
+                  f"{_f(r['oracle_success'], 2)} | {_f(r['random_success'], 2)} | {_f(r['model_error_px'], 1)} |" for r in s["planning"]]
     if s["missing"]:
         lines += ["", "## 缺失任务", ""] + [f"- {m['dataset']} {m['updates']} 步 种子 {m['seed']}：{m['condition']}" for m in s["missing"]]
     if s["duplicates"]:

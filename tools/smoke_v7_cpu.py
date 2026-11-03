@@ -25,6 +25,7 @@ def main():
     p.add_argument("--updates", type=int, default=6)
     p.add_argument("--jobs", default="", help="逗号分隔的条件：走 v7 独立任务入口（v7jobs.run_job）而不是旧的一次训练全部条件")
     p.add_argument("--seed", type=int, default=1703)
+    p.add_argument("--transfer", nargs=2, metavar=("VARIANT", "FEATURES"), help="再对每个条件做一次分布外评测")
     a = p.parse_args()
     os.environ["PO_JEPA_PROTOCOL"] = "v7"
     os.environ["PO_JEPA_DATASET"] = f"{a.system}:{a.trajectories}"
@@ -67,6 +68,10 @@ def main():
         from po_jepa.runtime import v7jobs
         for condition in a.jobs.split(","):
             v7jobs.run_job(a.features_root, a.output/"jobs"/condition, device, condition)
+            if a.transfer:
+                v7jobs.transfer_job(Path(a.transfer[1]), a.output/"jobs"/f"{condition}-transfer", device, condition,
+                                    training_run=None if condition == "identity" else a.output/"jobs"/condition,
+                                    test_variant=a.transfer[0])
             if condition != "identity":   # 再走一遍“只评测”入口（与 run.py evaluate --training-run 相同）
                 v7jobs.run_job(a.features_root, a.output/"jobs"/f"{condition}-evaluate", device, condition,
                                training_run=a.output/"jobs"/condition)

@@ -187,12 +187,12 @@ def _read_v7_cache(path: Path,m: dict,manifest_sha: str) -> tuple[np.ndarray,dic
     """
     spec=datasets.active()
     if (m.get("status")!="complete" or m.get("feature_file")!="raw_z.npy"
-        or m.get("system")!=spec.system or m.get("dataset_count")!=spec.count
+        or m.get("system")!=spec.system or m.get("dataset_count")!=spec.count or m.get("variant","")!=spec.variant
         or m.get("shape")!=[33,256,1408] or m.get("dtype") not in V7_DTYPES
         or m.get("grid")!=[16,16] or m.get("token_order")!="row_major"
         or m.get("split")!=split_for(m["trajectory_id"]) or m.get("observation_variant")!="canonical"
         or m.get("preprocess_sha256")!=v7_preprocess_sha256()):
-        raise ValueError("v7 cache schema/system/count/split mismatch (check --system/--trajectories)")
+        raise ValueError("v7 cache schema/system/variant/count/split mismatch (check --system/--variant/--trajectories)")
     g=m["generation"]
     if (g.get("evidence_role")!="real_frozen_encoder" or g.get("encoder_checkpoint_sha256")!=CHECKPOINT_SHA
         or g.get("upstream_commit")!=vjepa.UPSTREAM_COMMIT or g.get("preprocess")!=_v7_preprocess_record()):
@@ -204,7 +204,8 @@ def _read_v7_cache(path: Path,m: dict,manifest_sha: str) -> tuple[np.ndarray,dic
     raw=np.load(path/"raw_z.npy",allow_pickle=False,mmap_mode="r")
     if raw.dtype!=V7_DTYPES[m["dtype"]] or raw.shape!=(33,256,1408) or not np.isfinite(raw).all():
         raise ValueError("invalid actual raw Z array")
-    expected=sample_controls(m["trajectory_id"]);c=m["controls"]
+    from po_jepa import systems  # v7 可调数据集：下达动作的抽样规则可能被调节项改变
+    expected=systems.commanded_controls(m["trajectory_id"]);c=m["controls"]
     if any(not np.array_equal(np.asarray(c[key]),value) for key,value in
         (("starts_ticks",expected.starts_ticks),("ends_ticks",expected.ends_ticks),("values",expected.values))):
         raise ValueError("v7 cache controls differ from the registered random stream of this system")

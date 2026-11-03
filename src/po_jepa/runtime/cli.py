@@ -11,7 +11,8 @@ def main(argv=None):
         ('resume','从明确旧训练目录恢复到新目录，不覆盖失败证据'),
         ('evaluate','只评价已完成训练的选中点'),('run','预检、训练、留出评价全部顺序执行'),
         ('calibrate','v6：先只用 JEPA 预训练若干步，再按梯度比标定一致性权重 lambda_t/lambda_s'),
-        ('sweep','v6：种子1703上按 rho_grid 各训练一次 full，按验证集选 rho 并写入 v4.yaml')):
+        ('sweep','v6：种子1703上按 rho_grid 各训练一次 full，按验证集选 rho 并写入 v4.yaml'),
+        ('transfer','v7：用基础场景上训练好的模型，在换了调节项的测试集上评测（分布外）')):
         task=sub.add_parser(command,help=help_text)
         task.add_argument('--features-root',type=Path,required=True,help='交接包内已包含的冻结特征缓存根目录')
         task.add_argument('--device',default='cuda:0',help='4090/A100的显式cuda:N')
@@ -19,6 +20,9 @@ def main(argv=None):
         task.add_argument('--seed',type=int,choices=(1703,1704,1705),default=1703,help='v6：预登记的模型初始化/查询序列种子')
         task.add_argument('--condition',default=None,help='v7：run/resume/evaluate 每次只跑一个条件（见 runtime/v7jobs.py）')
         if command=='evaluate':task.add_argument('--training-run',type=Path,required=True)
+        if command=='transfer':
+            task.add_argument('--training-run',type=Path,help='基础场景上的任务目录（identity 不需要）')
+            task.add_argument('--test-variant',required=True,help='测试集的调节项，例如 gain=2')
         if command=='resume':task.add_argument('--resume-from',type=Path,required=True,help='旧结果/run/training目录；仅支持同版源码与环境')
     args=parser.parse_args(argv)
     import os
