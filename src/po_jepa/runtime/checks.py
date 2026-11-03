@@ -40,6 +40,7 @@ import torch
 
 import yaml
 
+from po_jepa import datasets
 from . import data as data
 from . import training as training
 from po_jepa.dynamics import DynamicsConfig, IntegratorConfig, ModalDynamics
@@ -112,7 +113,7 @@ def make_query_sequence() -> list:
     for _ in range(100):
         rows = []
         for _ in range(cfg["training"]["microbatch"]):
-            tid = int(torch.randint(160, (), generator=generator))
+            tid = int(torch.randint(datasets.active().train, (), generator=generator))
             start = int(torch.randint(21, (), generator=generator))
             duration = durations[int(torch.randint(len(durations), (), generator=generator))]
             rows.append(data.WindowQuery(tid, start, float(duration)))
@@ -307,7 +308,7 @@ def _parameter_identity(model) -> dict:
 
 def validation_cost(model, features, output, device, config) -> dict:
     """eval/no-grad下处理20×5×4=400窗口，只计既定future_jepa_distance和成本。"""
-    queries = [data.WindowQuery(tid, start, duration) for tid in range(160, 180)
+    queries = [data.WindowQuery(tid, start, duration) for tid in datasets.validation_ids()
                for start in (0, 5, 10, 15, 20) for duration in (1., 2., 4., 8.)]
     modes = {module: module.training for module in model.modules()}
     identity = _parameter_identity(model)

@@ -22,6 +22,7 @@ from . import training as training
 from po_jepa.actions import ActionSegments, validate_action_segments
 
 from po_jepa.simulation import split_for
+from po_jepa import datasets
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -49,7 +50,7 @@ def approved_cache_metadata(root: Path) -> dict:
         raise ValueError("approved F02 root completion mismatch")
     records = report["result"]["records"]
     manifests = {row["trajectory_id"]: row["manifest_sha256"] for row in records}
-    if len(records) != 200 or set(manifests) != set(range(200)):
+    if len(records) != datasets.active().count or set(manifests) != set(range(datasets.active().count)):
         raise ValueError("approved F02 trajectory manifest inventory incomplete")
     return dict(accepted_record_sha256=cache.file_sha(record_path), encode_report_sha256=expected,
                 manifest_sha256_by_id=manifests)
@@ -63,8 +64,7 @@ class WindowQuery:
 
     def __post_init__(self):
         """仅允许 train/validation 固定整数查询，不扩展到留出时长。"""
-        if type(self.trajectory_id) is not int or not 0 <= self.trajectory_id < 200:
-            raise ValueError("trajectory ID must be a native integer in [0,199]")
+        datasets.active().check_id(self.trajectory_id)
         if type(self.start_tick) is not int or not 0 <= self.start_tick <= 20:
             raise ValueError("start tick must be a native integer in [0,20]")
         if type(self.duration_cycles) not in (int, float) or self.duration_cycles not in (1., 2., 4., 8.):

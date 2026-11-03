@@ -48,9 +48,10 @@ class EvaluationQuery:
 
     def __post_init__(self):
         """外部索引先验证，拒绝跨split、未登记时长及同网格伪SCD。"""
-        if type(self.trajectory_id) is not int or not 180 <= self.trajectory_id < 200:
-            raise ValueError("F06 requires test trajectory 180..199")
-        if type(self.start_tick) is not int or self.start_tick not in (0,5,10,15,20):
+        if (type(self.trajectory_id) is not int
+            or self.trajectory_id not in comparison.data.datasets.active().split_range("test")):
+            raise ValueError("F06 requires a test trajectory")
+        if type(self.start_tick) is not int or self.start_tick not in comparison.data.datasets.test_start_ticks(self.trajectory_id):
             raise ValueError("unregistered evaluation start")
         if type(self.duration_cycles) not in (int,float) or self.duration_cycles not in TIMES:
             raise ValueError("unregistered evaluation duration")
@@ -81,16 +82,17 @@ class EvaluationQuery:
 
 def donor_id(trajectory_id):
     """test 内下一轨迹循环；不看未来误差或 Delta 重新抽样。"""
-    if type(trajectory_id) is not int or not 180 <= trajectory_id < 200:
+    if type(trajectory_id) is not int:
         raise ValueError("donor recipient must belong to test")
-    return 180 + (trajectory_id-180+1) % 20
+    return comparison.data.datasets.donor_id(trajectory_id)
 
 def build_index():
     """生成固定1600个单网格点及1200个唯一SCD对，不读取数据或执行模型。"""
     single = [(t,g,"point") for t in TIMES for g in (16,8,12) if g != 8 or t in TRAIN_TIMES]
     pairs = [(t,g,"pair") for t in TIMES for g in (8,12)]
-    return [EvaluationQuery(tid,start,t,g,kind) for tid in range(180,200)
-            for start in (0,5,10,15,20) for t,g,kind in single+pairs]
+    ds = comparison.data.datasets
+    return [EvaluationQuery(tid,start,t,g,kind) for tid in ds.active().split_range("test")
+            for start in ds.test_start_ticks(tid) for t,g,kind in single+pairs]
 
 def load_test_window(features, query, device):
     """核真实 test 冻结窗口，不放宽 train/validation 读取边界。

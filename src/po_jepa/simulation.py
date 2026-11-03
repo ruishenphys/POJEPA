@@ -8,26 +8,34 @@ import math
 
 import numpy as np
 
+from . import datasets
+
 CONTROL_PERIOD_SECONDS = .25
 TRAJECTORY_TICKS = 32
 
 
 def _trajectory_id(value: int) -> None:
-    """只接受正式ID 0…199；bool不是轨迹编号，不猜测字符串或越界ID。"""
-    if type(value) is not int or not 0 <= value < 200:
-        raise ValueError("trajectory_id must be an integer in [0,199]")
+    """只接受当前数据集的正式ID（v6 默认 0…199）；bool不是轨迹编号，不猜测字符串或越界ID。"""
+    datasets.active().check_id(value)
 
 
 def split_for(trajectory_id: int) -> str:
-    """先按完整轨迹固定train/validation/test；任何窗口继承此划分。"""
+    """先按完整轨迹固定train/validation/test；任何窗口继承此划分（v7：由 datasets 统一给出）。"""
+    return datasets.active().split_for(trajectory_id)
+
+
+def seed_entropy(trajectory_id: int, stream_id: int) -> list[int]:
+    """双势阱沿用 v6 的 [1703, id, stream]，前 200 条与 v6 逐位相同；其他系统插入系统序号，互不共用随机流。"""
     _trajectory_id(trajectory_id)
-    return "train" if trajectory_id < 160 else "validation" if trajectory_id < 180 else "test"
+    system=datasets.active().system
+    if system==datasets.DEFAULT_SYSTEM:
+        return [1703,trajectory_id,stream_id]
+    return [1703,1000+datasets.SYSTEMS.index(system),trajectory_id,stream_id]
 
 
 def _rng(trajectory_id: int, stream_id: int) -> np.random.Generator:
     """每条轨迹/用途独立PCG64，不读取或消耗NumPy全局随机状态。"""
-    _trajectory_id(trajectory_id)
-    return np.random.Generator(np.random.PCG64(np.random.SeedSequence([1703,trajectory_id,stream_id])))
+    return np.random.Generator(np.random.PCG64(np.random.SeedSequence(seed_entropy(trajectory_id,stream_id))))
 
 
 def initial_state(trajectory_id: int) -> np.ndarray:
@@ -39,8 +47,7 @@ def initial_state(trajectory_id: int) -> np.ndarray:
 
 def preprocess_seed(trajectory_id: int) -> int:
     """stream2派生uint64种子供独立torch CPU generator；不消耗其他流。"""
-    _trajectory_id(trajectory_id)
-    return int(np.random.SeedSequence([1703,trajectory_id,2]).generate_state(1,dtype=np.uint64)[0])
+    return int(np.random.SeedSequence(seed_entropy(trajectory_id,2)).generate_state(1,dtype=np.uint64)[0])
 
 
 @dataclass(frozen=True)

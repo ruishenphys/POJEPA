@@ -353,7 +353,7 @@ def validate_condition(model, features, output, device, config):
     异常都恢复每个子模块原模式；已有参数/梯度身份检查不被TF适配削弱。
     """
     output.mkdir()
-    queries = [data.WindowQuery(tid, start, duration) for tid in range(160,180)
+    queries = [data.WindowQuery(tid, start, duration) for tid in data.datasets.validation_ids()
                for start in (0,5,10,15,20) for duration in (1.,2.,4.,8.)]
     modes = {m:m.training for m in model.modules()}
     identity = check._parameter_identity(model)

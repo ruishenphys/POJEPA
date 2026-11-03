@@ -119,7 +119,7 @@ def train_conditions(features,output,device,resume_from=None):
 
 def verify_selection(root,report):
     """按生产FP64归约从400原值重建所有候选均值，然后核固定未来误差选点。"""
-    expected=[dict(trajectory_id=t,start_tick=s,duration_cycles=d) for t in range(160,180)
+    expected=[dict(trajectory_id=t,start_tick=s,duration_cycles=d) for t in data.datasets.validation_ids()
         for s in (0,5,10,15,20) for d in (1.,2.,4.,8.)]
     budget=report['completed_updates'];interval=checks.load_protocol()['validation']['interval_updates']
     steps=list(range(0,budget+1,interval))

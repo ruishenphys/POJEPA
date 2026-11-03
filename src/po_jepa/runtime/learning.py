@@ -40,7 +40,7 @@ def make_query_sequence(config: dict) -> tuple[list, torch.Tensor]:
     for _ in range(config["training"]["updates_per_condition"]):
         rows = []
         for _ in range(config["training"]["microbatch"]):
-            tid = int(torch.randint(160, (), generator=generator))
+            tid = int(torch.randint(data.datasets.active().train, (), generator=generator))
             start = int(torch.randint(21, (), generator=generator))
             durations = config["queries"]["jepa_duration_cycles"]
             duration = durations[int(torch.randint(len(durations), (), generator=generator))]
