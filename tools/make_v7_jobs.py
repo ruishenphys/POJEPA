@@ -50,8 +50,8 @@ def main():
     p.add_argument("--upstream-root", default="../vjepa2")
     p.add_argument("--encoder", default="../checkpoints/vjepa2-vitg-fpc64-256.pth")
     p.add_argument("--ac-checkpoint", default="../checkpoints/vjepa2-ac-vitg.pt")
-    p.add_argument("--v6-features", default="../unpacked-v3/po-jepa/features",
-                   help="试跑的 double_well-200 直接用 v6 的特征，不重新编码")
+    p.add_argument("--v6-features", default="",
+                   help="可选：试跑的 double_well-200 改用已有的 v6 特征目录（不给就和其他场景一样在本机编码）")
     p.add_argument("--plan-episodes", type=int, default=100)
     a = p.parse_args()
     scenes = [s for s in a.scenes.split(",") if s]
@@ -65,7 +65,7 @@ def main():
         return system if not knobs else f"{system}~{knobs}"
 
     def feats(scene, extra=None):
-        if scene == "double_well" and n == 200 and extra is None:
+        if a.v6_features and scene == "double_well" and n == 200 and extra is None:
             return a.v6_features
         return f"{a.features}/{name(scene, extra)}-{n}"
 
@@ -105,7 +105,7 @@ def main():
         print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
         return
 
-    encode = [s for s in scenes if not (s == "double_well" and n == 200)]
+    encode = [s for s in scenes if not (a.v6_features and s == "double_well" and n == 200)]
     print(f"# ===== A 编码（GPU，{len(encode)*a.shards} 条，互不依赖）=====")
     for s in encode:
         for i in range(a.shards):
@@ -113,6 +113,10 @@ def main():
     print("# ===== B 汇总编码（CPU，A 段全部完成后）=====")
     for s in encode:
         print(f"python tools/encode_v7.py finalize {ds(s)} --output {feats(s)}")
+    if a.stage == "full" and "double_well" in scenes:
+        print("# ===== B2 动作探针（GPU，1 条，约 10 分钟）：动作在冻结特征里有多强，回答 v6 的 delta_act≈0 =====")
+        print(f"python tools/probe_actions.py --system double_well --trajectories {n} {enc} "
+              f"--output {root}/probe-actions-double_well.json --device cuda:0")
     print("# ===== C 标定（GPU，B 段完成后；每个场景 1 条）=====")
     for s in scenes:
         print(f"python run.py calibrate {ds(s)} --updates {updates} --features-root {feats(s)} --device cuda:0 "
