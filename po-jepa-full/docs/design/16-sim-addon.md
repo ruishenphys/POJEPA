@@ -23,10 +23,12 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 
 `tools/import_v7_calibration.py --v7-tree ../../po-jepa --stage full`：
 
-1. 要求 v7 目录的 git HEAD 是 `653e2d07477d809e933fdedddebfc77c655b71c5` 或 `911bc09e79e4e92b89a823e083aac7d95edaa029`，否则报错（v7 的代码不应有任何改动）。653e2d0 是 2026-11-08 给机哥的交接更新（试跑的 double_well-200 改读 v6 特征目录），只改了 README.md、交接说明.md 和 MANIFEST.json，代码和 911bc09 逐字节相同；正式运行用的是 653e2d0。`IMPORTED.json` 记下实际读到的 HEAD。
+1. 要求 v7 目录的 git HEAD 是 `653e2d07477d809e933fdedddebfc77c655b71c5` 或 `911bc09e79e4e92b89a823e083aac7d95edaa029`，否则报错（v7 的代码不应有任何改动）。653e2d0 是 2026-11-08 给机哥的交接更新（试跑的 double_well-200 改读 v6 特征目录），只改了 README.md、交接说明.md 和 MANIFEST.json，代码和 911bc09 逐字节相同；正式运行用的是 653e2d0。`IMPORTED.json` 记下实际读到的 HEAD。两个提交写成常量 `V7_COMMITS`，653e2d0 在前。只核 HEAD，不核工作区是否干净：v7 的 calibrate 会在 `configs/calibration/` 下写未跟踪的文件，机器上 v7 的工作区本来就不干净；标定文件本身的值由第 2 步核，字节由 SHA 记下。
 2. 对每个场景，读 `<v7 目录>/configs/calibration/<tag>-u<步数>.yaml`（tag 如 `double_well-2000`、`landscape~shape=multi_well-2000`），要求 `sigma_z`、`time_weight`、`space_weight` 都不为空。
 3. 原字节复制到 po-jepa-full 的 `configs/calibration/` 下同名文件。目标已存在且字节相同就跳过，不同就报错。
 4. 写 `configs/calibration/IMPORTED.json`：每个文件的源路径、SHA、导入时间、v7 的 commit。
+
+第 3、4 步：`IMPORTED.json` 已有这个文件的记录时，`sha256` 相同、`v7_commit` 是这两个之一就算同一个文件，跳过（不要求等于这次的 HEAD）；`sha256` 不同或 `v7_commit` 不是这两个就报错。
 
 这样 po-jepa-full 的 `load_protocol()` 不用改，读到的 σ_z、λ 和 v7 正式运行逐位相同。`configs/calibration/` 不进 MANIFEST（v7 原来就排除了它）。
 
@@ -38,8 +40,8 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 2. 建只用 JEPA 的版本：transformer_consistency 用 matched_transformer 的模型；fixed_fourier 用两个权重为 0 的 fixed_fourier。
 3. 在初始状态下量前 32 个训练批的三项梯度范数（只记录）。
 4. 用训练查询序列的前 300 批只做 JEPA 训练（学习率调度、裁剪和正式训练相同）。
-5. 在第 301–332 批上量三项梯度范数（transformer_consistency 用 `addon.calibration.generic_gradient_norms`，fixed_fourier 用 `training.consistency_gradient_norms`），取中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ = `calibration.rho` = 1。λ 必须有限且为正；分母为 0 时报错，不除出 inf。transformer_consistency 在登记的初始化下一致性梯度恰为 0（残差读出的 `p_out` 零初始化），所以第 3 步会记到 0，这是正常的；第 5 步在 300 步之后量，分母一般非零。
-6. 两个条件都完成后，一次性写 `configs/calibration/addon/<tag>-u<步数>.yaml`：
+5. 在第 301–332 批上量三项梯度范数（transformer_consistency 用 `addon.calibration.generic_gradient_norms`，fixed_fourier 用 `training.consistency_gradient_norms`），取中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ = `calibration.rho` = 1。λ 必须有限且为正；分母为 0 时报错，不除出 inf（`<条件>: median grad_<项> = 0.0; λ 的分母为 0，不能标定（不除出 inf）`）。transformer_consistency 在登记的初始化下一致性梯度恰为 0（残差读出的 `p_out` 零初始化），所以第 3 步会记到 0，这是正常的：初始状态那一组（只记录）分母为 0 时 λ 记 `None`，不报错；第 5 步在 300 步之后量，分母一般非零。
+6. 两个条件都完成后，一次性写 `configs/calibration/addon/<tag>-u<步数>.yaml`。这个文件已存在就报错（`补跑标定文件已存在：…确实要重标定请先告诉 Jerry`），不覆盖：文件一旦写出，同一场景的 D 任务就可能已经读过它，重标定会让已经训练的任务和后来的任务用不同的 λ。下面的例子是示意（流格式）；实际写的是首行注释加 `yaml.safe_dump(sort_keys=True)` 的块格式，和 v7 的 `write_v7_calibration` 一致，读出来的值相同：
 
 ```yaml
 # 仿真补跑标定（run.py calibrate-addon 自动写入，勿手改）：<tag>，<步数> 步
@@ -49,13 +51,13 @@ sigma_z_used: …
 v7_calibration_sha256: …   # 导入的 v7 标定文件的 SHA
 ```
 
-逐批记录写在任务输出目录的 `calibration-<条件>.json`（字段和 v7 的 calibration.json 相同）。三个种子共用这一组 λ（和 v7 一样）。
+逐批记录写在任务输出目录的 `run/calibration-<条件>.json`：v7 的 calibration.json 的 17 个键全有、含义相同，另加 `condition`、`v7_calibration_sha256`、`addon_calibration_file` 三个；`note` 的文字改成补跑的说法。三个种子共用这一组 λ（和 v7 一样）。
 
 读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。
 
 ## 4. 复用 v7 的产物
 
-- 特征：直接读 `../../features-v7/<场景>-<条数>`，不重新编码。每个任务的 preflight 记录缓存身份，汇总时核对一致（13 §4）。
+- 特征：直接读 `../../features-v7/<场景>-<条数>`，不重新编码（试跑的 double_well-200 例外，读 v7 试跑用的 v6 特征目录，§7.4）。每个任务的 preflight 记录缓存身份，汇总时核对一致（13 §4）。
 - 检查点和评测记录：D4 用放宽来源核对的读法（10 §4），并逐条核对重算的标准指标和 v7 的记录一致。
 - 规划的三个参照（不动、随机、真值规划）只在 v7 的 identity 规划任务里跑过，补跑的规划任务都带 `--no-baselines`，汇总时从 v7 读参照。
 
@@ -65,17 +67,19 @@ v7_calibration_sha256: …   # 导入的 v7 标定文件的 SHA
 |---|---|---|
 | `run.py run --condition <新条件>` | 训练 + 标准评测，和 v7 的 run 相同（含续训） | `<输出>/run/job/…`，结构同 v7 |
 | `run.py calibrate-addon` | §3.2 | `configs/calibration/addon/…`、任务目录 |
-| `run.py check-addon` | 依赖、设备；5 个新条件各自一批上的完整梯度覆盖、读出次数、参数量、初始权重哈希关系（08 §1.3）、100 步耗时 | `<输出>/check-addon.json` |
+| `run.py check-addon` | 依赖、设备；5 个新条件各自一批上的完整梯度覆盖、读出次数、参数量、初始权重哈希关系（08 §1.3）、100 步耗时 | `<输出>/run/check-addon.json` |
 | `run.py d4 --condition C --training-run <任务目录>` | 10 §3、§4 | 10 §7 |
-| `run.py spectral-gap` | 10 §5（CPU） | `<输出>/spectral-gap.json` |
+| `run.py spectral-gap` | 10 §5（CPU） | `<输出>/run/job/` 下的 `job.json`、`report.json`、`COMPLETE.json`（和 D 任务、D4 任务同名，13 的汇总按这三个文件找任务） |
 | `run.py transfer --condition <新条件>` | 变体评测，和 v7 相同 | 同 v7 |
 | `tools/import_v7_calibration.py` | §3.1 | `configs/calibration/` |
 | `tools/encoder_identity.py` | 10 §6（CPU） | 一个 JSON |
-| `tools/addon_preflight.py` | 核对 v7 的 D 任务都已完成（含续训目录）、特征目录齐全且和 v7 任务记录的缓存身份一致 | 一个 JSON |
+| `tools/addon_preflight.py` | 核对 v7 的 D 任务都已完成（含续训目录）、特征目录齐全且和 v7 任务记录的缓存身份一致。试跑带 `--v6-features "$V6"`（和生成器的同一个绝对路径）：double_well-200 换成这个目录，走 v6 的缓存核对（`data.approved_cache_metadata` 的 v6 分支），和 v7 试跑任务记的缓存身份比；另要求 0000–0199 每条轨迹的 `COMPLETE.json`、`manifest.json`、`raw_z.npy` 都在，并对 0000 和 0199 用 v6 训练时的逐条读法（`cache._read_complete_cache_uncached`，含 `raw_z.npy` 的 SHA）完整读一遍，所以只有元数据的目录（git 克隆里的 `features/`）也在 A0 停下 | 一个 JSON |
 | `tools/plan_v7.py`（po-jepa-full 的复制件） | 接受新条件的规划 | 同 v7 |
-| `tools/make_addon_jobs.py --stage pilot/full/variants/v7tree` | 生成任务文件（§7） | 标准输出 |
+| `tools/make_addon_jobs.py --stage pilot/full/variants/v7tree` | 生成任务文件（§7）。`--v6-features` 和 v7 `make_v7_jobs.py` 的同名选项语义相同：试跑必须给、其他阶段不能给，而且必须是绝对路径（否则退出码 2） | 标准输出 |
 | `tools/summarize_addon.py` | 13 | 13 §7 |
 | `tools/run_jobs.py`（复制件） | 和 v7 的运行器相同，改动见 07 §2.8 | 日志在 工作目录/logs-addon/ |
+
+设备和门槛：check-addon 和 v7 的 check 一样要求 `cuda:N`、写 `environment.json`；calibrate-addon 和 v7 的 calibrate 一样不要求。这两个都先核导入的 v7 标定就是导入的那份（`IMPORTED.json`）；check-addon 另要求补跑标定文件能读（它要建 transformer_consistency、fixed_fourier）。`run.py d4` 要显式的 `cuda:N`（和 v7 的非标定命令相同）；`run.py spectral-gap` 只收 `cpu`。
 
 所有写文件的工具都先写临时文件再换名，中断后重跑同一条命令即可。
 
@@ -115,6 +119,8 @@ python tools/summarize_addon.py --v7-results ../../results-v7/full --addon-resul
 
 运行器重跑时会把 `--training-run` 自动换成实际完成的那次（续训目录 `-resumeN`），规则和 v7 相同。
 
+D 段按场景、种子、`ADDON_CONDITIONS` 的顺序（time_only 在前）生成，上面 D 段的例子行是其中一条（逐字出现在输出里）。运行器在段内按 `priority` 稳定排序后分卡，顺序只影响哪条先跑，不影响结果。
+
 ### 7.2 jobs-addon-variants.txt
 
 ```
@@ -142,7 +148,7 @@ python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/vjepa2_ac 
 
 ### 7.4 jobs-addon-pilot.txt（试跑）
 
-和 7.1 结构相同，改用 v7 试跑的产物：200 条轨迹、2000 步、只有种子 1703、5 个场景全跑。路径 `../../features-v7/<场景>-200`、`../../results-v7/pilot`、`../../results-addon/pilot`，导入 `<tag>-u2000.yaml`。任务数：A0 3、C 5、C2 1、D 25、D4 55 + 5、E 1。目的是在真实 GPU 上把全流程走一遍、在真实 v7 检查点上做等价核对，并测出每个新条件每步的耗时，用来算准正式运行的时长。
+和 7.1 结构相同，改用 v7 试跑的产物：200 条轨迹、2000 步、只有种子 1703、5 个场景全跑。double_well-200 读 v7 试跑用的 v6 特征目录（`--v6-features "$V6"`，绝对路径），其他场景 `../../features-v7/<场景>-200`；双势阱的 18 条命令（C 1、D 5、D4 11、谱间隙 1）的 `--features-root` 都是它，A0 的 preflight 行带同一个参数。结果路径 `../../results-v7/pilot`、`../../results-addon/pilot`，导入 `<tag>-u2000.yaml`（double_well-200 也照常从 v7 试跑导入 `double_well-200-u2000.yaml`）。任务数：A0 3、C 5、C2 1、D 25、D4 55 + 5、E 1。目的是在真实 GPU 上把全流程走一遍、在真实 v7 检查点上做等价核对，并测出每个新条件每步的耗时，用来算准正式运行的时长。
 
 ### 7.5 任务数合计
 
@@ -170,13 +176,15 @@ python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/vjepa2_ac 
 
 环境和 v7 相同，不用装新包。顺序：
 
-1. 等 v7 的 `jobs-full.txt` 和 `jobs-variants.txt` 都跑完。补跑代码如果还没合并，先做第 5 步（D3 不依赖新代码）。
+1. 等 v7 的 `jobs-full.txt` 和 `jobs-variants.txt` 都跑完。D3 的任务文件照常在 `full-model/po-jepa-full` 里用新代码的 `make_addon_jobs.py --stage v7tree` 生成（第 5 步）；补跑代码晚了而要先跑 D3 的话，Jerry 直接把 §7.3 的 5 行发给机哥（`--stage v7tree` 的输出就是这 5 行加两行说明）。
 2. 在工作目录里：`git clone -b full-model https://github.com/ruishenphys/POJEPA.git full-model`，然后 `cd full-model/po-jepa-full`。
 3. 试跑（约半天）：
    ```bash
-   python tools/make_addon_jobs.py --stage pilot > jobs-addon-pilot.txt
+   V6=<v6 特征目录的绝对路径>        # 和 v7 交接说明里的 V6= 那一行完全相同
+   python tools/make_addon_jobs.py --stage pilot --v6-features "$V6" > jobs-addon-pilot.txt
    python tools/run_jobs.py jobs-addon-pilot.txt --gpus 0,1
    ```
+   `V6` 和 v7 交接说明的相同，就是 v7 试跑给 `make_v7_jobs.py --stage pilot --v6-features "$V6"` 的那个绝对路径（在原来的 v6 工作目录里；记不清时从 v7 的 `po-jepa/jobs-pilot.txt` 里 double_well 行的 `--features-root` 读出来），这个目录要保留到补跑结束。不要用克隆里的 `po-jepa/features/`、`full-model/features/`：它们只有提交进仓库的元数据，没有 `raw_z.npy`，A0 的 preflight 会停下。
    打印“有任务失败，已停下”就把 `../../logs-addon/` 和 `../../results-addon/pilot/` 打包发给 Jerry，先不往下跑。
 4. 正式和变体：
    ```bash
@@ -223,6 +231,7 @@ python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/vjepa2_ac 
 | 情况 | 怎么办 |
 |---|---|
 | v7 有 D 任务没完成 | A0 的 preflight 列出来，补跑停在 A0；先让 v7 补完 |
+| 试跑的 `--v6-features` 给错（不是 v7 试跑用的那个目录、只有元数据的克隆 `features/`） | A0 的 preflight 对试跑的 double_well-200 走 v6 的缓存核对、逐条核 200 条轨迹的 `COMPLETE.json`、`manifest.json`、`raw_z.npy`，并完整读首尾两条的 `raw_z.npy`；不对就列出来，补跑停在 A0。没给或给了相对路径时生成器直接报错（退出码 2） |
 | 等价核对不过 | D4 任务失败，段停下。先查新树读 v7 检查点的路径，不放宽容差 |
 | 单项消融被提前检查停掉（一致性梯度占比低于 0.005） | 和 v7 的规则一样算失败，列在日志里；这本身是结果，Jerry 决定是否报告或调 ρ（调 ρ 就是另一个配置，要重新登记） |
 | fixed_fourier 或 transformer_consistency 标定出的 λ 不是有限正数 | 标定任务失败，段停下，查原因，不手填 λ |

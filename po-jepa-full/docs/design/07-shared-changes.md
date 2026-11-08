@@ -10,7 +10,7 @@
    - 必须给 `TransformerSpec`、`ACSpec` 加字段时（第二期的 7 维动作），新字段取默认值时不进快照，保证 v7 的快照逐字节相同。
    - 只对新条件有意义的配置放进新的配置类（例如 `FourierConfig`），或者放进运行登记，不进 v7 类的快照。
 3. **新条件用名字分发。** 新条件名单 `ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")` 定义在 `runtime/addon/conditions.py`。共享函数里加一行“是新条件就交给 addon 模块”，放在 v7 原有分支之前；v7 原有的分支和检查不动。
-4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个可训练条件名合不合法”的检查上（S10 定义，S17 的入口检查用；v7 分支里的名单检查保持 `V7_CONDITIONS`）。它和 `V7_CONDITIONS` 一样不含 identity（identity 不训练）；评测侧的名单是 `evaluation.CONDITIONS`，本来就含 identity（§2.5）。
+4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个可训练条件名合不合法”的检查上（S10 定义并测试；S17 的入口按子命令分发、不按条件名，所以目前没有调用者；v7 分支里的名单检查保持 `V7_CONDITIONS`）。它和 `V7_CONDITIONS` 一样不含 identity（identity 不训练）；评测侧的名单是 `evaluation.CONDITIONS`，本来就含 identity（§2.5）。
 
 ## 2. 第零期要改的地方
 
@@ -81,7 +81,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 ### 2.6 `runtime/v7jobs.py`、`run.py`、`runtime/checks.py`
 
 - `v7jobs.JOB_CONDITIONS` 末尾追加 `ADDON_CONDITIONS`；`run_job`、`transfer_job` 不用另改。
-- `run.py` 的 `--condition` 选项加 5 个新条件（S10）；新增子命令 `calibrate-addon`、`check-addon`（S17）、`d4`、`spectral-gap`（S18）（16 §5）。`run`、`resume`、`transfer`、`evaluate` 的行为不变。
+- `run.py` 的 `--condition` 选项加 5 个新条件（S10）；新增子命令 `calibrate-addon`、`check-addon`（S17）、`d4`、`spectral-gap`（S18）（16 §5）。`run`、`resume`、`transfer`、`evaluate` 的行为不变。新子命令按子命令名分发、不按条件名：`run.py` 把 `calibrate-addon`、`check-addon` 交给新模块 `addon.entry`（子进程 `-m po_jepa.runtime.addon.entry`），把 `d4`、`spectral-gap` 交给 `addon.eval_cli`（`-m po_jepa.runtime.addon.eval_cli`），其余命令仍交给 `po_jepa.runtime.cli`；v7 的 `cli.py`、`workflow.execute` 不改。
 - 补跑标定的门槛放在 `workflow.execute` 里、紧接 `require_calibrated_weights` 之后，按 `args.condition` 判断，失败阶段仍记为 `calibration`（`require_calibrated_weights` 本身还被不带条件名的 `write_calibrated_weights` 调用，所以不改它）：新条件里 transformer_consistency 和 fixed_fourier 还要求补跑标定文件存在（16 §3.2），其余新条件只要求导入的 v7 标定存在。`load_protocol()` 不改。
 
 ### 2.7 来源登记
@@ -92,9 +92,9 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 
 | 文件 | 改什么 |
 |---|---|
-| `tools/run_jobs.py` | 默认日志目录改成 `workdir.parent.parent/"logs-addon"/<任务文件名>`（即 工作目录/logs-addon/…）；启动检查的提示改成“请在 full-model/po-jepa-full 目录里运行”；把半截输出改名重跑的子命令名单扩成 `calibrate`、`calibrate-addon`、`check`、`check-addon`、`transfer`、`evaluate`、`d4`、`spectral-gap`；`priority` 里 transformer_consistency、fixed_fourier、两个单项消融排 1，koopman 排 2 |
-| `tools/refresh_manifests.py` | `EXCLUDE_DIRS` 加 `docs` 和 `.vscode`，`MUTABLE` 加 `README.md`（连同它上面的注释共三行，原文见 S00 段说明 §3.2）。改设计文档、编辑器设置或项目状态页都不改变 MANIFEST，`verify_bundle` 不会因此失败，续训和只评测的登记也不会对不上。注意 `EXCLUDE_DIRS` 按路径里任何一级目录名匹配，所以以后任何一层叫 `docs` 或 `.vscode` 的目录（如 `src/po_jepa/docs/`）都不进 MANIFEST；新代码不要放进这样命名的目录 |
-| `tools/plan_v7.py` | 接受新条件（读检查点走 `evaluation.load_selected_checkpoint`）；其余不变 |
+| `tools/run_jobs.py` | 默认日志目录改成 `workdir.parent.parent/"logs-addon"/<任务文件名>`（即 工作目录/logs-addon/…）；启动检查的提示改成“请在 full-model/po-jepa-full 目录里运行”；把半截输出改名重跑的子命令名单扩成 `calibrate`、`calibrate-addon`、`check`、`check-addon`、`transfer`、`evaluate`、`d4`、`spectral-gap`；`priority` 里 transformer_consistency、fixed_fourier、两个单项消融排 1，koopman 排 2；`complete()` 在 v7 认的 `<输出>/`、`<输出>/run/job/`、`<输出>/job/` 之外多认 `<输出>/run/`（`calibrate-addon`、`check-addon` 和 v7 的 `check` 一样只写 `<输出>/run/COMPLETE.json`，不加的话重跑任务文件时完成了的 calibrate-addon 会被改名重跑，并因补跑标定文件已存在而失败）。S18 的 `d4`、`spectral-gap` 把完成标志写在 `<输出>/run/COMPLETE.json` 和 `<输出>/run/job/COMPLETE.json`（10 §7） |
+| `tools/refresh_manifests.py` | `EXCLUDE_DIRS` 加 `docs` 和 `.vscode`，`MUTABLE` 加 `README.md`（连同它上面的注释共三行，原文见 S00 段说明 §3.2）。改设计文档、编辑器设置或项目状态页都不改变 MANIFEST，`verify_bundle` 不会因此失败，续训和只评测的登记也不会对不上。注意 `EXCLUDE_DIRS` 按路径里任何一级目录名匹配，所以以后任何一层叫 `docs` 或 `.vscode` 的目录（如 `src/po_jepa/docs/`）都不进 MANIFEST；新代码不要放进这样命名的目录。S17 再在 `MUTABLE` 加 `补跑说明.md`（连同注释 +2 −2），理由同 `README.md`：试跑后要按实测改时间，进清单的话一改就让正在跑的任务报 `delivery source changed` |
+| `tools/plan_v7.py` | 不用改（S10b 的分发已经覆盖）：911bc09 的 `plan_v7.py` 已经按条件名经 `comparison.build_condition`、`evaluation.load_selected_checkpoint` 建模型、读检查点，S10b 之后就接受新条件；一个字节都不改 |
 | `tools/make_v7_jobs.py`、`tools/summarize_v7.py` | 原样保留，不用于补跑；补跑用新的 `make_addon_jobs.py`、`summarize_addon.py` |
 
 ## 3. 第二期（S08b，DROID）要改的地方

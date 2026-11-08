@@ -21,7 +21,7 @@
 
 ## 3. D4：只评测的新指标
 
-D4 对每个条件、每个种子跑一次（v7 的 6 个条件读 v7 的检查点，补跑的 5 个读补跑的检查点），在同样的 400 个窗口上算下面这些量，另外在全部测试轨迹上算长时程（§3.6）。所有量都按窗口记录，汇总时先在轨迹内平均（13 §3）。
+D4 对每个条件、每个种子跑一次（v7 的 6 个条件读 v7 的检查点，补跑的 5 个读补跑的检查点），在同样的 400 个窗口上算下面这些量，另外在全部测试轨迹上算长时程（§3.7）。所有量都按窗口记录，汇总时先在轨迹内平均（13 §3）。
 
 ### 3.1 两种度量
 
@@ -35,9 +35,11 @@ D4 对每个条件、每个种子跑一次（v7 的 6 个条件读 v7 的检查�
 - 输入 a、b 是同形、同设备、全部有限的 float32 [B, N, E]（其他精度的输出由调用者先转成 float32）；`raw_z` 是 float32 [B, N0, E]，N0 可以和 N 不同（跨网格的 xpd 在 8×8 上算，s² 仍用 16×16 起点）。
 - a、b 先各自转 float64 再相减；返回 float64 [B]，和输入同设备，不带梯度。
 - 不做时间归一化：tcd_ln、scd_ln、各种 pd 的归一化由调用者按 §3.2–§3.5 做。
-- 因为先转 float64，`rms_input_scale(direct, composed, z)/(τσ)` 和 v7 的 `tcd_normalized`（v7 先在 float32 里相减）不是逐位相同，相对差在 1e-7 以内（float32 相减的舍入界约 6e-8）。
+- 因为先转 float64，`rms_input_scale(direct, composed, z)/(τσ)` 和 v7 的 `tcd_normalized`（v7 先在 float32 里相减）不是逐位相同，相对差在 1e-7 以内（float32 相减的舍入界约 6e-8）。所以 §4.3 的等价核对不用 `ln_metrics`，照抄 v7 的 float32 写法（`point_metrics`、`pair_metrics` 里的那几行）；D4 自己的量才用 `ln_metrics`。
 
 记号：Φ_Π(z) 表示按分割 Π = (τ_1, …, τ_n) 逐段滚动：每一段都是一次完整的 Φ 调用，输入是上一段输出的原始预测（和 `temporal_predictions` 的 composed 一样，不 LN、不截断梯度、不用真实中间帧），动作用 `split_action_segments` 按段精确切开。
+
+Φ_T(z) 的动作写法：v7 有两种，`point_metrics` 的 `direct` 把动作在 T/2 处 `split_action_segments` 切开再 `concatenate_action_segments` 接上，`pair_metrics` 和 `delta_act` 用不切开的 u；T/2 落在一个 tick 内部时（T = 1、3）两种写法的控制段不同，数值可以不同。`tcd_ln`、pd、xpd 的细网格一侧、`tcd_unequal`、留出分解、长时程都用 `point_metrics` 的写法（等价核对的 `future_jepa_distance`、`tcd_normalized` 必须用它才能和 v7 的记录对上，同一个张量也可以复用）；`scd_ln` 用 `pair_metrics` 的写法（不切开），和 v7 的 `scd_normalized` 一致（推荐做法，待 Jerry 确认）。受影响的论文数字是 `tcd_ln:T=1`、`tcd_ln:T=3`、`heldout_*:T=3`（其余时长 T/2 是整数 tick）。
 
 ### 3.2 LN 空间的 TCD 和 SCD
 
@@ -115,16 +117,16 @@ identity 的所有差异都等于 0（Φ = Id）。它只作参照，不进精�
 
 ### 4.1 为什么要放宽
 
-v7 的检查点在 `provenance.source_files_sha256` 里记了 v7 源码的 SHA，`training._provenance` 读入时会和当前源码逐个比较，po-jepa-full 里的源码不同，所以 v7 的检查点按原路径读不进来。D4 用 `addon.v7load.load_v7_selected(job_dir, condition, model)` 读，**核对数据一致性，不核对源码 SHA**，源码 SHA 原样记进 D4 的报告。
+v7 的检查点在 `provenance.source_files_sha256` 里记了 v7 源码的 SHA，`training._provenance` 读入时会和当前源码逐个比较，po-jepa-full 里的源码不同，所以 v7 的检查点按原路径读不进来。D4 用 `addon.v7load.load_v7_selected(job_dir, condition, model, *, loss_config, features, device)` 读（第 4 步要比 `loss_config`，第 6 步要读特征组训练批），**核对数据一致性，不核对源码 SHA**，源码 SHA 原样记进 D4 的报告。
 
 ### 4.2 读取步骤
 
 1. 用 `v7jobs._job_dir` 找到任务目录（`<输出>/run/job/`）。`job.json` 里的条件、数据集 tag、种子、步数必须和 D4 命令一致。`COMPLETE.json` 的 `report_sha256` 必须等于 `report.json` 的实际 SHA。
-2. 训练目录 = `<任务目录>/training/<条件>`；它的 `report.json` 的 `best` 必须和任务报告的 `best` 相同。重跑 `workflow.verify_selection`（只读数据，和源码无关）确认选点规则；`completed_updates` 等于当前查询序列的长度，`query_sequence_sha256` 等于当前序列的 SHA。
-3. 选中的检查点：路径不越出训练目录；文件 SHA 等于 `best.checkpoint_sha256`；`torch.load(weights_only=True)`；`completed_steps == best.step`。
+2. 训练目录 = `<任务目录>/training/<条件>`。续训和只评测的任务（v7 的 `run.py resume`、`run.py evaluate --training-run`）自己没有完成的训练目录，沿 `job.json` 的 `training_run`、`resume_from` 找旧任务，最多 8 层，旧任务的条件必须相同；`source.json` 的 `training_dir` 记实际用的目录。训练目录的 `report.json` 的 `best` 必须和任务报告的 `best` 相同。重跑 `workflow.verify_selection`（只读数据，和源码无关）确认选点规则；`completed_updates` 等于当前查询序列的长度，`query_sequence_sha256` 等于当前序列的 SHA。
+3. 选中的检查点：路径不越出训练目录；文件 SHA 等于 `best.checkpoint_sha256`；`torch.load(weights_only=True)`；`completed_steps == best.step`；检查点的 `provenance` 等于训练报告 `best.checkpoint_provenance`（两份都是保存时写的，不涉及源码）。
 4. 配置快照：PO-JEPA 类比较 `model_config` 和新树里现建模型的 `training._model_config`，以及 `loss_config` 和 `_loss_config(loss, 标签)`；Transformer 比较登记规格和 `loss_config`；AC 要求 `schema == "v7_vjepa2_ac_checkpoint_v1"` 且规格等于 `ac_baseline.spec_for(condition)`。任何一项不等就报错。
 5. `training._check_model_state`（名字、形状、精度），然后 `load_state_dict(strict=True)`、`model.eval()`。不读优化器状态。
-6. 来源里的数据字段必须和当前一致：`evidence_role`、`split`、`paper_sha256`、`upstream_commit`、`encoder_checkpoint_sha256`、`preprocess_sha256`、`feature_manifest_sha256`、`protocol_sha256`。`source_files_sha256` 原样记录，不核对。
+6. 来源里的数据字段必须和当前一致：`evidence_role`、`split`、`paper_sha256`、`upstream_commit`、`encoder_checkpoint_sha256`、`preprocess_sha256`、`feature_manifest_sha256`、`protocol_sha256`。“当前值”取法：重新组检查点保存时的那一批训练批（第 `max(0, step−1)` 批，和 `comparison.run_prepared_condition`、`resume.prepare_condition` 的组法相同），取它的 `provenance` 里的这 8 个字段，所以比的是同一份特征、同一个协议在新树里算出来的值。`source_files_sha256` 原样记录，不核对。
 
 补跑自己的检查点也走同一个函数（这时源码 SHA 本来就一致，照样只记录）。
 
@@ -138,6 +140,8 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 
 容差 |新 − 旧| ≤ 1e-6 · max(1, |旧|)。报告每项的条数、逐位相同的条数、最大绝对差和最大相对差。同一台机器、同样的设备和线程数下多半逐位相同，但 GPU 和多线程 CPU 上的规约顺序可能让末位不同（07 §5.2），所以判据只用容差，逐位相同的条数只作报告；超出容差任务就失败，不写 COMPLETE.json，说明新树读 v7 检查点或复制来的计算路径有问题，要先查清楚。identity 也做这项核对（参照是 v7 identity 任务的记录）。
 
+参照行的要求：被读任务的 `evaluation/<条件>/` 必须有 `COMPLETE.json`、没有 `FAILED.json`；`registration.json` 的 `queries` 必须等于当前 `evaluation.build_index()`（每个窗口 28 条）；参照行按 (kind, 轨迹, 起点, 时长, 网格) 对齐。缺行、重复行、条件或种子不同、状态不是 ok、参照值不是有限数，任务都失败。
+
 ## 5. 截断间隙
 
 论文说 K = 16 时第 K 个特征值位于谱的稠密部分以下。v7 的谱诊断算了 λ_{K+1} − λ_K，但没有保存。
@@ -146,6 +150,7 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 - 对 400 个测试窗口的起点帧，在 16×16、8×8（R z）、12×12（R z）上用 po_jepa_full 的 `GraphSpectrum` 求最低 16 个特征对，记录 λ_16、λ_17、`cutoff_gap`、前 16 个模态相邻间隙的中位数，以及两者之比。
 - 报告每个场景、每个网格上这些量的 5、25、50、75、95 分位数。
 - 预先定好的判断规则：每个场景、每个网格上比值的中位数都大于 1，论文保留原句；否则改成“K = 16 is fixed in advance and shared across grids”。
+- 比值和规则的读法：每个窗口、每个网格算 ratio = `cutoff_gap` / median(15 个相邻间隙)，再取 400 个窗口 ratio 的中位数（`torch.quantile` 线性插值，偶数个时就是中间两个的平均）；“大于 1”是严格大于；某个窗口的相邻间隙中位数为 0 时 ratio 记 None、计入 `undefined_ratio`、不进分位数，全是 None 时判“不保留原句”（推荐做法，待 Jerry 确认）。
 - fixed_fourier 的截断间隙由公式给出，恒为 0（08 §4.3），在同一张表里列出。
 
 ## 6. 编码器核对
@@ -155,11 +160,12 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 - `tools/encoder_identity.py`，CPU 任务，A0 段。
 - 两边去掉 `module.`、`backbone.` 前缀后按名字配对，比较 AC 权重里的 `encoder`（和 `target_encoder`，如果有）与 fpc64-256 的 `target_encoder`（和 `encoder`）。
 - 报告：配对上的张量数、按存储精度逐位相同的个数、最大绝对差、两边各自配不上的键、精度不同的键。全部配对、全部逐位相同才判“同一份”。
+- 结论取哪一对：主比较是 AC `encoder` 对 fpc64-256 `target_encoder`（v7 训练和 D4 用的就是 `target_encoder`），`verdict` 取主比较的（`same`/`different`/`missing_keys`），其余配对也算、写进 `comparisons`；逐位相同按存储字节比，不转精度；前缀 `module.`、`backbone.` 各去一次，去掉后重名报错。论文里写的那句话以 `verdict` 为准（推荐做法，待 Jerry 确认）。
 - 结果写进论文。
 
 ## 7. 输出格式
 
-`run.py d4` 的输出目录：
+`run.py d4 --output X` 的任务目录是 `X/run/job/`（下面的 `<输出>` 就是 `X/run/job`），和 v7 的 `run`/`evaluate` 相同：`X/console/` 是 `tools/capture.py` 的输出，`X/run/environment.json` 和 `X/run/COMPLETE.json`（`eval_cli` 写；出错时是 `FAILED.json`）的位置也和 v7 相同，`v7jobs._job_dir(X)` 能找到任务目录：
 
 ```
 <输出>/job.json            # 条件、场景、种子、步数、被读的任务目录
@@ -169,6 +175,8 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 <输出>/report.json         # 条数、等价核对汇总、三角不等式违反数、各量的轨迹宏平均
 <输出>/COMPLETE.json       # report.json 的 SHA；只有全部核对通过才写
 ```
+
+完成标志因此写在 `X/run/COMPLETE.json` 和 `X/run/job/COMPLETE.json` 两处，S17 复制的运行器认 `run/`，v7 的写法认 `run/job/`（07 §2.8）。`run.py spectral-gap --output X` 同样：`X/run/job/` 下写 `job.json`、`report.json`、`COMPLETE.json`（16 §5）。
 
 所有 JSON 用 `cache._write_json`（排好序的键、固定格式），同样的输入写两次字节相同。
 

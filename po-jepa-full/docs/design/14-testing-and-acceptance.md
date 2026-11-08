@@ -25,7 +25,7 @@
 3. 没有放宽任何已有检查（报错条件、容差、类型检查）。
 4. 新增的每个报错都有一条触发它的测试。
 5. 所有写文件的地方先写临时文件再换名；JSON 用 `cache._write_json`（双树对照脚本的父进程不能导入任何一棵树的 `po_jepa`，用一个行为相同的小函数）。
-6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 和 `SOURCE_MAP.json` 一起提交（改了 `SOURCE_MAP` 登记的模块而不重算，`test_bundle_core_math_matches_source_map` 会失败）；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
+6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md`、`补跑说明.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 和 `SOURCE_MAP.json` 一起提交（改了 `SOURCE_MAP` 登记的模块而不重算，`test_bundle_core_math_matches_source_map` 会失败）；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
 
 ## 3. 分段验收
 
@@ -76,7 +76,7 @@
 
 ### S17 补跑入口
 
-范围：16 §3、§5 的 `run`、`calibrate-addon`、`check-addon`、`transfer`，`import_v7_calibration.py`、`addon_preflight.py`、`make_addon_jobs.py`、`run_jobs.py` 的复制件、`plan_v7.py` 的复制件、`补跑说明.md`（`refresh_manifests.py` 的改动已在 S00 做完）。
+范围：16 §3、§5 的 `run`、`calibrate-addon`、`check-addon`、`transfer`，`import_v7_calibration.py`、`addon_preflight.py`、`make_addon_jobs.py`、`run_jobs.py` 的复制件、`plan_v7.py` 的复制件、`补跑说明.md`（`refresh_manifests.py` 的排除项已在 S00 做完，本段只在 `MUTABLE` 加 `补跑说明.md`，+2 −2，07 §2.8）。另外允许改 S10b 的测试 `tests/test_addon_conditions.py` 里 `test_consumer_sources_register_new_files` 的 2 行（+3 −2）：期望名单的后半段按 `runtime/addon/` 的 glob 取，另核 S10b 的 3 个文件仍在（07 §2.7；S10b 的测试写法以后照这个）。
 
 - `import_v7_calibration.py`：在临时目录里造一个假的 v7 树（含 git HEAD），复制后字节相同、`IMPORTED.json` 正确；HEAD 不对、文件缺、λ 为空、目标已存在且不同，各自报错；重复运行不改任何文件。
 - `calibrate-addon`（假特征，把 300/32 调成 3/2 的测试配置）：写出的 yaml 结构和 16 §3.2 相同；λ 等于用同样梯度范数手算的值；两个条件都完成才写文件（中途失败不留半个文件）。
@@ -88,7 +88,7 @@
 
 ### S18 补跑评测和汇总
 
-范围：10 §3–§7，13 全部。
+范围：10 §3–§7，13 全部。另外允许改的已有测试只有 S10b 的 `tests/test_addon_conditions.py`：S17 已合并时不碰它；S17 还没合并时照抄 S17 的那 2 行（逐字相同，改完和 S17 的结果是同一份），这样两段可以并行、谁先合并终态都相同。
 
 - `v7load`：用 v7 树在假特征上训练出的检查点，在新树里读入成功；改动以下任一项都报错：检查点字节、`best.step`、`model_config`、`loss_config`、`model_state` 的一个名字、来源里的任一数据字段。`source_files_sha256` 不同不报错，但原样出现在 `source.json`。
 - 等价核对：用 v7 树的评测记录作参照，新树重算的三项标准指标逐位相同；人为改动参照里一个值（超过容差）后任务失败、不写 COMPLETE.json。
