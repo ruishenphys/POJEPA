@@ -43,7 +43,7 @@ def step_rng(seed: int, step: int, stream: int) -> np.random.Generator:
 
 **附加回合**：每个测试集按划分列表顺序的前 200 条（`test_extra_episodes`，跳过没通过检查的，不补位）。只有它们参加原始帧率、原始分辨率和离线规划三个评测轴。
 
-**动作干预的替身**：每个测试集、每个时长 d，把该时长的全部窗口按 `hw("donor", split, id)` 排序成一个环；窗口 w 的替身是环上 w 之后第一个来自别的回合的窗口。Δ_act 用替身窗口的动作代替真实动作（10 §8.2）。
+**动作干预的替身**：每个测试集、每个时长 d，把该时长的全部窗口按 `hw("donor", split, id)` 排序成一个环；窗口 w 的替身是环上 w 之后第一个来自别的回合的窗口。Δ_act 用替身窗口的动作代替真实动作（10 §8.3）。
 
 **离线规划**（11）：每个测试集的附加回合里 d ∈ {1, 4} 的窗口。
 - 排名：窗口 w 的 63 个干扰项 = 同一测试集、同一时长、来自别的回合的规划窗口，按 `hw("distractor", split, w.id, other.id)` 排序取前 63 个。
@@ -89,7 +89,7 @@ def step_rng(seed: int, step: int, stream: int) -> np.random.Generator:
 
 **AC 片段**：`make_ac_clip_batch(clips, reader, prepared, source, device)` 返回 `features` float32 [16, 9, 256, 1408]、`actions` float64→float32 [16, 8, 7]（物理单位，第 k 个是 `action_<source>[s + k]`）、`states` float32 [16, 9, 7]（`state[s : s+9]`，`ac_state: true_state` 时用）。v7 的 `ac_training` 片段读取只认仿真缓存，DROID 用这个函数代替，训练步本身复用（09 §6.2）。
 
-**验证和测试批**：冻结窗口按文件顺序每 64 个一批，组装规则同上（评测时不需要 `tau`、`sigma` 的那些检查，但仍用同一个函数）。
+**验证和测试批**：冻结窗口按文件顺序每 64 个一批，组装规则同上（评测时不需要 `tau`、`sigma` 的那些检查，但仍用同一个函数）。`make_eval_batch` 另返回每个窗口起点行的真实状态 `state[s]`（float64 [B, 7]，物理单位），只给 AC 的官方输入模式用（09 §6.2）。
 
 ## 5. 来源字段
 

@@ -4,7 +4,7 @@
 
 ## 现在的状态
 
-**只有设计规格，还没有代码。** 规格经 Jerry 确认之后才开始写代码（这是硬规定）。代码写好以前，仓库根目录的 v7 代码是唯一能跑的版本，机哥从 2026-11-09 起用它做正式运行，期间 v7 不做任何改动。
+**设计规格已全部写完，代码按 [15-workflow.md](docs/design/15-workflow.md) 分段开始写**（Jerry 2026-11-08 授权规格写完即开工）。代码写好以前，仓库根目录的 v7 代码是唯一能跑的版本，机哥从 2026-11-09 起用它做正式运行，期间 v7 不做任何改动。
 
 ## 先读哪些
 
@@ -16,9 +16,10 @@
 | [docs/design/08-conditions.md](docs/design/08-conditions.md) | 全部条件的定义，固定 Fourier 和 Koopman 的公式 | 已写 |
 | [docs/design/10-evaluation.md](docs/design/10-evaluation.md) | 评测：v7 原有指标、新增的 LN 空间指标、分割差异、长时程、截断间隙 | 已写 |
 | [docs/design/13-summary.md](docs/design/13-summary.md) | 汇总：精度匹配规则、数据一致性核对、统计方法、表和图 | 已写 |
-| [docs/design/14-testing-and-acceptance.md](docs/design/14-testing-and-acceptance.md) | 测试分层和每段的验收标准 | 已写（仿真补跑部分） |
+| [docs/design/14-testing-and-acceptance.md](docs/design/14-testing-and-acceptance.md) | 测试分层和每段的验收标准 | 已写（含 DROID 各段） |
 | [docs/design/15-workflow.md](docs/design/15-workflow.md) | 开发流程：分段、三个 agent 加 Codex、合并条件、时间表 | 已写 |
-| 01–06、09、11、12 | DROID 的配置、索引划分、下载、准备、编码、窗口、训练循环、规划、任务图 | 待写（补跑规格推上去、论文改完之后） |
+| [01](docs/design/01-droid-config.md)–[06](docs/design/06-droid-windows-and-batches.md)、[09](docs/design/09-droid-training.md)、[11](docs/design/11-droid-planning.md)、[12](docs/design/12-droid-jobs.md) | DROID 的配置、索引划分、下载、准备、编码、窗口、训练循环、规划、任务图；DROID 的评测、汇总、验收在 10 §8、13 §8、14 §3 | 已写 |
+| [docs/design/droid-golden/](docs/design/droid-golden/README.md) | 5 条真实 DROID 回合上官方代码算出的参照值和生成脚本 | 已写 |
 
 ## 目录（代码阶段）
 
@@ -32,7 +33,6 @@ po-jepa-full/
   configs/                  # 从 v7 复制；configs/calibration/ 放导入的 v7 标定和补跑标定
   reference/                # 从 v7 原样复制（协议文件逐字节相同）
   tests/                    # v7 原有测试，加 test_addon_*.py、test_droid_*.py
-  tests/golden/             # DROID 5 条真实回合上官方代码算出的参照值
   docs/design/              # 本目录的设计规格
   docs/segments/            # 每段的提示词、验收单和审核记录
 ```

@@ -66,7 +66,7 @@ npz 的 zip 头带写入时间，文件字节不固定，所以不用文件 SHA�
 
 依赖全部 `prepare/<片名>`。输出都在数据根，和配置无关（试跑和正式运行共用）：
 
-1. **动作尺度** `prepared/action_scale.json`：取完整训练顺序（含失败回合，不受 `use_failures` 影响）里前 `scale_episodes`（500）条 `passed_realized` 为真的回合，按 01 §5.2 算两种动作源各自的三个尺度。记下用到的 uuid 列表、分位数、算法（`numpy.quantile`，`method="linear"`，float64）。三个尺度都必须 > 0。这 500 条都在 `train-000`，所以试跑就能算出来，正式运行沿用。
+1. **动作尺度** `prepared/action_scale.json`：取完整训练顺序（含失败回合，不受 `use_failures` 影响）的前 `scale_episodes`（500）条，每种动作源只用其中 `passed_<源>` 为真的回合（通常只少几条），按 01 §5.2 算各自的三个尺度。记下用到的 uuid 列表、分位数、算法（`numpy.quantile`，`method="linear"`，float64）。三个尺度都必须 > 0。这 500 条就是 `train-000` 的前 500 条，试跑正好全部准备过，所以试跑就能算出来，正式运行沿用。σ_z 的标定用同一个回合池（09 §3.1）。`use_failures: false` 的配置不重算这些文件，要求同一数据根下主配置的 `prepare/stats` 已完成。
 2. **冻结窗口** `prepared/windows/{val,id_test,ood_test}.json`：按 06 §3 的规则生成，只含 `passed_realized` 为真的回合。
 3. **统计** `prepared/STATS.json`：每片通过和失败的条数、失败原因计数、每片 `rows` 的总数、`interval_seconds` 的分位数（1%、50%、99%）。任一片的失败比例超过 1% 时任务失败：说明有系统性问题，要人来看，不能悄悄少掉很多回合。
 

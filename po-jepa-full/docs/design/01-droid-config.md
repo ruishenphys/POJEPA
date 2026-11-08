@@ -21,7 +21,7 @@
 
 ## 2. overlay 能改的键
 
-只有这些：`name`、`data.train_episodes`、`training.updates`、`training.seeds`、`resources.*`（各阶段的卡数、核数、内存、时长上限）。
+只有这些：`name`、`data.train_episodes`、`training.updates`、`training.seeds`、`model.spectral_backend`（求谱用哪个求解器，只影响速度和舍入，09 §6.3）、`resources.*`（各阶段的卡数、核数、内存、时长上限）。
 
 | 键 | pilot | full |
 |---|---|---|
@@ -38,6 +38,7 @@
 | 一致性预热 | round(0.10·U) | 200 | 3000 |
 | 验证间隔 | U / 20（必须整除，否则报错） | 100 | 1500 |
 | 早检步数 | 一致性预热 + round(0.04·U)（v7 的 1400/10000 同比例） | 280 | 4200 |
+| 一致性占比的测量间隔 | U / 400（必须整除）；早检时正好有 17 次测量 | 5 | 75 |
 
 ## 3. base.yaml 的全部键和取值
 
@@ -89,7 +90,7 @@ model:
   modes: 16
   sigma_x: 0.125
   rho: 1.0
-  spectral_backend: cpu_batched # cpu_batched（v7）| cpu_threads | cuda_float64，09 §6.3
+  spectral_backend: cpu_batched # cpu_batched（v7）| cpu_threads | cuda_float64，09 §6.3；full.yaml 按 check/env 的结果改
   ac_state: true_state          # true_state（官方）| learned_constant（v7 做法）
 training:
   durations: [1, 2, 4, 8]
@@ -106,6 +107,12 @@ training:
   conditions: [po_jepa_full, po_jepa_no_consistency, fixed_fourier, koopman,
                matched_transformer, transformer_consistency, vjepa2_ac, vjepa2_ac_small]
   untrained: [identity, vjepa2_ac_zeroshot]
+matching:                       # 参数量匹配的候选，只按参数量选（09 §2.3）
+  tolerance: 0.01
+  transformer_feedforward_candidates: [272, 288, 304]
+  ac_small_mlp_ratio_candidates: [4.25, 4.5, 4.75]
+monitoring:
+  min_share: 0.005              # 加权一致性梯度至少是 JEPA 梯度的 0.5%（v7 同值，09 §4.6）
 calibration:
   seed: 1703
   pretrain_updates: 300
@@ -139,7 +146,7 @@ resources:                      # 每个阶段一份：gpus、cpus、mem_gb、ti
 
 校验（任一不满足就报错）：`ood_quota` 与 `ood_labs` 等长且和为 500；`id_test_scenes`、`val_scenes`、`episodes_per_scene`、`train_episodes`、`shard_size` 为正整数；`training.durations` 必须是 [1,2,4,8]（v7 的 `WindowQuery` 和时间一致性的半程都依赖它）；`training.conditions` 是 08 §1.2 的 8 个名字、顺序固定；`seeds` 非空、互不相同；两个 `salt` 非空；三个开关取值在注释列出的范围内；`frame_rate_single` 和 `frame_rate_rollout` 都是 `frame_rate_stride_frames` 的倍数，`frame_rate_total_frames` 是 `frame_rate_rollout` 每一项的倍数。
 
-**开关**（`action.source`、`model.ac_state`、`data.use_failures`、`model.spectral_backend`）的默认值就是主实验。开关只能在 base.yaml 的副本里改，改了就是另一个配置名、另一个运行目录；pilot 和 full 不允许改开关。
+**开关**（`action.source`、`model.ac_state`、`data.use_failures`）的默认值就是主实验。开关只能在 base.yaml 的副本里改，改了就是另一个配置名、另一个运行目录；pilot 和 full 不允许改开关。
 
 ## 4. 时间
 
@@ -214,6 +221,8 @@ class DroidConfig:            # 字段和 §3 一一对应，嵌套的冻结 dat
     def validation_interval(self) -> int: ...
     @property
     def early_check_updates(self) -> int: ...
+    @property
+    def consistency_interval(self) -> int: ...
     def loss_config(self, *, time_weight: float, space_weight: float) -> LossConfig: ...
 
 def load_config(path: Path) -> DroidConfig: ...
