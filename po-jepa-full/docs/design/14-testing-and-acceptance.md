@@ -25,7 +25,7 @@
 3. 没有放宽任何已有检查（报错条件、容差、类型检查）。
 4. 新增的每个报错都有一条触发它的测试。
 5. 所有写文件的地方先写临时文件再换名；JSON 用 `cache._write_json`（双树对照脚本的父进程不能导入任何一棵树的 `po_jepa`，用一个行为相同的小函数）。
-6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 一起提交；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
+6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 和 `SOURCE_MAP.json` 一起提交（改了 `SOURCE_MAP` 登记的模块而不重算，`test_bundle_core_math_matches_source_map` 会失败）；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
 
 ## 3. 分段验收
 
@@ -43,13 +43,13 @@
 
 范围：07 §2.1–§2.3，新文件 `generic_consistency.py`、`ln_metrics.py`，07 §2.4 表里 `consistency_monitor_summary` 和 `early_check` 的推广。
 
-- `GraphSpectrum.spectrum_for` 的结果和依次调用三个函数逐位相同（随机输入，16×16、8×8、12×12 各一次）。
+- `GraphSpectrum.spectrum_for` 的结果和依次调用三个函数逐位相同（随机输入，16×16、8×8、12×12 各一次）；`model_device` 原样转交（CPU 上只能用替身的 `lowest_eigenpairs` 核）。
 - 双树对照冒烟逐位相同。
 - `_loss_config`：4 个标签 × 4 种权重组合（双正、双零、只有时间、只有空间）的接受/拒绝矩阵和 07 §2.3 的表一致；原有的两种组合报错信息不变。
 - `train_step(condition="time_only")` 和 `"space_only"` 能跑；权重为 0 的那一项对总损失的贡献恰为 0。
-- `generic_consistency`：对同一个 POJEPA 模型和输入，两个函数的输出（全部字段）和 `losses.py` 里的原函数逐位相同；对 `TokenTransformer` 能前向，反传后每个参数都有有限梯度。
-- `ln_metrics`：小张量上和手算公式一致（float64，相对误差 < 1e-12）；RMS_LN(a, a) = 0；输入尺度版本和 v7 的 `tcd_normalized` 算法在同一对张量上一致。
-- 监控推广：用 v7 测试里的更新记录，po_jepa_full 的 `consistency_monitor_summary` 输出（键和值）和 v7 树的输出逐字节相同；time_only 只检查时间项，space_only 只检查空间项，`checked_terms` 正确。
+- `generic_consistency`：对同一个 POJEPA 模型和输入，两个函数的输出（全部字段）和 `losses.py` 里的原函数逐位相同，比较用不等分的 τ、σ（例如 τ = T/4），否则 τ、σ 互换查不出来；对 `TokenTransformer` 能前向；`p_out` 是零初始化的，所以先把 `p_out.weight` 用 std = 0.02 重设，再要求反传后每个参数的梯度存在、有限，且梯度平方和 > 0。
+- `ln_metrics`：小张量上和手算公式一致（float64，相对误差 < 1e-12），a、b 独立生成、量级不同（b = a + 小扰动时 float32 相减是精确的，分不出先转 float64 和后转）；RMS_LN(a, a) = 0；输入尺度版本和 v7 的 `tcd_normalized` 算法在同一对张量上相对差 ≤ 1e-7（10 §3.1）。
+- 监控推广：po_jepa_full 的 `consistency_monitor_summary` 输出和 `early-check.json` 和 v7 树的逐字节相同。单元测试里没法跑 v7 树，所以用在 911bc09 上实算的金标准字符串，并给出在 911bc09 上复核它的命令；双树对照的冒烟把提前检查关掉了，`early_check` 只靠这条核。time_only 只检查时间项，space_only 只检查空间项，`checked_terms` 正确；identity 和其余 v7 名字不监控。
 
 ### S10 新对照
 

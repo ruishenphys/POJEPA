@@ -44,7 +44,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 ## 3. transformer_consistency
 
 - 模型就是 v7 登记的 matched_transformer（同一个 `TokenTransformer` 规格、同一个初始化种子），在 JEPA 损失之外加时间和空间一致性损失。
-- `generic_consistency.py` 提供 `temporal_predictions(model, raw_z, controls, tau, sigma, grid)` 和 `spatial_predictions(model, raw_z, controls, duration, transfer)`：逐行照抄 `losses.py` 里的同名函数，只去掉 `isinstance(model, POJEPA)` 这一条检查（改成要求 `model` 是 `nn.Module` 且前向签名为 `(raw, controls, duration, grid)`）。返回同样的 `TemporalPredictions`、`SpatialPredictions`，交给 `losses.py` 里原有的 `temporal_consistency_loss`、`spatial_consistency_loss`、`weighted_total_loss`，这三个函数不改。
+- `generic_consistency.py` 提供 `temporal_predictions(model, raw_z, controls, tau, sigma, grid)` 和 `spatial_predictions(model, raw_z, controls, duration, transfer)`：逐行照抄 `losses.py` 里的同名函数，只去掉 `isinstance(model, POJEPA)` 这一条检查，改成要求：`model` 是 `nn.Module`；`forward` 恰好 4 个没有默认值的位置参数，按位置是 `(raw, controls, duration, grid)`（只核个数和种类，不核名字：POJEPA 的第一个参数叫 `raw_z`，`TokenTransformer` 的叫 `raw`）；有正整数属性 `encoder_dim`（`spatial_predictions` 本来就读它）。返回同样的 `TemporalPredictions`、`SpatialPredictions`，交给 `losses.py` 里原有的 `temporal_consistency_loss`、`spatial_consistency_loss`、`weighted_total_loss`，这三个函数不改。
 - **JEPA 项和 matched_transformer 逐位相同。** PO-JEPA 的 `train_step` 把 JEPA 损失放在时间一致性的长支 direct 上，direct 用的是切开再拼接的动作 u1⊕u2。对 PO-JEPA 这和原动作等价，但 Transformer 每个动作段生成一个 token，拼接后在 τ 处多一个段边界，输入就变了。为了让两个 Transformer 只差一致性损失，transformer_consistency 的 JEPA 项另做一次和 matched_transformer 完全相同的前向（原动作、原时长），不复用 direct。
 - 单步（`addon.conditions.transformer_consistency_step`）：
   1. 计步检查、`_loss_config(loss, "full")`、Transformer 参数表（`comparison._tf_optimizer`）、批检查（`comparison._tf_batch`）、显式训练模式。

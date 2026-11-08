@@ -1,6 +1,6 @@
 # 07 共享模块改动
 
-从 v7（提交 `911bc09`）复制来的模块，只允许做本文件列出的改动。新功能尽量放进新文件；必须动旧文件时，只加可选分支，v7 已有的 6 个条件（po_jepa_full、po_jepa_no_consistency、matched_transformer、identity、vjepa2_ac、vjepa2_ac_small）走的代码路径一行不变。
+从 v7（提交 `911bc09`）复制来的模块，只允许做本文件列出的改动。新功能尽量放进新文件；必须动旧文件时，只加可选分支，v7 已有的 6 个条件（po_jepa_full、po_jepa_no_consistency、matched_transformer、identity、vjepa2_ac、vjepa2_ac_small）走的代码路径一行不变；分发用的判断行可以换成对 v7 条件真值相同、不读新参数的写法（例如 `early_check` 的第一行，§2.4）。
 
 ## 1. 总规则
 
@@ -10,7 +10,7 @@
    - 必须给 `TransformerSpec`、`ACSpec` 加字段时（第二期的 7 维动作），新字段取默认值时不进快照，保证 v7 的快照逐字节相同。
    - 只对新条件有意义的配置放进新的配置类（例如 `FourierConfig`），或者放进运行登记，不进 v7 类的快照。
 3. **新条件用名字分发。** 新条件名单 `ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")` 定义在 `runtime/addon/conditions.py`。共享函数里加一行“是新条件就交给 addon 模块”，放在 v7 原有分支之前；v7 原有的分支和检查不动。
-4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个条件名合不合法”的检查上。
+4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个可训练条件名合不合法”的检查上。它和 `V7_CONDITIONS` 一样不含 identity（identity 不训练）；评测侧的名单是 `evaluation.CONDITIONS`，本来就含 identity（§2.5）。
 
 ## 2. 第零期要改的地方
 
@@ -21,11 +21,14 @@ S08a 做 §2.1–§2.3、两个新文件 `generic_consistency.py` 和 `ln_metric
 `POJEPA.prepare_query` 现在在函数里依次调用 `self.spectrum.affinity`、`normalized_laplacian`、`lowest_eigenpairs`。改成一次调用：
 
 ```python
+if graph.fixed_modes and x.shape[1] < graph.max_modes:                              # 原文不动，从求谱之后挪到求谱之前
+    raise ValueError("fixed_modes requires every grid to have at least K tokens")
 modes = graph.max_modes if graph.fixed_modes else min(graph.max_modes, x.shape[1])   # 不变
-# fixed_modes 的检查不变，挪到求谱之前（只改变配置错误时报错的先后，不影响任何合法输入的结果）
 spectrum = self.spectrum.spectrum_for(raw_z if graph.affinity_source == "encoder" else x, grid,
                                       k=modes, model_device=x.device)
 ```
+
+检查挪到求谱之前只改变配置错误时报错的先后，不影响任何合法输入的结果。`prepare_query` 通过 `self.spectrum.spectrum_for(...)` 调用，`spectrum_for` 通过 `self.affinity` 等实例属性调用（v7 测试在实例上替换 `lowest_eigenpairs`，S10 的 `FourierSpectrum` 重写 `spectrum_for`）。
 
 `GraphSpectrum.spectrum_for(source, grid, *, k, model_device)`（新方法，见 2.2）内部按原来的顺序调用那三个函数，所以 v7 条件的结果逐位相同。固定 Fourier 的谱模块重写这个方法（08 §4）。
 
@@ -50,7 +53,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | `"time_only"` | time_weight > 0，space_weight = 0 | po_jepa_time_only |
 | `"space_only"` | time_weight = 0，space_weight > 0 | po_jepa_space_only |
 
-其余标签和报错不变。`train_step(..., condition=label)`、`save_training_checkpoint`、`load_training_checkpoint` 都把标签原样传给 `_loss_config`，不用另改。`train_step` 仍然每步算 5 次 Φ 和两个一致性项（权重为 0 的那一项照算、乘 0），这和 v7 的 no_consistency 一样，保证单项消融和 full 的计算图只差权重。
+两个新标签不符时各报一句新的 `ValueError`（`condition time_only requires a positive time weight and a zero space weight`、`condition space_only requires a zero time weight and a positive space weight`）；`full`、`no_consistency` 不符和其他未知标签仍报 v7 原来那一句。`-0.0` 算 0。`train_step(..., condition=label)`、`save_training_checkpoint`、`load_training_checkpoint` 都把标签原样传给 `_loss_config`，不用另改。`train_step` 仍然每步算 5 次 Φ 和两个一致性项（权重为 0 的那一项照算、乘 0），这和 v7 的 no_consistency 一样，保证单项消融和 full 的计算图只差权重。
 
 ### 2.4 `runtime/comparison.py`：条件分发
 
@@ -65,7 +68,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | `_validate_registration` | 接受 `ALL_CONDITIONS` |
 | `_observed_update` 的读出次数检查 | 每次更新 `p_out` 被调用的次数：po_jepa 类和 fixed_fourier 为 5 × `readouts_per_phi`（残差读出时 = 10）；transformer_consistency 为 6；koopman 为 2。记录里的 `phi_calls` 相应为 5、6、1 |
 | `consistency_share` | POJEPA 类用 `training.consistency_gradient_norms`；transformer_consistency 用 `addon.calibration.generic_gradient_norms`（同一批、和单步相同的 6 次前向，08 §3）；koopman 返回 None |
-| `consistency_monitor_summary`、`early_check` | 原来只对 po_jepa_full 生效。改成对“至少一个一致性权重 > 0”的条件生效，只检查权重 > 0 的那几项；po_jepa_full 两项都检查，输出的键和值与 v7 相同。新条件的输出另加一个键 `checked_terms`（例如 `["time"]`） |
+| `consistency_monitor_summary`、`early_check` | 原来只对 po_jepa_full 生效。新函数 `monitored_consistency_terms(condition, loss_config)` 决定看哪几项：po_jepa_full 固定 `("time", "space")`、不读权重（v7 测试用零权重调它，输出的键、键序和值与 v7 相同，po_jepa_full 仍走 v7 原文）；其余 v7 名字和 identity 返回 None（identity 拿到的是协议的正权重，所以按名字排除）；新条件看权重 > 0 的项（按 time、space 的顺序），一项都没有返回 None。新条件的汇总是 `measurements, rho, threshold, median_share, active, checked_terms`：`median_share` 只含被检查的项，`active` 只看这些项，`checked_terms` 是 list（例如 `["time"]`）。S08a 做到这里，此时对 v7 名字和 identity 以外的任何名字都按权重判断；S10 加了 `ADDON_CONDITIONS` 之后改成只认这 5 个新名字，其他名字报 `ValueError` |
 
 ### 2.5 `runtime/evaluation.py`
 
