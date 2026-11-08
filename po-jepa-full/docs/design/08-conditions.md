@@ -68,7 +68,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 
 - `FourierConfig(GraphConfig)`：冻结的 dataclass，只多一个字段 `basis: str = "dct2"`，`__post_init__` 先调父类，再要求 `basis == "dct2"`。因为多了这个字段，`training._model_config` 存下的 `graph` 快照和 full 不同，fixed_fourier 的检查点不会被误当成 full 读入。
 - `FourierSpectrum(GraphSpectrum)`：不加参数、不加 buffer，只重写 `spectrum_for`。`affinity`、`normalized_laplacian` 不调用（它们仍然存在，`q`、`sigma_z` buffer 照常保存）。
-- 构造：和 `checks.build_full_model` 相同的顺序和种子，只把 `GraphSpectrum(GraphConfig(**m["graph"]))` 换成 `FourierSpectrum(FourierConfig(**m["graph"], basis="dct2"))`。`build_full_model` 自身要求 `config == load_protocol()`，不改它，在 addon 里另写一个同样结构的构造函数。
+- 构造：和 `checks.build_full_model` 相同的顺序和种子，只把 `GraphSpectrum(GraphConfig(**m["graph"]))` 换成 `FourierSpectrum(FourierConfig(**m["graph"], basis="dct2"))`。`build_full_model` 自身要求 `config == load_protocol()`，不改它，在 `fourier.py` 里另写一个同样结构的构造函数 `build_fixed_fourier(配置块, seed, device)`（不放 `runtime/addon/`，DROID 也要用；Koopman 的 `build_koopman` 同样放在 `koopman.py`）。
 
 ### 4.3 基底
 
@@ -96,7 +96,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 
 - **K = 16 正好切开一对简并模态**：(0,4) 进、(4,0) 不进，所以 fixed_fourier 的截断间隙在每个网格上都是 0。保持 K = 16 是为了和 PO-JEPA 的模态数一致；论文里写明排序规则和这一点。
 - 符号：直接用上面的余弦，不做 GraphSpectrum 那种按最大分量翻符号。同一个连续函数在不同网格上取样，符号天然一致；2×2 平均池化把 16×16 的 u_pq 映成 ½·cos(πp/32)·cos(πq/32)·u_pq^{8×8}（p, q < 8；½ 是两种网格归一化常数之比），所以跨网格时模态一一对应，方向不变。
-- 网格要求：K ≤ H·W，且每个方向的频率范围够用（8×8、12×12、16×16、20×20 都满足）。
+- 网格要求：K ≤ H·W，且每个方向的频率范围够用（8×8、12×12、16×16、20×20 都满足）。不满足时 `spectrum_for` 报错：坐标不是规则格点中心（和 `regular_grid(H, W)` 的差超过 1e-12）报 `fixed Fourier basis requires regular cell-center coordinates`；前 min(k+1, N) 个模态在这个网格上表示不了报 `grid does not resolve the first k+1 Fourier modes`（第 k+1 个用于 `cutoff_gap`）。
 
 ### 4.4 特征值
 
@@ -144,13 +144,14 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 
 输入输出合同和 `TokenTransformer.forward` 相同：raw Z [B, N_h, 1408] 模型 float32，`ActionSegments`，duration 为 CPU float64 [B]（≥ 0，单位是控制周期），`GridSpec`。
 
-1. **基底换到当前网格。** 16×16 上 W_h = W。其他网格用和 token 完全相同的重采样：`transfer = build_spatial_transfer(regular_grid(16,16), target_height=H, target_width=W)`，把 W 当成 [1, 256, K] 的“特征”做 `apply_spatial_transfer`，得到 W_h [N_h, K]（梯度传回 W）。要求 `transfer.target.coords` 和输入 grid 的坐标逐位相同，否则报错。8×8 是 2×2 平均，12×12 是双线性，DROID 的 20×20 是双线性放大。
+1. **基底换到当前网格。** 16×16 上 W_h = W。其他网格用和 token 完全相同的重采样：`transfer = build_spatial_transfer(regular_grid(16,16), target_height=H, target_width=W)`，把 W 当成 [1, 256, K] 的“特征”做 `apply_spatial_transfer`，得到 W_h [N_h, K]（梯度传回 W）。要求 `transfer.target.coords` 和输入 grid 的坐标逐位相同，否则报错；16×16 也核（输入坐标和 `regular_grid(16,16)` 逐位相同），坐标顺序不同的 16×16 网格不能被静默接受。8×8 是 2×2 平均，12×12 是双线性，DROID 的 20×20 是双线性放大。
+   - **DROID 原始分辨率（10 §8.5，S11 改）**：那里的网格是 `regular_grid(12,12)`、`regular_grid(20,20)`，不是重采样的目标。12×12 的双线性目标坐标和规则格点只差约 1e-16，20×20 放大时 R 在边缘按 edge 截断，目标坐标的边缘一圈和格点中心差 0.00625。基底仍是 W_h = R W（值不变，等于 W 在格点中心的双线性插值、边缘截断），只把坐标核对改成“输入坐标和 `regular_grid(H, W)` 的差 ≤ 1e-12”。仿真用到的三种网格两种规则都能过。
 2. **分析（面积加权内积）。** X = P_in(Z)，c_0 = (256 / N_h) · W_hᵀ X，形状 [B, K, 64]。16×16 上就是 Wᵀ X。粗网格上 W_h 的秩可能小于 K（8×8 只有 64 个 token，而 K = 76），这个做法不需要求逆。
 3. **动力学。** 64 个通道按 (2i, 2i+1) 分成 32 对。第 k 个模态第 i 对写成复数 z = c[..., 2i] + i·c[..., 2i+1]，λ_ki = −γ_ki + i·ω_ki，γ = softplus(raw_gamma) > 0。动作项 f = B·u ∈ R^{K×64}，同样配对成复数 φ。
 4. **按段精确积分。** 先 `validate_action_segments(controls, query_duration=duration)`。对每个样本按时间顺序取有效段 j，段长 Δ_j = max(0, min(end_j, T) − max(start_j, 0))，段内动作 u_j 为常数：
    z ← e^{λΔ_j} z + Δ_j · φ1(λΔ_j) · φ_j，其中 φ1(w) = (e^w − 1)/w。
    - e^{λΔ} 和 Δ·φ1(λΔ) 用 complex128 算（γ、ω 转 float64，保留梯度），乘到 float32 系数前转回 complex64。
-   - |w| < 1e-4 时 φ1(w) 用 1 + w/2 + w²/6，否则直接算 (e^w − 1)/w。
+   - |w| < 1e-4 时 φ1(w) 用 1 + w/2 + w²/6，否则直接算 `expm1(w)/w`；两个分支都先换成安全参数再用 `torch.where` 选，w = 0 处反向有限。
    - 无效（padding）段 Δ = 0，等于不变。各段 Δ 之和与 T 的差超过 1e-12 就报错。
    - T = 0 时没有有效段，c_T 与 c_0 逐位相同。
 5. **残差读出。** Ẑ = Z + P_out(W_h c_T) − P_out(W_h c_0)。每次前向调用 p_out 两次。T = 0 时 Ẑ = Z 逐位成立。
@@ -174,11 +175,13 @@ K = 使 |参数量(K) − PO-JEPA 参数量| 最小的正整数，相等时取�
 | 仿真 | 2 | 215,778 | 76 | 215,744 | 34（0.016%） |
 | DROID | 7 | 236,898 | 72 | 236,992 | 94（0.040%） |
 
-代码里按规则算 K 并写进登记；测试断言仿真得 76、DROID 得 72。
+代码里按规则算 K，写进检查点的 `model_config`；`validate_registration` 对 koopman 核 K 等于对登记的 PO-JEPA 参数量按规则取的值、实际参数量等于公式。v7 的 `preregister()` 不改，`check-addon` 的报告里另记 K。测试断言仿真得 76、DROID 得 72。
+
+参数量的口径和 v7 相同，含 `p_out.bias` 的 1,408 个参数。PO-JEPA 和 Koopman 都是残差读出 P_out(a) − P_out(b)，偏置精确相消、梯度恒为 0，所以这 1,408 个参数从不训练；matched_transformer 的读出是 Z + P_out(·)，偏置会训练。按可训练参数算，PO-JEPA 比 Transformer 少 1,408 个（约 0.65%），对基线有利。
 
 ### 5.7 检查点
 
-字段和 v7 Transformer 检查点相同（`schema_version`、`completed_steps`、`condition`、`model_state`、`optimizer_state`、`optimizer_param_names`、`model_config`、`loss_config`、`optimizer_config`、`provenance`、`rng_state`、`sampling_state`、`model_training`、`scheduler_state`、`scaler_state`、`runtime`），`model_config` 是 `KoopmanConfig` 的快照：
+字段和 v7 PO-JEPA 检查点（`training.save_training_checkpoint`，`schema_version` 1）相同，`condition` 为 `"koopman"`，`scheduler_state`、`scaler_state` 为 None（`schema_version`、`completed_steps`、`condition`、`model_state`、`optimizer_state`、`optimizer_param_names`、`model_config`、`loss_config`、`optimizer_config`、`provenance`、`rng_state`、`sampling_state`、`model_training`、`scheduler_state`、`scaler_state`、`runtime`），`model_config` 是 `KoopmanConfig` 的快照：
 
 ```python
 @dataclass(frozen=True)

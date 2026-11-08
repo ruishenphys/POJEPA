@@ -62,7 +62,7 @@
   - `spectrum_for` 输出的字段、形状、精度、设备和 `GraphSpectrum` 相同；`cutoff_gap` 为 0；`residual_norms` 为 0。
   - `_model_config` 的 `graph` 多出 `basis: "dct2"`，其余和 full 相同。
 - **初始权重**：同一种子下 time_only、space_only、fixed_fourier 的 `_model_hash` 等于 po_jepa_full 的；transformer_consistency 的等于 matched_transformer 的。
-- **transformer_consistency**：每步 6 次前向、6 次读出；第 0 步（预热系数 0）的参数更新和 matched_transformer 的第 0 步逐位相同；第 1 步起一致性项有非零梯度。
+- **transformer_consistency**：每步 6 次前向、6 次读出；第 0 步（预热系数 0）的参数更新和 matched_transformer 的第 0 步逐值相同（一致性项贡献 ±0，JEPA 梯度为 −0 的位置可能变成 +0，用 `torch.equal` 比）；第 1 步起一致性项有非零梯度（初始化时 `p_out` 为零、一致性梯度恰为 0，测试另用扰动过 `p_out` 的模型核）。
 - **koopman**
   - K 的规则给出 m = 2 时 76、m = 7 时 72，参数量 215,744 和 236,992。
   - T = 0 时输出与输入逐位相同。
@@ -70,7 +70,7 @@
   - φ1 在 |w| = 1e-4 两侧的两种算法相对差 < 1e-10。
   - 16×16 上 c_0 = WᵀX 逐位相同；网格坐标和重采样目标不一致时报错；8×8 上 K = 76 > 64 时能前向。
   - 初始化：`basis` 列正交归一，`raw_gamma` 全为 softplus⁻¹(0.1)，`omega` 全 0。
-- **5 个新条件**都能在 CPU 合成的仿真批上：前向、反传（全部参数有有限梯度）、跑 20 步、存检查点、读回后 `model_state` 逐位相同；第 10 步中断后续训到第 20 步，和不中断的结果逐位相同。
+- **5 个新条件**都能在 CPU 合成的仿真批上：前向、反传（全部参数有有限梯度；残差读出的条件里除 `p_out.bias` 外每个梯度非零，`p_out.bias` 的梯度恰为 0）、跑 20 步、存检查点、读回后 `model_state` 逐位相同；在第 10 步和第 15 步各中断一次（都从第 10 步的检查点续），续训到第 20 步，和不中断的结果逐位相同。
 - **评测分发**：5 个新条件都能跑 `run_prepared_evaluation`（假特征、几个窗口），`expected_type` 检查对错类型报错。
 - **检查点隔离**：fixed_fourier 的检查点不能被当成 po_jepa_full 读入（报配置不一致），反之亦然；transformer_consistency 和 matched_transformer 之间同样。
 

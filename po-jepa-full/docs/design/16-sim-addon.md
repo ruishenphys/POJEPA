@@ -38,7 +38,7 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 2. 建只用 JEPA 的版本：transformer_consistency 用 matched_transformer 的模型；fixed_fourier 用两个权重为 0 的 fixed_fourier。
 3. 在初始状态下量前 32 个训练批的三项梯度范数（只记录）。
 4. 用训练查询序列的前 300 批只做 JEPA 训练（学习率调度、裁剪和正式训练相同）。
-5. 在第 301–332 批上量三项梯度范数（transformer_consistency 用 `addon.calibration.generic_gradient_norms`，fixed_fourier 用 `training.consistency_gradient_norms`），取中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ = `calibration.rho` = 1。λ 必须有限且为正。
+5. 在第 301–332 批上量三项梯度范数（transformer_consistency 用 `addon.calibration.generic_gradient_norms`，fixed_fourier 用 `training.consistency_gradient_norms`），取中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ = `calibration.rho` = 1。λ 必须有限且为正；分母为 0 时报错，不除出 inf。transformer_consistency 在登记的初始化下一致性梯度恰为 0（残差读出的 `p_out` 零初始化），所以第 3 步会记到 0，这是正常的；第 5 步在 300 步之后量，分母一般非零。
 6. 两个条件都完成后，一次性写 `configs/calibration/addon/<tag>-u<步数>.yaml`：
 
 ```yaml
@@ -50,6 +50,8 @@ v7_calibration_sha256: …   # 导入的 v7 标定文件的 SHA
 ```
 
 逐批记录写在任务输出目录的 `calibration-<条件>.json`（字段和 v7 的 calibration.json 相同）。三个种子共用这一组 λ（和 v7 一样）。
+
+读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。
 
 ## 4. 复用 v7 的产物
 

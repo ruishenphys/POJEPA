@@ -10,7 +10,7 @@
    - 必须给 `TransformerSpec`、`ACSpec` 加字段时（第二期的 7 维动作），新字段取默认值时不进快照，保证 v7 的快照逐字节相同。
    - 只对新条件有意义的配置放进新的配置类（例如 `FourierConfig`），或者放进运行登记，不进 v7 类的快照。
 3. **新条件用名字分发。** 新条件名单 `ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")` 定义在 `runtime/addon/conditions.py`。共享函数里加一行“是新条件就交给 addon 模块”，放在 v7 原有分支之前；v7 原有的分支和检查不动。
-4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个可训练条件名合不合法”的检查上。它和 `V7_CONDITIONS` 一样不含 identity（identity 不训练）；评测侧的名单是 `evaluation.CONDITIONS`，本来就含 identity（§2.5）。
+4. **v7 的名单常量不动。** `comparison.CONDITIONS`、`comparison.V7_CONDITIONS`、`comparison.AC_CONDITIONS` 保持原值（`load_comparison_config` 和 `preregister` 依赖它们）。新增 `comparison.ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)`，只用在“这个可训练条件名合不合法”的检查上（S10 定义，S17 的入口检查用；v7 分支里的名单检查保持 `V7_CONDITIONS`）。它和 `V7_CONDITIONS` 一样不含 identity（identity 不训练）；评测侧的名单是 `evaluation.CONDITIONS`，本来就含 identity（§2.5）。
 
 ## 2. 第零期要改的地方
 
@@ -67,6 +67,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | `save_checkpoint` / 读检查点 | POJEPA 类走 `training.save_training_checkpoint`；transformer_consistency 走 Transformer 的保存函数，但 `loss_config` 用 `"full"` 标签；koopman 走 addon 的保存函数（格式见 08 §5.7） |
 | `_validate_registration` | 接受 `ALL_CONDITIONS` |
 | `_observed_update` 的读出次数检查 | 每次更新 `p_out` 被调用的次数：po_jepa 类和 fixed_fourier 为 5 × `readouts_per_phi`（残差读出时 = 10）；transformer_consistency 为 6；koopman 为 2。记录里的 `phi_calls` 相应为 5、6、1 |
+| `evaluate_batch` 的类型白名单 | 加 `KoopmanPredictor`（训练中的验证要用；对 v7 模型真值不变） |
 | `consistency_share` | POJEPA 类用 `training.consistency_gradient_norms`；transformer_consistency 用 `addon.calibration.generic_gradient_norms`（同一批、和单步相同的 6 次前向，08 §3）；koopman 返回 None |
 | `consistency_monitor_summary`、`early_check` | 原来只对 po_jepa_full 生效。新函数 `monitored_consistency_terms(condition, loss_config)` 决定看哪几项：po_jepa_full 固定 `("time", "space")`、不读权重（v7 测试用零权重调它，输出的键、键序和值与 v7 相同，po_jepa_full 仍走 v7 原文）；其余 v7 名字和 identity 返回 None（identity 拿到的是协议的正权重，所以按名字排除）；新条件看权重 > 0 的项（按 time、space 的顺序），一项都没有返回 None。新条件的汇总是 `measurements, rho, threshold, median_share, active, checked_terms`：`median_share` 只含被检查的项，`active` 只看这些项，`checked_terms` 是 list（例如 `["time"]`）。S08a 做到这里，此时对 v7 名字和 identity 以外的任何名字都按权重判断；S10 加了 `ADDON_CONDITIONS` 之后改成只认这 5 个新名字，其他名字报 `ValueError` |
 
@@ -80,12 +81,12 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 ### 2.6 `runtime/v7jobs.py`、`run.py`、`runtime/checks.py`
 
 - `v7jobs.JOB_CONDITIONS` 末尾追加 `ADDON_CONDITIONS`；`run_job`、`transfer_job` 不用另改。
-- `run.py` 的 `--condition` 选项加 5 个新条件；新增子命令 `calibrate-addon`、`check-addon`、`d4`、`spectral-gap`（16 §5）。`run`、`resume`、`transfer`、`evaluate` 的行为不变。
-- `checks.require`/`workflow.require_calibrated_weights`：新条件里 transformer_consistency 和 fixed_fourier 还要求补跑标定文件存在（16 §3.2），其余新条件只要求导入的 v7 标定存在。`load_protocol()` 不改。
+- `run.py` 的 `--condition` 选项加 5 个新条件（S10）；新增子命令 `calibrate-addon`、`check-addon`（S17）、`d4`、`spectral-gap`（S18）（16 §5）。`run`、`resume`、`transfer`、`evaluate` 的行为不变。
+- 补跑标定的门槛放在 `workflow.execute` 里、紧接 `require_calibrated_weights` 之后，按 `args.condition` 判断，失败阶段仍记为 `calibration`（`require_calibrated_weights` 本身还被不带条件名的 `write_calibrated_weights` 调用，所以不改它）：新条件里 transformer_consistency 和 fixed_fourier 还要求补跑标定文件存在（16 §3.2），其余新条件只要求导入的 v7 标定存在。`load_protocol()` 不改。
 
 ### 2.7 来源登记
 
-`comparison.consumer_sources()` 加上新文件：`src/po_jepa/fourier.py`、`koopman.py`、`generic_consistency.py`、`ln_metrics.py` 和 `src/po_jepa/runtime/addon/*.py`。这些路径满足 `training._provenance` 对键名的要求（以 `src/po_jepa/` 开头、`.py` 结尾）。
+`comparison.consumer_sources()` 在 `is_v7()` 分支里加上新文件：`src/po_jepa/fourier.py`、`koopman.py`、`generic_consistency.py`、`ln_metrics.py` 和 `src/po_jepa/runtime/addon/*.py`（用 glob，S17、S18 加的文件自动进来）。新树里 v7 条件的 `consumer_sha256` 因此比 v7 树多几个键；S08a 以后它本来就和 v7 树不同，v7 树的运行不在新树里续训。这些路径满足 `training._provenance` 对键名的要求（以 `src/po_jepa/` 开头、`.py` 结尾）。
 
 ### 2.8 `tools/` 的复制件
 
@@ -102,6 +103,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 
 - `baselines.py`：`TransformerSpec` 和输入检查接受 m 维动作（DROID m = 7）。新字段取默认值 2 时不进快照。
 - `ac_baseline.py`：新增“官方输入”模式（保留官方的 7 维动作编码器和状态编码器，用真实本体状态）。v7 的 2 维替换模式不变，`ACSpec` 新字段取默认值时不进快照。
+- `addon.conditions.koopman_step` 用 `comparison._tf_batch` 核批，它经 `baselines.validate_inputs` 写死 2 维动作；随 Transformer 的 m 维动作一起放开。
 - 求谱后端：GPU float64 或 CPU 多线程逐样本。后端选择**不放进 `GraphConfig`**（否则 v7 的 `model_config` 快照会变），由运行登记里单独的 `spectral_backend` 字段给出，所有 PO-JEPA 类条件用同一个；默认仍是 v7 的 CPU 批量求解。
 
 ## 4. 新文件
