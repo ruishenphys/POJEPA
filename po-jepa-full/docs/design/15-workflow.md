@@ -11,7 +11,7 @@
 
 - 一段在审核时，提示词 agent 写下一段的提示词，编写 agent 可以写另一条线上的段。
 - 审核不通过：编写 agent 按定位到的问题修改，审核只复审改动的部分。
-- 合并条件：审核 agent 和 Codex 都通过、测试全绿，我用 squash 合并进 `full-model`，主干每一步都能跑。
+- 合并条件：审核 agent 和 Codex 都通过、测试全绿（14 §1 的 4 个 CUDA 版本失败除外），我用 squash 合并进 `full-model`，主干每一步都能跑。
 - 防止堆积：同时最多 2 段在审核中；修改优先于开新段；同一段连续两次不通过，我先停下来查是不是提示词或规格的问题。
 - 写代码时发现规格有问题：先改规格（单独提交，说明原因），再改代码；影响论文或实验设计的改动先问 Jerry。
 
@@ -40,7 +40,7 @@ S17 和 S18 都只依赖 S10，可以并行写、分开审。按 agent 的速度
 
 ## 4. 在 VS Code 里看
 
-克隆一次仓库并切到 `full-model` 分支，之后点同步就是最新的主干。装 GitHub Pull Requests 扩展，每段的 PR 和两边的审核意见都能在 VS Code 里看。
+克隆一次仓库并切到 `full-model` 分支，之后点同步就是最新的主干。用 VS Code 打开的是 `po-jepa-full/` 这个文件夹（不是仓库根目录），`po-jepa-full/.vscode/settings.json` 才会生效；把里面第一行的解释器路径改成自己机器上装了 torch 的 Python。这个文件不进 MANIFEST，改它不影响运行。装 GitHub Pull Requests 扩展，每段的 PR 和两边的审核意见都能在 VS Code 里看。
 
 ## 5. 现在等 Jerry 的事
 

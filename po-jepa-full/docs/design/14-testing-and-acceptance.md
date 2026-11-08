@@ -7,31 +7,37 @@
 | 层 | 在哪跑 | 内容 | 谁跑 |
 |---|---|---|---|
 | 单元测试 | CPU，几分钟 | 每个新函数的手算值、边界和报错 | 编写 agent 和审核 agent 都跑 |
-| v7 回归 | CPU | v7 原有的 `tests/` 在 po-jepa-full 里不改一字全部通过 | 每段都跑 |
-| 双树对照冒烟 | CPU，假特征 | 07 §5.2：同样输入下 v7 树和新树的 6 个 v7 条件逐位相同 | S00、S08a、S10 都跑 |
+| v7 回归 | CPU，约 4 分钟 | v7 原有的 `tests/` 在 po-jepa-full 里不改一字通过；没有 CUDA 13.0 版 torch 的机器上只允许 `test_delivery.py` 的 4 个 CUDA 版本失败（07 §5.1） | 每段都跑 |
+| 双树对照冒烟 | CPU，假特征，1 线程，约 2 小时，后台跑 | 07 §5.2：同样输入下 v7 树和新树的 6 个 v7 条件逐位相同 | S00、S08a、S10 都跑 |
 | 端到端冒烟 | CPU，假特征、小规模 | 每个补跑子命令和任务文件从头跑到尾（标定、训练 20 步、D4、汇总） | S17、S18 |
 | 真实试跑 | 机哥的两卡机器 | jobs-addon-pilot.txt（16 §7.4），含真实 v7 检查点上的等价核对 | 合并后，正式补跑之前 |
 
 所有测试在 `po-jepa-full/` 下用 `python -m pytest tests -q` 运行；新测试文件命名 `tests/test_addon_*.py`。测试不联网、不需要 GPU、不读真实特征，假特征用 v7 测试里已有的合成方法生成。
 
+“逐位相同”的测试（续跑和不中断比、两次运行比、新旧代码比）在 1 线程下做：同一进程里的两次运行用 `torch.set_num_threads(1)`（比完恢复原值）；跨进程的比较另加 07 §5.2 的固定环境变量。v7 在多线程 CPU 上本身就不能逐位复现。
+
+下文“测试全过”“全绿”都指除了上表那 4 个 CUDA 版本失败以外没有失败。
+
 ## 2. 通用验收条件（每段都要满足）
 
-1. 本段测试和 v7 回归全部通过，输出贴在 PR 里。
+1. 本段测试和 v7 回归全部通过（§1 的 4 个 CUDA 版本失败除外），输出贴在 PR 里。
 2. 只改了本段规格允许改的文件；`git diff` 里没有别的文件。
 3. 没有放宽任何已有检查（报错条件、容差、类型检查）。
 4. 新增的每个报错都有一条触发它的测试。
-5. 所有写文件的地方先写临时文件再换名；JSON 用 `cache._write_json`。
+5. 所有写文件的地方先写临时文件再换名；JSON 用 `cache._write_json`（双树对照脚本的父进程不能导入任何一棵树的 `po_jepa`，用一个行为相同的小函数）。
+6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 一起提交；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
 
 ## 3. 分段验收
 
 ### S00 脚手架
 
-- `po-jepa-full/` 下有 v7 提交 `911bc09` 的 `src/`、`configs/`、`reference/`、`tests/`、`tools/`、`run.py`、`pyproject.toml`、`DATASET.md`，和 v7 树逐字节相同（`diff -r` 只允许 MANIFEST.json、SOURCE_MAP.json 不同，以及新加的 `.vscode/`、`docs/`、`README.md`）。
-- `tools/refresh_manifests.py` 排除 `docs/`（07 §2.8）后重算 MANIFEST；`workflow.verify_bundle` 通过。
-- `reference/` 下的协议文件 SHA 和 v7 相同，`data.cache.verify_fixed_protocol` 通过。
-- v7 回归测试全部通过。
-- 双树对照冒烟脚本 `tests/addon_dual_tree.py`（只在开发机上跑，需要同时有 v7 树）写好并通过：6 个 v7 条件各 20 步，初始权重哈希、每步损失、第 20 步 `model_state`、全部逐窗口评测值逐位相同。
+- 从 v7 提交 `911bc09` 复制：`po-jepa-full/` 下的 `src/`、`configs/`、`reference/`、`run.py`、`pyproject.toml`、`DATASET.md`、`SOURCE_MAP.json` 和 911bc09 逐字节相同；`tests/` 只多 `addon_dual_tree.py`、`test_addon_dual_tree.py` 两个文件；`tools/` 只有 `refresh_manifests.py` 差 07 §2.8 的三行；另加 `.vscode/settings.json`，`MANIFEST.json` 重算。`README.md` 和 `docs/` 在设计提交里已有，本段不动。
+- 新目录里重算的 MANIFEST 有 90 项，不含 `docs/`、`.vscode/` 下的文件和 `README.md`；`workflow.verify_bundle` 在新目录通过。
+- `reference/` 下的协议文件 SHA 和 v7 相同，`cache.verify_fixed_protocol` 通过。
+- v7 回归测试通过（§1 的 4 个 CUDA 版本失败除外，和根目录的 v7 树相同）。
+- 双树对照冒烟脚本 `tests/addon_dual_tree.py` 和它的比较器单元测试写好，按 07 §5.2 跑一遍逐位相同。
 - `.vscode/settings.json` 让 VS Code 识别 `src/` 和 pytest。
+- 逐条的验收命令和期望输出见 `docs/segments/S00.md` §7（A1–A22）。
 
 ### S08a 共享小改（第零期部分）
 
@@ -70,7 +76,7 @@
 
 ### S17 补跑入口
 
-范围：16 §3、§5 的 `run`、`calibrate-addon`、`check-addon`、`transfer`，`import_v7_calibration.py`、`addon_preflight.py`、`make_addon_jobs.py`、`run_jobs.py` 和 `refresh_manifests.py` 的复制件、`plan_v7.py` 的复制件、`补跑说明.md`。
+范围：16 §3、§5 的 `run`、`calibrate-addon`、`check-addon`、`transfer`，`import_v7_calibration.py`、`addon_preflight.py`、`make_addon_jobs.py`、`run_jobs.py` 的复制件、`plan_v7.py` 的复制件、`补跑说明.md`（`refresh_manifests.py` 的改动已在 S00 做完）。
 
 - `import_v7_calibration.py`：在临时目录里造一个假的 v7 树（含 git HEAD），复制后字节相同、`IMPORTED.json` 正确；HEAD 不对、文件缺、λ 为空、目标已存在且不同，各自报错；重复运行不改任何文件。
 - `calibrate-addon`（假特征，把 300/32 调成 3/2 的测试配置）：写出的 yaml 结构和 16 §3.2 相同；λ 等于用同样梯度范数手算的值；两个条件都完成才写文件（中途失败不留半个文件）。
