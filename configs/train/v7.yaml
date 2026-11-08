@@ -20,3 +20,8 @@ calibration:
   rho: 1.0
   sigma_z_ids: 8              # σ_z 标定：训练段内等距取 8 条轨迹
   sigma_z_ticks: [0, 10, 20]  # 每条取 3 帧；σ_z = sqrt(Q·Z 两两平方距离的中位数)，与 v4 real_feature_probe 相同规则
+# 2026-11-08 导师：图谱特征向量有符号/重根旋转不确定性，动作驱动与非线性交互改在 token 空间计算再投影回模态：
+#   dC/dt = A(Lambda,g) C + Psi^T [ B(X_t,a) + F(Psi C, X_t, a) ]；A 与式(4)不变。见 src/po_jepa/dynamics.py 模块说明。
+model:
+  dynamics:
+    forcing_space: token

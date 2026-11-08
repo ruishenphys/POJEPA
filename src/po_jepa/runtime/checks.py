@@ -86,6 +86,8 @@ def load_protocol() -> dict:
         v7 = yaml.safe_load((ROOT/"configs/train/v7.yaml").read_text(encoding="utf-8"))
         merged = _merge_v4(merged, v7["schedules"][v7_updates()])
         merged = _merge_v4(merged, dict(calibration=v7["calibration"]))
+        if "model" in v7:   # 2026-11-08 导师：动作驱动与非线性交互改在 token 空间（dynamics.forcing_space: token）
+            merged = _merge_v4(merged, dict(model=v7["model"]))
         path = v7_calibration_path()
         if path.exists():
             cal = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -250,8 +252,12 @@ class TrainingObserver:
         self.queries.append(dict(raw=tensor_stats(raw), projected=tensor_stats(q.projected),
             coefficients=tensor_stats(q.initial_coefficients), context=tensor_stats(q.dynamics.pooled),
             eigenvalues_cpu=tensor_stats(q.spectrum.eigenvalues_cpu), basis=tensor_stats(q.spectrum.basis),
-            A=tensor_stats(q.dynamics.coefficients.a_blocks), B=tensor_stats(q.dynamics.coefficients.b_matrix),
-            spectral_bias=tensor_stats(q.dynamics.spectral_bias), spatial_bias=tensor_stats(q.dynamics.spatial_bias)))
+            A=tensor_stats(q.dynamics.coefficients.a_blocks),
+            # token 模式（v7 主模型）：B 是 token 空间动作场 [B,N,64,m]，模态偏置换成 token 相对位置偏置
+            **(dict(B_field=tensor_stats(q.dynamics.b_field), token_bias=tensor_stats(q.dynamics.token_bias))
+               if q.dynamics.b_field is not None else
+               dict(B=tensor_stats(q.dynamics.coefficients.b_matrix), spectral_bias=tensor_stats(q.dynamics.spectral_bias),
+                    spatial_bias=tensor_stats(q.dynamics.spatial_bias)))))
         if len(self.queries) == 3 and raw.requires_grad:
             self.stack.callback(raw.register_hook(self._feedback).remove)
         return q
