@@ -39,7 +39,7 @@ D4 对每个条件、每个种子跑一次（v7 的 6 个条件读 v7 的检查�
 
 记号：Φ_Π(z) 表示按分割 Π = (τ_1, …, τ_n) 逐段滚动：每一段都是一次完整的 Φ 调用，输入是上一段输出的原始预测（和 `temporal_predictions` 的 composed 一样，不 LN、不截断梯度、不用真实中间帧），动作用 `split_action_segments` 按段精确切开。
 
-Φ_T(z) 的动作写法：v7 有两种，`point_metrics` 的 `direct` 把动作在 T/2 处 `split_action_segments` 切开再 `concatenate_action_segments` 接上，`pair_metrics` 和 `delta_act` 用不切开的 u；T/2 落在一个 tick 内部时（T = 1、3）两种写法的控制段不同，数值可以不同。`tcd_ln`、pd、xpd 的细网格一侧、`tcd_unequal`、留出分解、长时程都用 `point_metrics` 的写法（等价核对的 `future_jepa_distance`、`tcd_normalized` 必须用它才能和 v7 的记录对上，同一个张量也可以复用）；`scd_ln` 用 `pair_metrics` 的写法（不切开），和 v7 的 `scd_normalized` 一致（推荐做法，待 Jerry 确认）。受影响的论文数字是 `tcd_ln:T=1`、`tcd_ln:T=3`、`heldout_*:T=3`（其余时长 T/2 是整数 tick）。
+Φ_T(z) 的动作写法：v7 有两种，`point_metrics` 的 `direct` 把动作在 T/2 处 `split_action_segments` 切开再 `concatenate_action_segments` 接上，`pair_metrics` 和 `delta_act` 用不切开的 u；T/2 落在一个 tick 内部时（T = 1、3）两种写法的控制段不同，数值可以不同。`tcd_ln`、pd、xpd 的细网格一侧、`tcd_unequal`、留出分解、长时程都用 `point_metrics` 的写法（等价核对的 `future_jepa_distance`、`tcd_normalized` 必须用它才能和 v7 的记录对上，同一个张量也可以复用）；`scd_ln` 用 `pair_metrics` 的写法（不切开），和 v7 的 `scd_normalized` 一致（Jerry 2026-11-08 定：按推荐做法）。受影响的论文数字是 `tcd_ln:T=1`、`tcd_ln:T=3`、`heldout_*:T=3`（其余时长 T/2 是整数 tick）。
 
 ### 3.2 LN 空间的 TCD 和 SCD
 
@@ -150,7 +150,7 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 - 对 400 个测试窗口的起点帧，在 16×16、8×8（R z）、12×12（R z）上用 po_jepa_full 的 `GraphSpectrum` 求最低 16 个特征对，记录 λ_16、λ_17、`cutoff_gap`、前 16 个模态相邻间隙的中位数，以及两者之比。
 - 报告每个场景、每个网格上这些量的 5、25、50、75、95 分位数。
 - 预先定好的判断规则：每个场景、每个网格上比值的中位数都大于 1，论文保留原句；否则改成“K = 16 is fixed in advance and shared across grids”。
-- 比值和规则的读法：每个窗口、每个网格算 ratio = `cutoff_gap` / median(15 个相邻间隙)，再取 400 个窗口 ratio 的中位数（`torch.quantile` 线性插值，偶数个时就是中间两个的平均）；“大于 1”是严格大于；某个窗口的相邻间隙中位数为 0 时 ratio 记 None、计入 `undefined_ratio`、不进分位数，全是 None 时判“不保留原句”（推荐做法，待 Jerry 确认）。
+- 比值和规则的读法：每个窗口、每个网格算 ratio = `cutoff_gap` / median(15 个相邻间隙)，再取 400 个窗口 ratio 的中位数（`torch.quantile` 线性插值，偶数个时就是中间两个的平均）；“大于 1”是严格大于；某个窗口的相邻间隙中位数为 0 时 ratio 记 None、计入 `undefined_ratio`、不进分位数，全是 None 时判“不保留原句”（Jerry 2026-11-08 定：按推荐做法）。
 - fixed_fourier 的截断间隙由公式给出，恒为 0（08 §4.3），在同一张表里列出。
 
 ## 6. 编码器核对
@@ -160,7 +160,7 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 - `tools/encoder_identity.py`，CPU 任务，A0 段。
 - 两边去掉 `module.`、`backbone.` 前缀后按名字配对，比较 AC 权重里的 `encoder`（和 `target_encoder`，如果有）与 fpc64-256 的 `target_encoder`（和 `encoder`）。
 - 报告：配对上的张量数、按存储精度逐位相同的个数、最大绝对差、两边各自配不上的键、精度不同的键。全部配对、全部逐位相同才判“同一份”。
-- 结论取哪一对：主比较是 AC `encoder` 对 fpc64-256 `target_encoder`（v7 训练和 D4 用的就是 `target_encoder`），`verdict` 取主比较的（`same`/`different`/`missing_keys`），其余配对也算、写进 `comparisons`；逐位相同按存储字节比，不转精度；前缀 `module.`、`backbone.` 各去一次，去掉后重名报错。论文里写的那句话以 `verdict` 为准（推荐做法，待 Jerry 确认）。
+- 结论取哪一对：主比较是 AC `encoder` 对 fpc64-256 `target_encoder`（v7 训练和 D4 用的就是 `target_encoder`），`verdict` 取主比较的（`same`/`different`/`missing_keys`），其余配对也算、写进 `comparisons`；逐位相同按存储字节比，不转精度；前缀 `module.`、`backbone.` 各去一次，去掉后重名报错。论文里写的那句话以 `verdict` 为准（Jerry 2026-11-08 定：按推荐做法）。
 - 结果写进论文。
 
 ## 7. 输出格式
