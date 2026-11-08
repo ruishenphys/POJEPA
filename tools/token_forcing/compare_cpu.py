@@ -110,7 +110,7 @@ loss_cfg = LossConfig(**{k: cfg["loss"][k] for k in LossConfig.__dataclass_field
 def build(space, seed):
     torch.manual_seed(seed)
     return POJEPA(ProjectionConfig(**m["projection"]), GraphSpectrum(GraphConfig(**graph_cfg)),
-                  ModalDynamics(DynamicsConfig(**m["dynamics"], forcing_space=space)), IntegratorConfig(**m["integrator"]))
+                  ModalDynamics(DynamicsConfig(**{**m["dynamics"], "forcing_space": space})), IntegratorConfig(**m["integrator"]))
 
 
 # ---------- 验证集与规范扰动 ----------
