@@ -45,6 +45,8 @@ def test_mode_order_matches_table():
     assert mode_order(1) == ((0, 0),)
     assert mode_order(16)[-1] == (0, 4) and mode_order(17)[-1] == (4, 0)
     assert len(set(mode_order(76))) == 76 and mode_order(76)[:17] == mode_order(17)
+    # Koopman 的 K = 76 切在 p²+q² = 85 那组里：靠 max(p,q) 排序取 (6,7)，不取 (2,9)、(9,2)、(7,6)
+    assert mode_order(77)[68:] == ((7, 5), (4, 8), (8, 4), (0, 9), (9, 0), (1, 9), (9, 1), (6, 7), (7, 6))
 
 
 def test_eigenvalues_match_table_and_formula():
@@ -140,6 +142,11 @@ def test_spectrum_errors(monkeypatch):
     ]
     if not torch.cuda.is_available():
         cases.append((ValueError, "^requested CUDA is unavailable$", dict(model_device=torch.device("cuda", 0))))
+    with monkeypatch.context() as patch:      # 照抄 lowest_eigenpairs 的设备号检查：CPU 机器上假装有 1 张卡
+        patch.setattr(torch.cuda, "is_available", lambda: True)
+        patch.setattr(torch.cuda, "device_count", lambda: 1)
+        with pytest.raises(ValueError, match="^requested CUDA index does not exist$"):
+            spectrum.spectrum_for(z, grid, k=16, model_device=torch.device("cuda", 1))
     for error, message, change in cases:
         kwargs = dict(source=z, grid=grid, k=16, model_device=CPU) | change
         with pytest.raises(error, match=message):

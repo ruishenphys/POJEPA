@@ -2,6 +2,7 @@
 
 import cmath
 import copy
+import hashlib
 import math
 
 import pytest
@@ -97,6 +98,12 @@ def test_initialization():
     bound = math.sqrt(6/(1408+64))
     assert model.p_in.weight.abs().max().item() <= bound and model.p_out.weight.abs().max().item() <= bound
     assert .0009 < model.action_gain.std().item() < .0011 and model.action_gain.mean().abs().item() < 1e-4
+    # 按 08 §5.2 表的顺序建（p_in、p_out、action_gain）：种子 1703 下三个随机张量的字节固定（torch 2.11 CPU）
+    digests = {k: hashlib.sha256(model.state_dict()[k].contiguous().numpy().tobytes()).hexdigest()
+               for k in ("p_in.weight", "p_out.weight", "action_gain")}
+    assert digests == {"p_in.weight": "803c58285587507e831337f1406738159fe47c7ae96b1224140e44d333b96db4",
+                       "p_out.weight": "7605ce43f405124a259072c91108404954dad998ad4cf9f7cfd4e38393f7996a",
+                       "action_gain": "240ba9c7a122cca6d44efb576839e70f5e7c6b8ed765d10c2acfc6579bc03bcf"}
     again = build_koopman(KoopmanConfig(modes=76, action_dim=2), 1703, CPU)
     assert all(torch.equal(v, again.state_dict()[k]) for k, v in model.state_dict().items())
     other = build_koopman(KoopmanConfig(modes=76, action_dim=2), 1704, CPU).state_dict()
