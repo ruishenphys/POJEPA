@@ -131,11 +131,11 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 
 1. **v7 原有测试**：`tests/` 下 v7 的测试在 po-jepa-full 里通过，不改测试本身。没有 CUDA 13.0 版 torch 的机器上，`tests/test_delivery.py` 有 4 个测试因 `environment.verify_versions` 报 CUDA 版本不同而失败，未改动的 v7 树同样如此；只允许这 4 个失败、报错相同（GPU 机器上应全部通过）。
    测试里的 `verify_bundle` 全都打了补丁，没有测试读 MANIFEST，清单错了测试照样全绿。所以清单另外显式核对：改了进清单的文件，就在 po-jepa-full 下运行 `tools/refresh_manifests.py` 重算并提交；然后在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()`，必须通过（14 §2）。
-2. **双树对照冒烟** `tests/addon_dual_tree.py`（S00 写，S08a、S10 原样复用；只在同时有 v7 树的开发机上跑，pytest 不收集它）：
+2. **双树对照冒烟** `tests/addon_dual_tree.py`（S00 写；S08a 补排除了 4 个随源码变的键，S08a §3.10.1；S10 原样复用；只在同时有 v7 树的开发机上跑，pytest 不收集它）：
    - 输入：v7 的 `encode_v7.py --fake-encoder` 生成的假特征（van_der_pol，40 条轨迹，两棵树读同一份）。每棵树各起一个子进程，运行本树的 `tools/smoke_v7_cpu.py --updates 20 --seed 1703 --jobs po_jepa_full,po_jepa_no_consistency,matched_transformer,identity,vjepa2_ac_small,vjepa2_ac`：每个条件训练 20 步（第 0、10、20 步验证）加评测，identity 以外的 5 个条件另做一次只评测重跑。
    - vjepa2_ac：CPU 上做不了官方规模（约 3 亿参数，要官方权重），两棵树都换成测试专用的缩小规格 `ACSpec(width=64, depth=2, heads=4, mlp_ratio=4.0)` 和同一份假权重，走的代码路径（载入官方权重、微调、检查点、评测）和正式运行相同；官方规模的数值等价由第 3 项核。
    - 只在 1 线程、固定环境下跑：`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`、`OMP_DYNAMIC=FALSE`、`MKL_DYNAMIC=FALSE`、`MKL_CBWR=COMPATIBLE,STRICT`、`PYTHONHASHSEED=0`。实测 v7 树自己在 2 线程、4 线程下连跑两次就不能逐位复现（标定的 λ 就不同），多线程下两棵树的不同分不清是代码还是线程调度造成的。
-   - 逐位相同的项：标定结果、初始权重哈希、每一步的训练记录（损失、梯度量、学习率、调用次数）、每个验证文件的逐窗口值和选点、第 20 步的 `model_state`、每一条测试评测行（含只评测重跑）和评测汇总。不比耗时、绝对路径和来源字段（源码 SHA 在 S08a 以后会合法地变化）。除了按项点名比较，还对 `smoke/` 下的全部文件做整份比较：文件集合相同，全部 JSON 和全部检查点在删掉一组固定的键（耗时、含耗时的文件 SHA、绝对路径、源码 SHA、从不播种的全局随机状态）以后相同，所以表里没点名的字段也不会漏掉。完整的比较表、排除的键和每项的条数在 `docs/segments/S00.md` §3.4.5。
+   - 逐位相同的项：标定结果、初始权重哈希、每一步的训练记录（损失、梯度量、学习率、调用次数）、每个验证文件的逐窗口值和选点、第 20 步的 `model_state`、每一条测试评测行（含只评测重跑）和评测汇总。不比耗时、绝对路径和来源字段（源码 SHA 在 S08a 以后会合法地变化）。除了按项点名比较，还对 `smoke/` 下的全部文件做整份比较：文件集合相同，全部 JSON 和全部检查点在删掉一组固定的键（耗时、含耗时的文件 SHA、绝对路径、源码 SHA、含源码 SHA 的预登记的摘要、从不播种的全局随机状态）以后相同，所以表里没点名的字段也不会漏掉。完整的比较表、排除的键和每项的条数在 `docs/segments/S00.md` §3.4.5。
    - 一次约 1 小时 50 分（两棵树并行，各占 1 个核；S00 实测 1:47:37，机器有别的负载时到 2:18:26），时间几乎都花在评测上，要放到后台跑，并在独立会话里起（`setsid`），免得被后台命令的 2 小时时限打断。
 3. **真实检查点等价核对**：D4 在每个 v7 检查点上重算 v7 的标准指标，和 v7 自己的评测记录比较（10 §4）。这一步在机哥的机器上随 D4 一起跑。
 4. **快照核对**：对 6 个 v7 条件，新树里现建模型的 `_model_config`、`_loss_config`、Transformer 规格、AC 规格序列化后和 v7 检查点里存的逐字节相同。
