@@ -1,0 +1,24 @@
+{
+  "upstream_raw_sha256": {
+    "README.md": "b3fdbeeb847ffc464b17afa18d063b2cc3d79d9a554f4619847b91fca65387db",
+    "app/main.py": "868a72de6f2d660e587642b64b761a349e7e303653ada26dc48822b0dff86e2c",
+    "app/scaffold.py": "1d02e30636b9ee9f0a075704ed93bdd56b5e862402409f9a76f629276568a3a2",
+    "app/vjepa_droid/droid.py": "c506a93aacf7e2ad6002f8431a36247e5f2c315f3558264fecacd567e5195874",
+    "app/vjepa_droid/train.py": "00a3a1d20b81a299ce65150d1b13664727b51470a8e176a0f1e781992bf534ed",
+    "app/vjepa_droid/transforms.py": "de1cd620ebdfa5456cf7672113e740d8bb6431086412266866c47b9cfcc414c6",
+    "app/vjepa_droid/utils.py": "07d39569c4c8a9402042d93be34cf840867588c6e24cc2dec6217690ccde9d59",
+    "configs/train/vitg16/droid-256px-8f.yaml": "6610d6615c892a803f3cd7a80cffdb950d83505d121b4ce33a97b99d628d0777",
+    "evals/hub/preprocessor.py": "46392b31b97ce6eb875f50f59c8781b523f1982103ff5b91c3f32f35d41f44c9",
+    "evals/video_classification_frozen/utils.py": "ebbb852e8926ea309860e858203fe8b79d968ccc15a22413a02b26c4735af0dc",
+    "hubconf.py": "13bee953fcde539772e216d6184b957d460ffc83b267a322ff6ea1c777104498",
+    "src/datasets/utils/video/transforms.py": "aee37252469832b0bc4b5dcc5b267e8d804ca4af1a84896b9ca34b17c85e7c77",
+    "src/datasets/utils/video/volume_transforms.py": "e2edca4721d79cbfc4e6a6a33730f391414de7ae242e778311489a684e3bdeea",
+    "src/hub/backbones.py": "4426bf4c593889bed1632bca215a19832a3293437be3647b6a966e5b2f061c40",
+    "src/masks/utils.py": "4b89835fd20b500978d30f5238fe726f329c62a9ccecb25405326ec1ff22d491",
+    "src/models/ac_predictor.py": "a37df419c7b8d8bfd1510c780b54e30017d0e52372e35687d8e483f280837da7",
+    "src/models/utils/modules.py": "d8b90e8ea2f1e7e1bf03358775b2daf8b6093a9377e7d8d9d819a8759d345973",
+    "src/models/utils/patch_embed.py": "9ffbe47dbfee28da5ad4a650634ced9028bc51c3aeb55d970ca635b5797c5a75",
+    "src/models/vision_transformer.py": "16864ee2f4b4b89a9fd4131de82424d81965ddf501bc5bbf91e5673c084f02b2",
+    "src/utils/checkpoint_loader.py": "4829e49e8ceff502252b5582691a6d5b9d31bb2fea9ad1383bd6f35d22ec250f"
+  }
+}

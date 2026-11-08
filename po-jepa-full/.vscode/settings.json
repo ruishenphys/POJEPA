@@ -1,0 +1,15 @@
+{
+  "python.defaultInterpreterPath": "/home/user/.venv-pojepa/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/src", "${workspaceFolder}/tests"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.cwd": "${workspaceFolder}",
+  "python.testing.pytestArgs": ["tests"],
+  "files.eol": "\n",
+  "files.insertFinalNewline": false,
+  "files.trimFinalNewlines": false,
+  "files.trimTrailingWhitespace": false,
+  "editor.formatOnSave": false,
+  "files.readonlyInclude": {"reference/**": true, "configs/train/default.yaml": true},
+  "files.exclude": {"**/__pycache__": true, "**/.pytest_cache": true}
+}

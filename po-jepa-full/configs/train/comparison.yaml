@@ -1,0 +1,21 @@
+# F05 实现选择：只按参数数量选结构，禁止根据任何效果指标挑选。
+schema_version: 1
+conditions: [matched_transformer, po_jepa_no_consistency, po_jepa_full]
+untrained: identity
+parameter_relative_tolerance: 0.01
+selection: minimum_absolute_parameter_difference_then_lexicographic_spec
+transformer:
+  encoder_dim: 1408
+  action_dim: 2
+  width: 64
+  heads: 4
+  layers: 1
+  feedforward_candidates: [112, 128, 144]
+  dropout: 0.0
+  activation: gelu
+  layer_norm_epsilon: 0.00001
+  norm_first: false
+  grid_embedding: linear_xy_without_bias
+  duration_embedding: linear_cycles_without_bias
+  action_embedding: linear_ux_uy_start_end_with_bias
+  output: spatial_tokens_linear_to_raw_Z

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "po-jepa-research"
+version = "0.4.0"
+description = "固定原稿公式的 PO-JEPA 单卡验证代码"
+requires-python = ">=3.12,<3.13"
+dependencies = ["torch==2.11.0", "numpy==2.4.3", "PyYAML==6.0.3"]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+po-jepa = "po_jepa.runtime.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = ["--strict-config", "--strict-markers"]

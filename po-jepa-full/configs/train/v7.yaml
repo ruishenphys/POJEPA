@@ -1,0 +1,22 @@
+# v7 覆盖层：只在 run.py 的 v7 命令里生效（环境变量 PO_JEPA_PROTOCOL=v7）；v6 的测试与复现不受影响。
+# 合并顺序：default.yaml ← v4.yaml ← 本文件的 schedules[训练步数] ← configs/calibration/<系统>-<条数>-u<步数>.yaml
+schema_version: 1
+protocol_id: po_jepa_v7_overlay
+# 训练步数只允许这两档：2000 = 小数据试跑（与 v6 相同的日程），10000 = 正式运行（导师：要看完整收敛）
+schedules:
+  2000:
+    training: {updates_per_condition: 2000}
+    loss: {lr_decay_updates: 2000, lr_warmup_updates: 100, consistency_warmup_updates: 200}
+    validation: {interval_updates: 200}
+    monitoring: {early_check_updates: 400}
+  10000:
+    training: {updates_per_condition: 10000}
+    # 与 v6 同比例：学习率预热 5%、一致性预热 10%、早检在一致性预热结束后 20%
+    loss: {lr_decay_updates: 10000, lr_warmup_updates: 500, consistency_warmup_updates: 1000}
+    validation: {interval_updates: 500}     # 收敛曲线 20 个验证点（每次约 1 分钟）
+    monitoring: {early_check_updates: 1400, consistency_interval: 50}
+# v6 sweep 中 rho 0.05/0.2/1.0 对验证误差几乎没有影响，选中 1.0；v7 固定 rho=1.0，不再 sweep，每个系统只标定一次
+calibration:
+  rho: 1.0
+  sigma_z_ids: 8              # σ_z 标定：训练段内等距取 8 条轨迹
+  sigma_z_ticks: [0, 10, 20]  # 每条取 3 帧；σ_z = sqrt(Q·Z 两两平方距离的中位数)，与 v4 real_feature_probe 相同规则

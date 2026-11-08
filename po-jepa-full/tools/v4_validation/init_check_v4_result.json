@@ -1,0 +1,53 @@
+{
+ "config": {
+  "graph": {
+   "q_dim": 16,
+   "q_seed": 1703,
+   "sigma_x": 0.125,
+   "sigma_z": 8.0,
+   "max_modes": 16,
+   "diagnostic_atol": 1e-10,
+   "diagnostic_rtol": 1e-08,
+   "affinity_source": "encoder",
+   "feature_dim": 1408,
+   "fixed_modes": true
+  },
+  "projection": {
+   "encoder_dim": 1408,
+   "dynamic_dim": 64,
+   "readout": "residual"
+  },
+  "loss": {
+   "jepa_exponent": 1.0,
+   "layer_norm_epsilon": 1e-05,
+   "time_epsilon": 1e-08,
+   "space_epsilon": 1e-08,
+   "time_weight": 0.07,
+   "space_weight": 0.3,
+   "consistency_norm": "squared_frobenius_sum_not_rms",
+   "consistency_metric": "ln_mean",
+   "consistency_warmup_updates": 200
+  }
+ },
+ "phi0_equals_input_exactly": true,
+ "grids": {
+  "16x16": {
+   "K": 16,
+   "near_zero_eigs": 1,
+   "lambda_K": 0.3712104758184158,
+   "cutoff_gap": 0.01185467420559419
+  },
+  "12x12": {
+   "K": 16,
+   "near_zero_eigs": 1,
+   "lambda_K": 0.4321923840765388,
+   "cutoff_gap": 0.00976947536388631
+  },
+  "8x8": {
+   "K": 16,
+   "near_zero_eigs": 1,
+   "lambda_K": 0.4137162486311504,
+   "cutoff_gap": 0.006506711786690239
+  }
+ }
+}

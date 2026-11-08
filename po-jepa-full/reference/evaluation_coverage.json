@@ -1,0 +1,24 @@
+{
+  "point_queries_per_condition": 1600,
+  "unique_scd_pairs_per_condition": 1200,
+  "scd_grid_pairs": [
+    [
+      16,
+      8
+    ],
+    [
+      16,
+      12
+    ]
+  ],
+  "duration_cycles": [
+    1,
+    2,
+    3,
+    4,
+    8,
+    12
+  ],
+  "duplicate_evaluation_rows_count_once": true,
+  "original_decision_sha256": "ebd2ff953a9d7e710a4df23ebd01f28b5bc34c83dfc348c2db3fcac707fc86ca"
+}

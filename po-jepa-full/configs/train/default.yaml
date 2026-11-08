@@ -1,0 +1,271 @@
+# F01：仅锁定协议，不是运行入口；本文件不会生成数据或启动训练。
+# 本仿真是实现选择；原稿模型、三损失、动力学及已验收数值容差保持不变。
+schema_version: 1
+protocol_id: overdamped_double_well_v1
+status: protocol_only
+sources:
+  main_baseline: 01ffa7d458b3b07c67d552f766692ef265551209
+  paper: docs/source/main.tex
+  paper_sha256: d851778ecf4a1f160da9c681a831b3bc9333dae2b60eaeefa6090c0af44aaff1
+  upstream_commit: 204698b45b3712590f06245fbfba32d3be539812
+  prompt_thread: 01a116fb-0245-7842-9709-a18574ecc427
+  prompt_turn: 01a14f8f-7461-72d3-84ca-1f5ff26e4d53
+  decisions: docs/implementation_decisions.md
+  contracts: docs/tensor_contracts.md
+  interfaces: docs/interfaces.md
+system:
+  # q只供参考真值生成与诊断；预测器只能看图像编码和事先给定的控制。
+  state_names: [x, y]
+  state_unit: simulation_position
+  derivative_time_unit: seconds
+  equations: ["dx/dt = x - x^3 - 0.25*y + u_x", "dy/dt = -y - 0.25*x + u_y"]
+  coefficients: {x_linear: 1.0, x_cubic: -1.0, xy: -0.25, y_linear: -1.0, yx: -0.25}
+  domain: {lower: [-2.0, -2.0], upper: [2.0, 2.0]}
+  boundary_policy: error_no_clamp_no_wrap_no_reflection
+control_spec:
+  action_dim: 2
+  control_period_seconds: 0.25
+  channel_names: [u_x, u_y]
+  channel_units: [simulation_position_per_second, simulation_position_per_second]
+  lower_bounds: [-0.5, -0.5]
+  upper_bounds: [0.5, 0.5]
+  scale: [1.0, 1.0]
+  offset: [0.0, 0.0]
+  definition_source: docs/first_simulation_protocol.md
+clock:
+  origin_seconds: 0.0
+  trajectory_control_ticks: 32
+  observation_ticks: {first: 0, last: 32, stride: 1}
+  physical_time_rule: integer_tick_times_control_period
+  model_time_rule: seconds_minus_origin_divided_by_control_period
+reference:
+  implementation: independent_numpy_rk4
+  dtype: float64
+  steps_per_control_tick: 128
+  step_seconds: 0.001953125
+  half_step_seconds: 0.0009765625
+  # 沿A03既有float64组合容差，不为参考生成器另设宽松标准。
+  endpoint_atol: 0.0000000001
+  endpoint_rtol: 0.00000001
+  endpoint_comparison: abs_full_minus_half_le_atol_plus_rtol_times_abs_half_per_coordinate
+  convergence_endpoints: all_33_observation_ticks_all_200_trajectories
+  switch_rule: all_four_rk4_stages_use_current_segment_next_step_uses_right_segment
+render:
+  implementation_version: soft_spot_rgb_v1
+  shape_hwc: [256, 256, 3]
+  dtype: uint8
+  range: [0, 255]
+  center_col_rule: "128 + 48*x"
+  center_row_rule: "128 - 48*y"
+  pixel_center_rule: row_plus_half_col_plus_half
+  sigma_pixels: 8.0
+  color_rgb: [230, 150, 50]
+  background_rgb: [24, 28, 32]
+  grid_rgb: [36, 40, 44]
+  grid_spacing_pixels: 32
+  grid_width_pixels: 1
+  grid_rule: integer_row_or_col_mod_spacing_equals_zero
+  blend_rule: background_plus_color_minus_background_times_gaussian_weight
+  rounding: numpy_rint_ties_to_even
+  hidden_overlays: false
+encoder:
+  architecture: vit_giant_xformers
+  encoder_dim: 1408
+  input_size: 256
+  patch_size: 16
+  tubelet_size: 2
+  temporal_blocks: 1
+  encoder_key: target_encoder
+  checkpoint_sha256: 67129f011434e605d894e69f2c8e13d9db118deabe59d54bf6e0fa62c2c5cb8e
+  actual_checkpoint_path: null
+  frozen: true
+  eval: true
+  autocast: null
+  real_observed_frames: 1
+  identical_tubelet_copies: 2
+  raw_z_shape_per_trajectory: [33, 256, 1408]
+  raw_z_dtype: float32
+  cache_only: [raw_Z]
+  input_exclusions: [hidden_q, hidden_velocity, future_images, future_latents, true_future_states]
+preprocess:
+  # 保留B03参数；同轨迹逐帧重置独立CPU generator，F02核验实际裁剪。
+  crop_size: 256
+  crop_scale: [1.777, 1.777]
+  crop_ratio: [0.75, 1.35]
+  input_range: [0.0, 255.0]
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  generator_device: cpu
+  recipe_rule: reset_same_trajectory_generator_state_before_each_single_frame
+data:
+  count: 200
+  splits:
+    train: {first_id: 0, last_id: 159, count: 160}
+    validation: {first_id: 160, last_id: 179, count: 20}
+    test: {first_id: 180, last_id: 199, count: 20}
+  id_format: four_digit_decimal
+  split_unit: complete_trajectory
+  initial_state:
+    positive_x_ids: even
+    abs_x_uniform: [0.05, 1.5]
+    y_uniform: [-1.5, 1.5]
+  actions:
+    segment_ticks: [1, 4, 8]
+    segment_probabilities: [0.3333333333333333, 0.3333333333333333, 0.3333333333333333]
+    zero_probability: 0.2
+    otherwise_independent_uniform: [-0.5, 0.5]
+    final_segment_rule: truncate_at_tick_32_only
+    draw_order: duration_then_zero_bernoulli_then_two_uniforms_only_if_nonzero
+    independent_of_state_and_future: true
+randomness:
+  data_root_seed: 1703
+  numpy_bit_generator: PCG64
+  derivation: "SeedSequence([1703, trajectory_id, stream_id])"
+  streams: {initial_state: 0, controls: 1, preprocess: 2}
+  initial_draw_order: abs_x_then_y
+  preprocess_torch_seed_rule: generate_state_1_uint64_then_python_int
+  window_generator: independent_cpu_torch
+  window_seed: 2703
+  window_sampling: uniform_start_then_uniform_training_duration
+  shared_sample_query_sequence_across_conditions: true
+  checkpoint_sampler_state: [actual_batch_cursor, independent_generator_state]
+queries:
+  train_start_ticks: {first: 0, last: 20, stride: 1}
+  jepa_duration_cycles: [1.0, 2.0, 4.0, 8.0]
+  temporal_split: equal_halves
+  temporal_long_cycles: [1.0, 2.0, 4.0, 8.0]
+  temporal_each_short_cycles: [0.5, 1.0, 2.0, 4.0]
+  spatial_each_branch_cycles: [1.0, 2.0, 4.0, 8.0]
+  all_training_phi_cycles: [0.5, 1.0, 2.0, 4.0, 8.0]
+  heldout_total_cycles: [3.0, 12.0]
+  heldout_tcd_each_short_cycles: [1.5, 6.0]
+  all_heldout_phi_cycles: [1.5, 3.0, 6.0, 12.0]
+  internal_integrator_max_step_cycles: 0.25
+  require_bitwise_duration_sum_and_physical_endpoints: true
+grids:
+  canonical: [16, 16]
+  training_consistency: [8, 8]
+  heldout: [12, 12]
+  transfer_16_to_8: divisible_average_pool
+  transfer_16_to_12: bilinear_align_corners_false_edge_extension
+  target_coords_rule: same_R_applied_to_source_coords
+  interpretation: latent_grid_interpolation_not_raw_resolution_extrapolation
+model:
+  projection: {encoder_dim: 1408, dynamic_dim: 64}
+  graph:
+    q_dim: 16
+    q_seed: 1703
+    sigma_x: 0.25
+    sigma_z: 1.0
+    max_modes: 128
+    diagnostic_atol: 0.0000000001
+    diagnostic_rtol: 0.00000001
+  dynamics:
+    action_dim: 2
+    dynamic_dim: 64
+    condition_width: 64
+    query_dim: 32
+    top_r: 16
+    spectral_bias_width: 32
+    spatial_bias_width: 32
+    action_hidden_width: 64
+    initial_damping: 0.1
+    head_weight_std: 0.001
+  integrator:
+    method: exponential_euler
+    max_step: 0.25
+    endpoint_rtol: 0.000000000001
+    phi1_threshold: 0.0001
+    phi1_order: 6
+  required_branches: [A, B, N, content_score, spectral_bias, spatial_bias, M_a]
+  graph_q_and_bandwidths: fixed
+  eig_gradient: stop_entire_eigenvalues_and_eigenvectors
+  spectral_dtype_device: cpu_float64
+  model_dtype: float32
+  consistency_accumulation_dtype: float64
+  other_architecture_and_initialization: unchanged_A03_A06_accepted_implementation
+loss:
+  jepa_exponent: 1.0
+  layer_norm_epsilon: 0.00001
+  time_epsilon: 0.00000001
+  space_epsilon: 0.00000001
+  time_weight: 0.001
+  space_weight: 0.001
+  consistency_norm: squared_frobenius_sum_not_rms
+conditions:
+  trainable: [matched_transformer, po_jepa_no_consistency, po_jepa_full]
+  untrained: [identity]
+  no_consistency_weights: {time_weight: 0.0, space_weight: 0.0}
+  zero_weight_still_runs_consistency_queries: true
+  transformer_parameter_relative_tolerance: 0.01
+  transformer_architecture_owner: F05
+  identical_information_budget: true
+training:
+  optimizer: AdamW
+  lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 0.00000001
+  weight_decay: 0.0
+  scheduler: null
+  gradient_clip: null
+  amp: false
+  scaler: false
+  ema: false
+  updates_per_condition: 2000
+  microbatch: 4
+  gradient_accumulation: false
+  initial_model_seed: 1703
+  later_robustness_seeds: [1704, 1705]
+  status: future_budget_pending_F03_target_device_evidence
+validation:
+  interval_updates: 200
+  include_step_zero: true
+  start_ticks: [0, 5, 10, 15, 20]
+  duration_cycles: [1.0, 2.0, 4.0, 8.0]
+  grid: [16, 16]
+  metric: future_jepa_distance
+  aggregation: mean
+  select: minimum_validation_metric_ties_earlier_step
+evaluation:
+  split: test
+  start_ticks: [0, 5, 10, 15, 20]
+  matrix:
+    id: {duration_cycles: [1.0, 2.0, 4.0, 8.0], grids: [[16, 16], [8, 8]]}
+    time_heldout: {duration_cycles: [3.0, 12.0], grids: [[16, 16]]}
+    grid_heldout: {duration_cycles: [1.0, 2.0, 4.0, 8.0], grids: [[12, 12]]}
+    joint_heldout: {duration_cycles: [3.0, 12.0], grids: [[12, 12]]}
+  primary_metrics: [future_jepa_distance, tcd_frobenius, scd_frobenius, delta_act]
+  separately_named_extras: [tcd_rms, scd_rms]
+  quantile_levels: [0.5, 0.9, 0.95, 0.99]
+  quantile_interpolation: linear
+  retain: [per_sample, per_trajectory, failures, valid_counts]
+  mean_names: [window_weighted_mean, trajectory_macro_mean]
+  tcd_seconds_multiplier: 16.0
+  scd_seconds_multiplier: 4.0
+  epsilon_in_diagnostic_metrics: false
+  delta_donor: next_trajectory_id_cyclic_within_test_same_start_and_duration
+  delta_identical_controls: retain_zero_and_count_no_redraw
+gates:
+  F02:
+    status: not_run
+    required: [reference_half_step_convergence, actual_crop_mapping_invariance, rendered_and_latent_state_action_signal, final_cache_future_perturbation, actual_Z_target_split_provenance]
+  F03:
+    status: not_run
+    devices: [RTX_4090_full_24GB, A100_full_40GB_or_80GB_not_MIG]
+    required: [real_features_five_Phi_three_losses_backward, peak_memory, hundred_update_time, validation_cost]
+  representation_probe_split: train_only
+  on_missing_or_failed_gate: stop_corresponding_dependency_preserve_evidence
+artifacts:
+  status: not_generated
+  owner: F02
+  # 这些是未来真实产物，不是可直接交给E06 train_step的provenance。
+  preprocess_sha256: null
+  feature_manifest_sha256: null
+  source_files_sha256: null
+  protocol_sha256: null
+  required_before_real_training: all_actual_hashes_and_train_split
+storage_estimate:
+  frames: 6600
+  canonical_float32_Z_bytes: 9515827200
+  includes_rgb_metadata_checkpoint: false
+  method: shape_estimate_not_measurement

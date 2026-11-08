@@ -1,0 +1,1451 @@
+%%%%%%%% ICML 2026 SUBMISSION DRAFT %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass{article}
+
+% Recommended packages from the official ICML 2026 template.
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+\usepackage{icml2026}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+\usepackage{bm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+\crefname{theorem}{Theorem}{Theorems}
+\crefname{proposition}{Proposition}{Propositions}
+\crefname{lemma}{Lemma}{Lemmas}
+\crefname{corollary}{Corollary}{Corollaries}
+\crefname{definition}{Definition}{Definitions}
+\crefname{assumption}{Assumption}{Assumptions}
+\Crefname{theorem}{Theorem}{Theorems}
+\Crefname{proposition}{Proposition}{Propositions}
+\Crefname{lemma}{Lemma}{Lemmas}
+\Crefname{corollary}{Corollary}{Corollaries}
+\Crefname{definition}{Definition}{Definitions}
+\Crefname{assumption}{Assumption}{Assumptions}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% NOTATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Hspace}{\mathcal{H}}
+\newcommand{\Xspace}{\mathcal{X}}
+\newcommand{\Aspace}{\mathcal{A}}
+\newcommand{\T}{\mathcal{T}}
+\newcommand{\PhiOp}{\Phi}
+\newcommand{\Enc}{\mathcal{E}}
+\newcommand{\Pred}{\mathcal{P}}
+\newcommand{\Restr}{\mathcal{R}}
+\newcommand{\Interp}{\mathcal{I}}
+\newcommand{\Loss}{\mathcal{L}}
+\newcommand{\sg}{\operatorname{sg}}
+\newcommand{\pool}{\operatorname{Pool}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\Lip}{\operatorname{Lip}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\inner}[2]{\left\langle #1,#2 \right\rangle}
+\newcommand{\POJEPA}{\textsc{PO-JEPA}}
+
+\icmltitlerunning{Physical Operator JEPA}
+
+\begin{document}
+
+\twocolumn[
+  \icmltitle{Physical Operator JEPA: Learning Discretization-Consistent\\
+  Latent Evolution Laws from Video and Action}
+
+  \begin{icmlauthorlist}
+    \icmlauthor{Anonymous Author(s)}{anon}
+  \end{icmlauthorlist}
+  \icmlaffiliation{anon}{Anonymous Institution}
+  \icmlcorrespondingauthor{Anonymous Author(s)}{anonymous@anonymous.invalid}
+  \icmlkeywords{world models, JEPA, neural operators, physical reasoning, robotics, self-supervised learning}
+  \vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+
+\begin{abstract}
+Action-conditioned latent world models are typically optimized as discrete transition maps whose semantics are inseparable from the frame rate and token grid used during training. This creates a fundamental ambiguity for physical reasoning: a predictor can be accurate on the training discretization without representing an evolution law that remains coherent when the same trajectory is sampled at a different temporal stride or represented on a different latent grid. We study the hypothesis that a physically useful visual latent space should admit a single controlled evolution law whose predictions are consistent across both temporal and spatial discretizations. We introduce \POJEPA{}, a joint-embedding predictive world model that interprets visual tokens as samples of a latent field and learns an action-conditioned evolution operator over that field using only ordinary video--action trajectories. The predictor uses geometry-adaptive modal coordinates, dissipative continuous-time propagation, action forcing, and sparse nonlinear mode interactions. Two self-supervised objectives enforce temporal composition consistency and spatial commutation consistency, requiring neither simulator state nor object, depth, flow, or physical-parameter labels. We establish explicit bounds showing how local temporal-composition and spatial-commutation defects accumulate under long rollouts and arbitrary changes of temporal partition and latent grid. Extensive simulation results on V-JEPA~2/DROID and OpenVLA/Open-X show that xxx
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Learning predictive models of the physical world directly from visual observations is a central objective in representation learning, world modeling, and embodied intelligence. Large-scale video and robot interaction datasets provide a scalable source of supervision without requiring manually specified physical states, motivating models that encode observations into latent representations and predict how those representations evolve under actions~\citep{ha2018worldmodels,hafner2019planet,hafner2020dreamer,hafner2023dreamerv3,hansen2024tdmpc2}. Joint-Embedding Predictive Architectures (JEPAs) provide a particularly appealing formulation by learning predictive structure directly in representation space rather than reconstructing future observations~\citep{lecun2022path,assran2023ijepa,bardes2024vjepa}. More recently, V-JEPA~2 demonstrates that large-scale video representations can be adapted to action-conditioned prediction and planning from robot interaction data~\citep{assran2025vjepa2}. Despite this progress, most latent world models are still trained as transition functions associated with a particular temporal sampling rate and a particular spatial tokenization. As a result, a predictor may accurately model transitions under the discretization seen during training without identifying an underlying evolution law that remains valid when the same physical process is observed at a different frame rate, image resolution, or latent token grid. We argue that this distinction is fundamental for physics-aware world modeling: a physical law should characterize how the underlying system evolves, rather than how one particular discretization of that system changes from one training sample to the next.
+
+Existing approaches introduce valuable physical structure into latent representations and dynamics, but do not directly enforce such discretization consistency. Spectral-Target JEPA addresses physical representation laziness by encouraging latent features to preserve geometric information through spectral auxiliary supervision~\citep{zhu2026spectral}; however, its spectral construction primarily constrains what information is retained in the representation rather than whether the learned dynamics remain consistent across temporal or spatial discretizations. Hamiltonian JEPA imposes a dissipative port-Hamiltonian inductive bias on action-conditioned latent dynamics~\citep{zoabi2026hjjepa}, while Koopman-based world models structure finite-dimensional latent evolution through spectrally constrained dynamics to improve long-horizon stability~\citep{li2026koopman}. These methods provide principled mechanisms for organizing latent dynamics, yet their evolution models remain instantiated on a particular finite-dimensional representation and sampling scheme. Neural operators offer a complementary perspective by learning mappings between function spaces and naturally support evaluation across spatial discretizations~\citep{lu2021deeponet,li2021fno,kovachki2023neuraloperator}; nevertheless, they conventionally assume access to known physical fields and supervised solution pairs. Visual world modeling presents a substantially different setting in which the underlying physical state is unobserved, the representation itself must be learned from pixels, and the dynamics must respond to control actions. It therefore remains unclear whether a learned perceptual latent space can support a single action-conditioned evolution law that is consistent across multiple temporal and spatial discretizations.
+
+To study this question, we introduce \textbf{Physical Operator JEPA (\POJEPA{})}, a physics-aware latent world model that treats visual representations as samples of a latent field and learns their evolution through a continuous operator rather than a fixed-step transition. The central principle is that predictions of the same underlying process should remain coherent under alternative discretizations. We enforce this principle through two complementary forms of self-supervised consistency: \emph{temporal composition consistency}, which requires predictions over the same elapsed duration to agree regardless of how that duration is partitioned into intermediate prediction steps, and \emph{spatial commutation consistency}, which requires latent evolution to remain compatible with changes in the spatial discretization of the representation. \POJEPA{} realizes these constraints using geometry-adaptive modal coordinates, stable dissipative propagation, explicit action-dependent forcing, and sparse nonlinear interactions, while retaining the standard JEPA encoder--target interface and requiring no privileged simulator state, object annotations, segmentation masks, optical flow, or physical coefficients. Our contributions are fourfold: \textbf{(i)} we formulate physics-aware latent world modeling as learning a discretization-consistent evolution law rather than a transition tied to a fixed sampling scheme; \textbf{(ii)} we propose \POJEPA{}, an action-conditioned latent operator that combines geometry-adaptive modal representations, stable propagation, control-dependent forcing, and sparse nonlinear interactions; \textbf{(iii)} we develop space--time consistency objectives that are trained entirely from ordinary video--action trajectories and deterministic latent resampling, without additional physical supervision; and \textbf{(iv)} we establish a finite-horizon analysis that relates local violations of temporal composition and spatial commutation to rollout disagreement across different space--time discretizations, providing a theoretical basis for evaluating extrapolation to unseen frame rates, token grids, and rollout horizons.
+
+\section{Background and Related Work}
+\label{sec:related}
+
+\subsection{Latent World Models and JEPAs}
+World models learn predictive representations that support planning or policy optimization~\citep{ha2018worldmodels,hafner2019planet,hafner2020dreamer,hafner2023dreamerv3,hansen2024tdmpc2}. Generative variants reconstruct observations, whereas representation-predictive models can operate directly in latent space. JEPAs learn representations by predicting target embeddings rather than pixels~\citep{lecun2022path,assran2023ijepa}, and V-JEPA extends this principle to video~\citep{bardes2024vjepa}. V-JEPA~2 combines large-scale self-supervised video pretraining with action-conditioned post-training on robot trajectories and performs latent-space planning toward image goals~\citep{assran2025vjepa2}. Our work preserves this prediction interface but changes the mathematical object represented by the dynamics: from a transition specialized to one sampled state space to an operator intended to be compatible with multiple discretizations of the same latent field.
+
+\subsection{Physics-Aware Latent Dynamics}
+A first family of methods encourages latent states to expose physical variables. Spectral-Target physical structuring adds a Fourier-symmetrized auxiliary target constructed from object geometry, including oriented boxes and semantic masks, to prevent physically relevant information from being ignored~\citep{zhu2026spectral}. This addresses representation content but relies on geometric targets and does not impose a cross-discretization law on the transition.
+
+A second family structures the transition itself. Hamiltonian neural networks encode conservative mechanics~\citep{greydanus2019hamiltonian}; port-Hamiltonian extensions represent dissipation and external control~\citep{desai2021port}; and PH-Dreamer incorporates related structure into recurrent world modeling~\citep{luan2026phdreamer}. H-JEPA places phase-conditioned dissipative port-Hamiltonian dynamics on a compact control state and ties action injection to an inverse-consistency objective~\citep{zoabi2026hjjepa}. The authors explicitly treat the Hamiltonian form as an inductive bias rather than claiming recovery of physical position, momentum, or energy. Our formulation adopts the same caution but asks a different structural question: whether one learned latent evolution is compatible with multiple spatial and temporal discretizations.
+
+A third family controls latent spectra. Koopman approaches search for observables in which nonlinear dynamics are approximately linear~\citep{lusch2018koopman}. Koopman Dreamer uses bounded rotation--scaling blocks and action-dependent terms to control damping, periodicity, and rollout amplification~\citep{li2026koopman}. Our modal generator is related in spirit, but the state being evolved is a sampled latent field, the modes are scene-adaptive, and the central constraints are temporal composition and spatial commutation rather than spectral stability alone.
+
+\subsection{Neural Operators and Discretization Invariance}
+Neural operators learn maps between function spaces and are designed to be evaluated on spatial discretizations different from those used in training~\citep{lu2021deeponet,li2021fno,kovachki2023neuraloperator}. Fourier Neural Operators parameterize global integral kernels in the Fourier domain~\citep{li2021fno}, while DeepONets use branch and trunk networks to approximate nonlinear operators~\citep{lu2021deeponet}. This literature motivates treating discretization as a numerical representation rather than as part of the underlying law.
+
+The present setting differs from supervised operator learning in three respects. First, the evolved field is not a measured physical quantity but a learned visual representation. Second, no paired solution operator or governing PDE is provided; supervision comes only from future JEPA targets. Third, actions define a non-autonomous controlled evolution rather than a fixed autonomous PDE. The proposed method therefore uses operator structure as an inductive bias for perceptual world modeling, not as a surrogate solver for a known physical system.
+
+\subsection{Continuous-Time and System-Identification Perspectives}
+Neural ordinary differential equations parameterize continuous-time latent dynamics and permit evaluation at arbitrary solver steps~\citep{chen2018neuralode}. Sparse identification methods seek parsimonious governing equations from observed state variables~\citep{brunton2016sindy}, while physics-informed neural networks incorporate known differential equations into learning~\citep{raissi2019pinn}. These approaches illustrate the value of continuous-time structure, but they either assume semantically meaningful observed state or known equations. In contrast, our objective is to discover whether the representation learned from pixels supports a consistent controlled flow at all, and to enforce this property using only self-supervised cross-discretization identities.
+
+\section{Problem Formulation}
+
+\subsection{Latent Fields from Visual Tokens}
+Let $o_t\in\Xspace$ denote an image or short video context at time $t$, and let $a_t\in\Aspace\subset\R^m$ denote the executed robot action. A visual encoder $\Enc$ produces a collection of tokens
+\begin{equation}
+    Z_t^{h}=\Enc(o_t)\in\R^{N_h\times d_e},
+    \label{eq:tokens}
+\end{equation}
+where $h$ indexes a spatial discretization and $N_h$ is the number of token locations. We associate token $i$ with a normalized coordinate $\mathbf{x}_i^{h}\in\Omega\subset\R^2$. Conceptually, $Z_t^h$ is a sampled version of an unknown latent field $z_t:\Omega\rightarrow\R^{d_e}$.
+
+The notation does not assume that $z_t$ corresponds to a named physical variable. It may distribute information about object identity, geometry, contact, velocity, and other predictive factors across many channels. This choice is deliberate: the proposed method imposes structure on the \emph{evolution} of the representation rather than requiring a factorization into hand-specified quantities.
+
+\subsection{Controlled Evolution Families}
+Because robot actions vary over time, the correct continuous-time object is a controlled evolution family rather than an autonomous semigroup~\citep{pazy1983semigroups,engel2000semigroups}. Let $u:[0,T]\rightarrow\Aspace$ be a piecewise-constant action signal. We denote the latent evolution over a duration $\tau$ by
+\begin{equation}
+    \PhiOp_{\tau}(z;u_{[0,\tau]}).
+\end{equation}
+A consistent controlled evolution should satisfy the cocycle relation
+\begin{equation}
+\begin{split}
+    &\PhiOp_{\tau+\sigma}(z;u_{[0,\tau+\sigma]}) \\
+    &\quad=\PhiOp_{\sigma}\!\left(
+        \PhiOp_{\tau}(z;u_{[0,\tau]});
+        u_{[\tau,\tau+\sigma]}
+    \right).
+\end{split}
+\label{eq:controlled_cocycle}
+\end{equation}
+For constant actions, this reduces to the familiar semigroup law. Equation~\eqref{eq:controlled_cocycle} states that the predicted physical evolution should not depend on whether the same time interval is integrated in one step or several.
+
+\subsection{Spatial Discretization Consistency}
+Let $\Restr_{h\rightarrow h'}$ be a deterministic restriction or interpolation operator that maps samples of a latent field from discretization $h$ to $h'$. We seek a predictor $\PhiOp_{\theta,\tau}^{h}$ whose action on different token grids is compatible with the same underlying field evolution. Ideally,
+\begin{equation}
+    \Restr_{h\rightarrow h'}
+    \PhiOp_{\theta,\tau}^{h}(Z;u)
+    =
+    \PhiOp_{\theta,\tau}^{h'}
+    (\Restr_{h\rightarrow h'}Z;u).
+    \label{eq:spatial_commute}
+\end{equation}
+This is a commutative-diagram criterion: ``evolve then resample'' and ``resample then evolve'' should agree. Unlike ordinary data augmentation invariance, \cref{eq:spatial_commute} constrains the \emph{dynamics operator} rather than only the encoder.
+
+\begin{definition}[Discretization-consistent latent evolution]
+A family $\{\PhiOp^{h}_{\theta,\tau}\}_{h,\tau}$ is discretization-consistent on a set $\mathcal{K}$ if it satisfies the controlled cocycle identity in time and the spatial commutation identity exactly for all admissible states, action segments, durations, and grid pairs in $\mathcal{K}$. It is approximately $(\epsilon_t,\epsilon_s)$-consistent when the corresponding normalized defects are uniformly bounded as formalized in Assumption~\ref{ass:local_defects}.
+\end{definition}
+
+Our objective is not to assume that exact consistency holds in natural video, where occlusion, partial observability, and encoder aliasing are unavoidable. Rather, we use consistency as an inductive bias and measure how strongly enforcing it improves long-horizon and out-of-distribution prediction.
+
+\section{Physical Operator JEPA}
+
+\subsection{Overview}
+\cref{fig:overview} summarizes \POJEPA{}. A frozen or slowly adapted JEPA encoder produces target and context tokens. A projection maps these tokens into a lower-width dynamic latent field. The operator predictor converts the sampled field into geometry-adaptive modal coordinates, evolves those coordinates under a stable action-conditioned generator, and maps the result back to the target JEPA representation. The same predictor parameters are used for all temporal strides and latent grids.
+
+\begin{figure*}[t]
+\centering
+\fbox{\begin{minipage}{0.96\textwidth}
+\centering
+\textbf{Context observation} $o_t$
+$\xrightarrow{\ \Enc\ }$
+$Z_t^{h}$
+$\xrightarrow{\ P_{\mathrm{in}}\ }$
+$X_t^{h}$
+$\xrightarrow{\ \text{geometry-adaptive modes}\ }$
+$C_t^{h}$
+$\xrightarrow{\ \PhiOp_{\theta,\tau}^{u}\ }$
+$\widehat{C}_{t+\tau}^{h}$
+$\xrightarrow{\ \text{modal synthesis}\ }$
+$\widehat{X}_{t+\tau}^{h}$
+$\xrightarrow{\ P_{\mathrm{out}}\ }$
+$\widehat{Z}_{t+\tau}^{h}$
+\\[3mm]
+\textbf{Target observation} $o_{t+\tau}$
+$\xrightarrow{\ \Enc_{\mathrm{target}}\ }$
+$Z^{*,h}_{t+\tau}$
+\qquad\text{with losses: } $\Loss_{\mathrm{JEPA}}+\lambda_t\Loss_{\mathrm{time}}+\lambda_s\Loss_{\mathrm{space}}$.
+\\[2mm]
+Temporal consistency compares one long operator step with compositions of shorter steps; spatial consistency compares ``evolve $\rightarrow$ restrict'' with ``restrict $\rightarrow$ evolve.'' Both are generated from the same video--action trajectory and require no additional labels.
+\end{minipage}}
+\caption{Conceptual architecture of \POJEPA{}. The perceptual encoder can be taken directly from V-JEPA 2. The proposed contribution is the evolution-operator predictor and the cross-discretization objectives.}
+\label{fig:overview}
+\end{figure*}
+
+\subsection{Geometry-Adaptive Modal Coordinates}
+A fixed image-space Fourier basis is poorly matched to boundaries, objects, and scene-dependent geometry. We therefore construct modal coordinates from the latent field itself, following the use of graph spectra as data-adaptive coordinates~\citep{coifman2006diffusion,belkin2007convergence}. Given projected tokens $X_t^h\in\R^{N_h\times d_x}$ and token coordinates $\{\mathbf{x}_i^h\}$, we define a symmetric affinity matrix
+\begin{equation}
+    W_{ij}
+    =
+    \exp\!\left(-\frac{\norm{\mathbf{x}_i-\mathbf{x}_j}^2}{\sigma_x^2}\right)
+    \exp\!\left(-\frac{\norm{QX_i-QX_j}^2}{\sigma_z^2}\right),
+    \label{eq:affinity}
+\end{equation}
+where $Q$ is a low-dimensional feature projection. The normalized graph Laplacian is
+\begin{equation}
+    L=I-D^{-1/2}WD^{-1/2},
+    \qquad D_{ii}=\sum_j W_{ij}.
+\end{equation}
+Let $(\lambda_k,\phi_k)$ be the lowest $K$ eigenpairs of $L$. The modal coefficients are
+\begin{equation}
+    C_{t,k}=\phi_k^{\top}X_t^h.
+    \label{eq:modal_coeff}
+\end{equation}
+In the base implementation we stop gradients through the eigendecomposition and compute affinities from frozen or detached encoder features. This prevents the encoder from changing its representation merely to simplify the basis. The modal basis is therefore a scene-adaptive coordinate system, not an auxiliary physical label.
+
+The operator parameters depend on the eigenvalue $\lambda_k$ and a global context vector $g_t=\pool(X_t^h)$, not on the mode index alone. This is important for transferring the same parameterization across discretizations with different numbers and arrangements of tokens.
+
+\subsection{Stable Controlled Modal Dynamics}
+For each mode, we model a low-dimensional coefficient vector $c_k\in\R^{2q}$. Its continuous-time dynamics are
+\begin{equation}
+\frac{dc_k}{dt}
+=
+A_{\theta}(\lambda_k,g_t)c_k
++
+B_{\theta}(\lambda_k,g_t)a(t)
++
+\mathcal{N}_{\theta,k}(C,a(t)),
+\label{eq:modal_ode}
+\end{equation}
+where the three terms represent free propagation, external control, and nonlinear cross-mode interaction.
+
+The free generator is block diagonal. Each $2\times2$ block has the form
+\begin{equation}
+    A_{k,r}
+    =
+    \begin{bmatrix}
+        -\gamma_{k,r} & -\omega_{k,r} \\
+        \omega_{k,r} & -\gamma_{k,r}
+    \end{bmatrix},
+    \qquad
+    \gamma_{k,r}=\operatorname{softplus}(\widetilde{\gamma}_{k,r}),
+    \label{eq:damped_rotation}
+\end{equation}
+with $\omega_{k,r}$ and $\widetilde{\gamma}_{k,r}$ produced by small networks conditioned on $(\lambda_k,g_t)$. This parameterization allows oscillatory, advective-like, and decaying modes while preventing the free linear dynamics from exponentially amplifying perturbations.
+
+The action term $B_{\theta}(\lambda_k,g_t)a(t)$ treats action as an external input port rather than concatenating it indiscriminately with visual tokens. The nonlinear term $\mathcal{N}_{\theta}$ is implemented as sparse top-$r$ attention between modes. Its role is to model contact, switching, deformation, and other non-linear phenomena that cannot be represented by independent damped modes. Sparsity is architectural: each mode communicates with only the $r$ most relevant modes at each operator evaluation.
+
+We integrate \cref{eq:modal_ode} over the requested duration $\tau$, in the spirit of continuous-time neural dynamics~\citep{chen2018neuralode}. The linear part is propagated exactly with $\exp(A\tau)$, while forcing and nonlinear terms are integrated with a low-order explicit or exponential integrator. The same network receives $\tau$ explicitly, so it can be queried at temporal resolutions not used for one-step training.
+
+\begin{proposition}[Closed-form and non-expansive free modal flow]
+\label{prop:nonexpansive}
+Consider one $2\times2$ free-dynamics block
+\begin{equation}
+A=-\gamma I+\omega J,
+\qquad
+J=
+\begin{bmatrix}
+0&-1\\
+1&0
+\end{bmatrix},
+\qquad \gamma\ge0.
+\end{equation}
+For every $\tau,\sigma\ge0$, its flow $S_{\tau}=e^{A\tau}$ satisfies
+\begin{align}
+S_{\tau}
+&=e^{-\gamma\tau}
+\begin{bmatrix}
+\cos(\omega\tau)&-\sin(\omega\tau)\\
+\sin(\omega\tau)&\cos(\omega\tau)
+\end{bmatrix},
+\label{eq:closed_form_flow}
+\\
+S_{\tau+\sigma}&=S_{\sigma}S_{\tau},
+\label{eq:free_semigroup}
+\\
+\norm{S_{\tau}}_2&=e^{-\gamma\tau}\le1.
+\label{eq:free_nonexpansive}
+\end{align}
+Consequently, a block-diagonal collection of such free modal blocks is non-expansive in the Euclidean norm and obeys the temporal semigroup law exactly when its coefficients are held fixed over the queried interval.
+\end{proposition}
+
+The full model need not obey an exact semigroup because the generator is context dependent, action forcing is non-autonomous, nonlinear mode interactions are state dependent, and the numerical integrator is approximate. This distinction motivates learning temporal composition explicitly instead of assuming that continuous-time notation alone guarantees consistency. A step-by-step proof of \cref{prop:nonexpansive} is given in \cref{app:proof_nonexpansive}.
+
+\subsection{JEPA Prediction Objective}
+Let $Z^{*,h}_{t+\tau}=\sg(\Enc_{\mathrm{target}}(o_{t+\tau}))$ be a stop-gradient target representation. For a set of sampled horizons $\mathcal{Q}$, we use
+\begin{equation}
+    \Loss_{\mathrm{JEPA}}
+    =
+    \mathbb{E}_{\tau\sim\mathcal{Q}}
+    \left[
+    d\!\left(
+        \widehat{Z}^{h}_{t+\tau},
+        Z^{*,h}_{t+\tau}
+    \right)
+    \right],
+    \label{eq:ljepa}
+\end{equation}
+where $d$ is the latent regression distance used by the base JEPA implementation. When adapting V-JEPA 2-AC, we retain its target encoder, masking, action representation, and planning interface so that the predictor is the primary changed variable.
+
+\subsection{Temporal Composition Consistency}
+For two durations $\tau$ and $\sigma$ from the same trajectory, with corresponding action segments $u_1$ and $u_2$, we define
+\begin{equation}
+\Loss_{\mathrm{time}}
+=
+\mathbb{E}\!\left[
+\frac{1}{(\tau\sigma)^2+\varepsilon}
+\left\|
+\begin{aligned}
+&\PhiOp^{h}_{\tau+\sigma}(Z_t;u_1\oplus u_2)\\[-1mm]
+&\quad-
+\PhiOp^{h}_{\sigma}
+(\PhiOp^{h}_{\tau}(Z_t;u_1);u_2)
+\end{aligned}
+\right\|_F^2
+\right].
+\label{eq:ltime}
+\end{equation}
+where $\oplus$ denotes concatenation of piecewise-constant action segments. The denominator estimates a squared temporal-defect density, so a pair of longer intervals is not penalized merely because the unnormalized composition defect has a larger physical scale. The small $\varepsilon>0$ prevents numerical instability. This objective is available directly from trajectory timestamps and actions; it does not use future physical-state labels.
+
+\subsection{Spatial Commutation Consistency}
+We generate a second latent discretization $h'$ by deterministic restriction, interpolation, or pooling of the canonical token field. The spatial consistency loss is
+\begin{equation}
+\Loss_{\mathrm{space}}
+=
+\mathbb{E}\!\left[
+\frac{1}{\tau^2+\varepsilon}
+\left\|
+\begin{aligned}
+&\Restr_{h\rightarrow h'}
+\PhiOp^{h}_{\tau}(Z_t^h;u)\\[-1mm]
+&\quad-
+\PhiOp^{h'}_{\tau}
+(\Restr_{h\rightarrow h'}Z_t^h;u)
+\end{aligned}
+\right\|_F^2
+\right].
+\label{eq:lspace}
+\end{equation}
+In the minimal implementation, all spatial views are obtained from the same encoder output, so the method can be trained with a backbone that natively expects one image size. If the encoder supports variable input resolution, a stronger variant also evaluates \cref{eq:lspace} on independently encoded resized observations.
+
+The final objective is
+\begin{equation}
+    \Loss
+    =
+    \Loss_{\mathrm{JEPA}}
+    +\lambda_t\Loss_{\mathrm{time}}
+    +\lambda_s\Loss_{\mathrm{space}}.
+    \label{eq:full_loss}
+\end{equation}
+We intentionally keep the core objective small. The physical inductive bias arises from the operator parameterization and the two consistency relations rather than from a large collection of auxiliary labels or reconstruction losses.
+
+\subsection{Training from Existing V-JEPA 2 and OpenVLA Data}
+\paragraph{V-JEPA 2-AC.}
+The primary implementation starts from the public V-JEPA 2 encoder and its action-conditioned robot trajectories~\citep{assran2025vjepa2}. The encoder is frozen in the first stage. For each sampled DROID trajectory window~\citep{khazatsky2024droid}, we obtain context and future target latents, execute the operator at multiple temporal strides, and create coarser latent grids by token-space restriction. No new data collection or annotation is required.
+
+\paragraph{OpenVLA.}
+A secondary implementation attaches the same operator objective to the visual representation of OpenVLA~\citep{kim2024openvla}. The original language-conditioned action-token objective is retained, while consecutive frames and executed actions from Open-X trajectories~\citep{oneill2023openx} supervise an auxiliary future-latent operator branch. Language conditions the policy head, whereas the base physical dynamics branch is intentionally language-free; this discourages language from becoming a shortcut for predicting visual state transitions.
+
+\section{Space--Time Consistency Analysis}
+\label{sec:theory}
+
+We now formalize the sense in which local consistency controls disagreement between two numerical representations of the same latent trajectory. The analysis concerns only the learned operator and its latent norm; it does not assume access to ground-truth physical state, a known Hamiltonian, or a governing PDE. All action dependence is retained explicitly in the definitions below and suppressed only after the relevant action segments have been fixed.
+
+Let $u:[0,T]\rightarrow\Aspace$ be a fixed piecewise-continuous action signal. For a partition
+\begin{equation}
+\Pi=(\tau_1,\ldots,\tau_n),
+\qquad
+\tau_i>0,
+\qquad
+\sum_{i=1}^{n}\tau_i=T,
+\end{equation}
+define cumulative times $t_i=\sum_{j=1}^{i}\tau_j$ with $t_0=0$, and let $u_i=u_{[t_{i-1},t_i]}$ be the corresponding action segment. Define the partitioned rollout recursively by
+\begin{equation}
+ z_0^{h}=z,
+ \qquad
+ z_i^{h}=\PhiOp^{h}_{\theta,\tau_i}(z_{i-1}^{h};u_i),
+ \quad i=1,\ldots,n,
+\label{eq:partition_rollout_rec}
+\end{equation}
+and set
+\begin{equation}
+\PhiOp^{h}_{\theta,\Pi}(z;u):=z_n^{h}.
+\label{eq:partition_rollout}
+\end{equation}
+The direct prediction over the same horizon is $\PhiOp^{h}_{\theta,T}(z;u_{[0,T]})$.
+
+\begin{assumption}[Uniform Lipschitz stability]
+\label{ass:lipschitz}
+There exists $L\ge0$ such that, for every grid $h$, every duration $\tau\in[0,T]$, every admissible action segment $v$ of duration $\tau$, and all latent states $x,y$ in the set considered by the analysis,
+\begin{equation}
+\norm{
+\PhiOp^{h}_{\theta,\tau}(x;v)
+-
+\PhiOp^{h}_{\theta,\tau}(y;v)
+}
+\le
+ e^{L\tau}\norm{x-y}.
+\label{eq:lipschitz_assumption}
+\end{equation}
+\end{assumption}
+The exponential form is convenient because Lipschitz amplification then composes multiplicatively over durations. The constant $L$ need not be negative; $L=0$ corresponds to a non-expansive learned evolution.
+
+\begin{assumption}[Uniform local consistency defects]
+\label{ass:local_defects}
+There exist $\epsilon_s,\epsilon_t\ge0$ such that the following bounds hold on the same set of states, grids, durations, and action segments.
+
+For every transfer operator $\Restr_{h\rightarrow h'}$ and interval of duration $\tau$,
+\begin{equation}
+\begin{split}
+&\norm{
+\Restr_{h\rightarrow h'}
+\PhiOp^{h}_{\theta,\tau}(z;v)
+-
+\PhiOp^{h'}_{\theta,\tau}
+(\Restr_{h\rightarrow h'}z;v)
+}
+\\
+&\hspace{42mm}\le \epsilon_s\tau.
+\end{split}
+\label{eq:local_spatial_defect}
+\end{equation}
+For every pair of consecutive action segments $v_1,v_2$ with durations $\tau,\sigma$,
+\begin{equation}
+\begin{split}
+&\norm{
+\PhiOp^{h}_{\tau+\sigma}(z;v_1\oplus v_2)
+-
+\PhiOp^{h}_{\sigma}
+(\PhiOp^{h}_{\theta,\tau}(z;v_1);v_2)
+}
+\\
+&\hspace{42mm}\le \epsilon_t\tau\sigma.
+\end{split}
+\label{eq:local_temporal_defect}
+\end{equation}
+\end{assumption}
+The constants $\epsilon_s$ and $\epsilon_t$ are not assumed to be known during training. They summarize worst-case local defects and motivate the normalized objectives in \cref{eq:ltime,eq:lspace}. In empirical evaluation we estimate their average analogues rather than claim a uniform bound.
+
+\begin{lemma}[Accumulation of spatial commutation error]
+\label{lem:spatial_accumulation}
+Under Assumptions~\ref{ass:lipschitz}--\ref{ass:local_defects}, for any partition $\Pi$ and any two grids $h,h'$ connected by $\Restr_{h\rightarrow h'}$,
+\begin{align}
+&\norm{
+\Restr_{h\rightarrow h'}
+\PhiOp^{h}_{\theta,\Pi}(z;u)
+-
+\PhiOp^{h'}_{\theta,\Pi}
+(\Restr_{h\rightarrow h'}z;u)
+}
+\nonumber\\
+&\qquad\le
+\epsilon_s
+\sum_{i=1}^{n}
+\tau_i e^{L(T-t_i)}
+\le
+\epsilon_s T e^{LT}.
+\label{eq:spatial_accumulation}
+\end{align}
+\end{lemma}
+
+\begin{lemma}[Discrepancy induced by a temporal partition]
+\label{lem:temporal_accumulation}
+Under Assumptions~\ref{ass:lipschitz}--\ref{ass:local_defects}, for any grid $h$ and partition $\Pi$,
+\begin{align}
+&\norm{
+\PhiOp^{h}_{\theta,T}(z;u_{[0,T]})
+-
+\PhiOp^{h}_{\theta,\Pi}(z;u)
+}
+\nonumber\\
+&\qquad\le
+\epsilon_t
+\sum_{i=2}^{n}
+ t_{i-1}\tau_i e^{L(T-t_i)}
+\label{eq:temporal_accumulation_sharp}
+\\
+&\qquad\le
+\frac{\epsilon_t e^{LT}}{2}
+\left(T^2-\sum_{i=1}^{n}\tau_i^2\right).
+\label{eq:temporal_accumulation_coarse}
+\end{align}
+\end{lemma}
+
+\begin{theorem}[Joint space--time rollout discrepancy]
+\label{thm:joint_discrepancy}
+Let $\Pi=(\tau_1,\ldots,\tau_n)$ and $\Pi'=(\tau'_1,\ldots,\tau'_{n'})$ be two partitions of the same horizon $T$, both applied to the same action signal $u$. Let $t_i=\sum_{j\le i}\tau_j$ and $t'_j=\sum_{\ell\le j}\tau'_{\ell}$. Under Assumptions~\ref{ass:lipschitz}--\ref{ass:local_defects},
+\begin{align}
+&\norm{
+\Restr_{h\rightarrow h'}
+\PhiOp^{h}_{\theta,\Pi}(z;u)
+-
+\PhiOp^{h'}_{\theta,\Pi'}
+(\Restr_{h\rightarrow h'}z;u)
+}
+\nonumber\\
+&\le
+\underbrace{
+\epsilon_s\sum_{i=1}^{n}\tau_i e^{L(T-t_i)}
+}_{\text{spatial commutation}}
++
+\underbrace{
+\epsilon_t\sum_{i=2}^{n}t_{i-1}\tau_i e^{L(T-t_i)}
+}_{\text{partition }\Pi}
+\nonumber\\
+&\quad+
+\underbrace{
+\epsilon_t\sum_{j=2}^{n'}t'_{j-1}\tau'_j e^{L(T-t'_j)}
+}_{\text{partition }\Pi'}
+\label{eq:joint_bound_sharp}
+\\
+&\le
+ e^{LT}
+ \left[
+    \epsilon_s T
+    +
+    \frac{\epsilon_t}{2}
+    \left(
+    2T^2
+    -\sum_{i=1}^{n}\tau_i^2
+    -\sum_{j=1}^{n'}(\tau'_j)^2
+    \right)
+ \right]
+\label{eq:main_bound}
+\\
+&\le e^{LT}(\epsilon_sT+\epsilon_tT^2).
+\label{eq:main_bound_simple}
+\end{align}
+\end{theorem}
+
+\begin{corollary}[Exact discretization invariance in the zero-defect limit]
+\label{cor:zero_defect}
+If $\epsilon_s=\epsilon_t=0$ on the set considered by Assumption~\ref{ass:local_defects}, then for every admissible state, action signal, grid pair, and pair of temporal partitions of the same horizon,
+\begin{equation}
+\Restr_{h\rightarrow h'}
+\PhiOp^{h}_{\theta,\Pi}(z;u)
+=
+\PhiOp^{h'}_{\theta,\Pi'}
+(\Restr_{h\rightarrow h'}z;u).
+\end{equation}
+Thus the model defines the same latent rollout independently of the chosen temporal partition and, up to the transfer operator, the chosen spatial discretization.
+\end{corollary}
+
+The complete proofs of Lemmas~\ref{lem:spatial_accumulation} and~\ref{lem:temporal_accumulation}, Theorem~\ref{thm:joint_discrepancy}, and Corollary~\ref{cor:zero_defect} are given in \cref{app:proofs}. The bound separates a \emph{stability factor} $e^{LT}$ from two \emph{consistency defects}. It therefore makes a limited but testable prediction: at a matched latent predictor accuracy, models with lower temporal and spatial defects should exhibit lower sensitivity to held-out frame rates and token grids. Conversely, if reducing these defects does not improve such out-of-distribution behavior, the proposed interpretation of discretization consistency as a useful physical inductive bias is not supported.
+
+\section{Experimental Protocol}
+\label{sec:experiments}
+
+No empirical values are populated in this manuscript. We fix the evaluation design in advance so that the central claim can be tested without changing the encoder, supervision, or planner after observing results.
+
+\paragraph{Primary controlled comparison.}
+The primary study uses the public V-JEPA~2 visual backbone and DROID robot trajectories~\citep{assran2025vjepa2,khazatsky2024droid}. The encoder is frozen, and only the dynamics predictor and its input/output projections are trained. The original V-JEPA~2-AC planning interface is retained. This setup isolates whether replacing a fixed-discretization predictor by the proposed evolution operator changes prediction and planning behavior. A secondary OpenVLA/Open-X study is specified in \cref{app:evaluation} to test transfer beyond a JEPA backbone~\citep{kim2024openvla,oneill2023openx}.
+
+\paragraph{Evaluation axes.}
+We evaluate (i) in-distribution and long-horizon latent prediction, (ii) temporal OOD under held-out elapsed durations, (iii) spatial OOD under unseen latent grids, (iv) action-intervention sensitivity, and (v) MPC success with a fixed planner. Temporal composition defect and spatial commutation defect are reported in normalized form,
+\begin{align}
+\mathrm{TCD}(\tau,\sigma)
+&=\frac{\norm{\PhiOp_{\tau+\sigma}(z)-\PhiOp_{\sigma}(\PhiOp_{\tau}(z))}}{\tau\sigma},
+\\
+\mathrm{SCD}(h,h';\tau)
+&=\frac{\norm{\Restr\PhiOp^{h}_{\tau}(z)-\PhiOp^{h'}_{\tau}(\Restr z)}}{\tau}.
+\end{align}
+The complete metric definitions, action-shuffle diagnostic, planning controls, and raw-input versus latent-discretization protocols are given in \cref{app:evaluation}.
+
+
+
+\paragraph{Baselines and ablations.}
+The minimum comparison set contains the original V-JEPA~2-AC predictor, a parameter-matched Transformer on the same frozen tokens, Transformer+consistency, a fixed-Fourier operator, a Koopman-style rotation--scaling predictor~\citep{li2026koopman}, and a matched port-Hamiltonian predictor inspired by H-JEPA where the interface permits a faithful implementation~\citep{zoabi2026hjjepa}. Spectral-Target supervision is reported only when its geometric targets are available and is separated from label-free comparisons~\citep{zhu2026spectral}. Ablations remove temporal consistency, spatial consistency, scene-adaptive modes, damping, and nonlinear interaction individually. Full definitions and blank reporting tables appear in \cref{app:baselines,app:tables}.
+
+\section{Conclusion}
+We introduced \POJEPA{}, which replaces a fixed-step latent transition with an action-conditioned evolution operator on a visual latent field. Temporal composition and spatial commutation provide label-free criteria for asking whether the same learned dynamics survives changes of frame rate and token discretization. Our analysis bounds the resulting cross-discretization rollout discrepancy by the learned flow's stability and its two local consistency defects. The proposed experiments are designed to test the corresponding falsifiable claim while holding perception and planning fixed. Detailed limitations are provided in \cref{app:limitations}.
+
+\section*{Impact Statement}
+This work aims to improve the reliability and generalization of learned world models for embodied systems. More accurate predictive models may reduce real-world trial-and-error and improve data efficiency, but they may also enable more capable autonomous systems. The proposed method does not introduce new data collection mechanisms or surveillance capabilities; it operates on existing video--action datasets. Any deployment on physical robots should retain independent safety constraints, uncertainty monitoring, and task-level oversight because discretization consistency alone does not guarantee correctness under distribution shift or unobserved hazards.
+
+\clearpage
+\bibliography{references}
+\bibliographystyle{icml2026}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\appendix
+\onecolumn
+
+\section{Notation and Additional Formalization}
+\label{app:notation}
+
+\subsection{Controlled evolution notation}
+Let $u:[0,T]\rightarrow\Aspace$ be piecewise constant with change points aligned to the recorded control frequency. For $0\le s<t\le T$, write $u_{[s,t]}$ for the restriction of $u$ to that interval. The exact controlled evolution of a Markov state would satisfy
+\begin{equation}
+\PhiOp_{t-r}(\PhiOp_{r-s}(z;u_{[s,r]});u_{[r,t]})
+=\PhiOp_{t-s}(z;u_{[s,t]}).
+\end{equation}
+The proposed temporal loss is a sample-based relaxation of this cocycle identity in the learned latent state.
+
+\subsection{Spatial grids and transfer operators}
+A spatial discretization $h$ consists of token coordinates $\mathcal{G}_h=\{\mathbf{x}_i^h\}_{i=1}^{N_h}$. For regular grids, $\Restr_{h\rightarrow h'}$ is implemented by average pooling or bilinear interpolation. For irregular token sets, it can be a normalized kernel interpolation
+\begin{equation}
+(\Restr_{h\rightarrow h'}Z)_j
+=
+\frac{\sum_i k(\mathbf{x}^{h'}_j,\mathbf{x}^h_i)Z_i}
+{\sum_i k(\mathbf{x}^{h'}_j,\mathbf{x}^h_i)}.
+\end{equation}
+The base experiments use deterministic linear transfer operators when possible. The main theorem does not require the transfer operator itself to be contractive; it requires the measured commutation defect in \cref{eq:local_spatial_defect} to be controlled.
+
+\subsection{Why we avoid claiming that image frequencies are physical frequencies}
+The modal coordinate system is introduced for parameter efficiency and structured evolution. A mode may mix appearance, geometry, motion, and interaction information. The quantities $\omega_k$ and $\gamma_k$ should therefore be interpreted as \emph{latent propagation} and \emph{latent damping} rates. A physical interpretation requires independent evidence, such as correlation with known oscillation frequencies in controlled synthetic tasks, and should be reported only when such evidence exists.
+
+\section{Proofs}
+\label{app:proofs}
+
+This appendix expands every step used in the main consistency result. Throughout, the norm is the same latent-space norm as in Assumptions~\ref{ass:lipschitz}--\ref{ass:local_defects}. Once an action signal $u$ and a partition have been fixed, we write the action argument only where it is needed to avoid ambiguity. No step below assumes access to a ground-truth physical state.
+
+\subsection{Proof of Proposition~\ref{prop:nonexpansive}}
+\label{app:proof_nonexpansive}
+
+Consider
+\begin{equation}
+A=-\gamma I+\omega J,
+\qquad
+J=
+\begin{bmatrix}
+0&-1\\
+1&0
+\end{bmatrix},
+\qquad \gamma\ge0.
+\end{equation}
+We prove the closed form, the semigroup identity, and the spectral-norm statement separately.
+
+\paragraph{Step 1: separate the damping and rotational generators.}
+The matrices $-\gamma I$ and $\omega J$ commute because the identity commutes with every square matrix:
+\begin{equation}
+(-\gamma I)(\omega J)=(-\gamma\omega)J=(\omega J)(-\gamma I).
+\end{equation}
+For commuting matrices $M$ and $N$, $e^{M+N}=e^Me^N$. Therefore
+\begin{equation}
+e^{A\tau}
+=e^{(-\gamma I+\omega J)\tau}
+=e^{-\gamma\tau I}e^{\omega\tau J}
+=e^{-\gamma\tau}e^{\omega\tau J}.
+\label{eq:app_split_exp}
+\end{equation}
+
+\paragraph{Step 2: evaluate the rotational exponential.}
+Direct multiplication gives
+\begin{equation}
+J^2=
+\begin{bmatrix}
+0&-1\\1&0
+\end{bmatrix}^2
+=-I.
+\end{equation}
+Hence $J^{2k}=(-1)^kI$ and $J^{2k+1}=(-1)^kJ$. Expanding the matrix exponential into its power series,
+\begin{align}
+e^{\omega\tau J}
+&=\sum_{m=0}^{\infty}\frac{(\omega\tau J)^m}{m!}
+\nonumber\\
+&=\sum_{k=0}^{\infty}\frac{(\omega\tau)^{2k}J^{2k}}{(2k)!}
+ +\sum_{k=0}^{\infty}\frac{(\omega\tau)^{2k+1}J^{2k+1}}{(2k+1)!}
+\nonumber\\
+&=\left[\sum_{k=0}^{\infty}\frac{(-1)^k(\omega\tau)^{2k}}{(2k)!}\right]I
+ +\left[\sum_{k=0}^{\infty}\frac{(-1)^k(\omega\tau)^{2k+1}}{(2k+1)!}\right]J
+\nonumber\\
+&=\cos(\omega\tau)I+\sin(\omega\tau)J
+\nonumber\\
+&=
+\begin{bmatrix}
+\cos(\omega\tau)&-\sin(\omega\tau)\\
+\sin(\omega\tau)&\cos(\omega\tau)
+\end{bmatrix}.
+\label{eq:app_rotation_exp}
+\end{align}
+Combining \cref{eq:app_split_exp,eq:app_rotation_exp} proves \cref{eq:closed_form_flow}.
+
+\paragraph{Step 3: prove the semigroup identity.}
+Because $A\tau$ and $A\sigma$ are scalar multiples of the same matrix $A$, they commute. Therefore
+\begin{align}
+S_{\sigma}S_{\tau}
+&=e^{A\sigma}e^{A\tau}
+=e^{A\sigma+A\tau}
+=e^{A(\sigma+\tau)}
+=S_{\sigma+\tau},
+\end{align}
+which is \cref{eq:free_semigroup}. The same conclusion follows directly from the angle-addition formulas for the rotation matrices in \cref{eq:closed_form_flow}.
+
+\paragraph{Step 4: compute the spectral norm.}
+Let
+\begin{equation}
+R_{\tau}
+=
+\begin{bmatrix}
+\cos(\omega\tau)&-\sin(\omega\tau)\\
+\sin(\omega\tau)&\cos(\omega\tau)
+\end{bmatrix}.
+\end{equation}
+A direct multiplication yields
+\begin{equation}
+R_{\tau}^{\top}R_{\tau}
+=
+\begin{bmatrix}
+\cos^2(\omega\tau)+\sin^2(\omega\tau)&0\\
+0&\cos^2(\omega\tau)+\sin^2(\omega\tau)
+\end{bmatrix}
+=I.
+\end{equation}
+Thus $R_{\tau}$ is orthogonal. Every singular value of an orthogonal matrix is one, so $\norm{R_{\tau}}_2=1$. From $S_{\tau}=e^{-\gamma\tau}R_{\tau}$,
+\begin{equation}
+\norm{S_{\tau}}_2
+=e^{-\gamma\tau}\norm{R_{\tau}}_2
+=e^{-\gamma\tau}.
+\end{equation}
+Since $\gamma\ge0$ and $\tau\ge0$, $e^{-\gamma\tau}\le1$, proving \cref{eq:free_nonexpansive}.
+
+\paragraph{Step 5: extend to a block-diagonal modal generator.}
+If $A_{\mathrm{free}}=\operatorname{diag}(A_1,\ldots,A_q)$, then
+\begin{equation}
+e^{A_{\mathrm{free}}\tau}
+=\operatorname{diag}(e^{A_1\tau},\ldots,e^{A_q\tau}).
+\end{equation}
+The spectral norm of a block-diagonal matrix equals the maximum spectral norm of its blocks. Hence
+\begin{equation}
+\norm{e^{A_{\mathrm{free}}\tau}}_2
+=\max_r e^{-\gamma_r\tau}
+\le1.
+\end{equation}
+The semigroup identity also holds blockwise. This completes the proof. \qed
+
+\subsection{Proof of Lemma~\ref{lem:spatial_accumulation}}
+\label{app:proof_spatial}
+
+Fix a partition $\Pi=(\tau_1,\ldots,\tau_n)$, define $t_i=\sum_{j=1}^{i}\tau_j$, and write $u_i=u_{[t_{i-1},t_i]}$. To shorten notation in this proof, let $R:=\Restr_{h\rightarrow h'}$.
+
+Define the rollout on grid $h$ recursively by
+\begin{equation}
+x_0=z,
+\qquad
+x_i=\PhiOp^{h}_{\theta,\tau_i}(x_{i-1};u_i),
+\quad i=1,\ldots,n,
+\label{eq:spatial_x_recursion}
+\end{equation}
+and the rollout on grid $h'$ by
+\begin{equation}
+y_0=Rz,
+\qquad
+y_i=\PhiOp^{h'}_{\theta,\tau_i}(y_{i-1};u_i),
+\quad i=1,\ldots,n.
+\label{eq:spatial_y_recursion}
+\end{equation}
+By definition,
+\begin{equation}
+x_n=\PhiOp^{h}_{\theta,\Pi}(z;u),
+\qquad
+y_n=\PhiOp^{h'}_{\theta,\Pi}(Rz;u).
+\end{equation}
+We must bound $\norm{Rx_n-y_n}$.
+
+For each $i$, define the discrepancy
+\begin{equation}
+e_i:=\norm{Rx_i-y_i}.
+\end{equation}
+At $i=0$,
+\begin{equation}
+e_0=\norm{Rz-Rz}=0.
+\label{eq:spatial_e0}
+\end{equation}
+For $i\ge1$, substitute \cref{eq:spatial_x_recursion,eq:spatial_y_recursion}:
+\begin{equation}
+e_i
+=
+\norm{
+R\PhiOp^{h}_{\theta,\tau_i}(x_{i-1};u_i)
+-
+\PhiOp^{h'}_{\theta,\tau_i}(y_{i-1};u_i)
+}.
+\end{equation}
+Add and subtract the intermediate quantity
+$\PhiOp^{h'}_{\theta,\tau_i}(Rx_{i-1};u_i)$ inside the norm. The triangle inequality gives
+\begin{align}
+e_i
+&\le
+\norm{
+R\PhiOp^{h}_{\theta,\tau_i}(x_{i-1};u_i)
+-
+\PhiOp^{h'}_{\theta,\tau_i}(Rx_{i-1};u_i)
+}
+\nonumber\\
+&\quad+
+\norm{
+\PhiOp^{h'}_{\theta,\tau_i}(Rx_{i-1};u_i)
+-
+\PhiOp^{h'}_{\theta,\tau_i}(y_{i-1};u_i)
+}.
+\label{eq:spatial_triangle}
+\end{align}
+The first term is bounded by the local spatial defect \cref{eq:local_spatial_defect} with duration $\tau_i$:
+\begin{equation}
+\norm{
+R\PhiOp^{h}_{\theta,\tau_i}(x_{i-1};u_i)
+-
+\PhiOp^{h'}_{\theta,\tau_i}(Rx_{i-1};u_i)
+}
+\le \epsilon_s\tau_i.
+\label{eq:spatial_local_applied}
+\end{equation}
+The second term is bounded by the Lipschitz assumption \cref{eq:lipschitz_assumption} on grid $h'$:
+\begin{align}
+&\norm{
+\PhiOp^{h'}_{\theta,\tau_i}(Rx_{i-1};u_i)
+-
+\PhiOp^{h'}_{\theta,\tau_i}(y_{i-1};u_i)
+}
+\nonumber\\
+&\qquad\le
+e^{L\tau_i}\norm{Rx_{i-1}-y_{i-1}}
+=e^{L\tau_i}e_{i-1}.
+\label{eq:spatial_lipschitz_applied}
+\end{align}
+Combining \cref{eq:spatial_triangle,eq:spatial_local_applied,eq:spatial_lipschitz_applied} gives the one-step recursion
+\begin{equation}
+e_i\le \epsilon_s\tau_i+e^{L\tau_i}e_{i-1}.
+\label{eq:spatial_recursion}
+\end{equation}
+
+We now unroll \cref{eq:spatial_recursion} by induction. We claim that for every $i\ge1$,
+\begin{equation}
+e_i
+\le
+\epsilon_s
+\sum_{k=1}^{i}
+\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right).
+\label{eq:spatial_induction_claim}
+\end{equation}
+For $i=1$, \cref{eq:spatial_recursion,eq:spatial_e0} give $e_1\le\epsilon_s\tau_1$, while the right-hand side of \cref{eq:spatial_induction_claim} is
+\begin{equation}
+\epsilon_s\tau_1\exp\!\left(L\sum_{j=2}^{1}\tau_j\right)
+=\epsilon_s\tau_1e^0
+=\epsilon_s\tau_1,
+\end{equation}
+so the claim holds for the base case.
+
+Assume it holds at $i-1$. Substituting the induction hypothesis into \cref{eq:spatial_recursion},
+\begin{align}
+e_i
+&\le \epsilon_s\tau_i
++e^{L\tau_i}
+\epsilon_s
+\sum_{k=1}^{i-1}
+\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i-1}\tau_j
+\right)
+\nonumber\\
+&=\epsilon_s\tau_i
++\epsilon_s
+\sum_{k=1}^{i-1}
+\tau_k
+\exp\!\left(
+L\tau_i+L\sum_{j=k+1}^{i-1}\tau_j
+\right)
+\nonumber\\
+&=\epsilon_s\tau_i
++\epsilon_s
+\sum_{k=1}^{i-1}
+\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right)
+\nonumber\\
+&=\epsilon_s
+\sum_{k=1}^{i}
+\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right),
+\end{align}
+where the last equality treats the standalone term $\epsilon_s\tau_i$ as the $k=i$ term because the corresponding empty sum in the exponential equals zero. This completes the induction.
+
+Set $i=n$. Since
+\begin{equation}
+\sum_{j=k+1}^{n}\tau_j=T-t_k,
+\end{equation}
+\cref{eq:spatial_induction_claim} becomes
+\begin{equation}
+e_n
+\le
+\epsilon_s\sum_{k=1}^{n}\tau_k e^{L(T-t_k)},
+\end{equation}
+which is the first inequality in \cref{eq:spatial_accumulation}. Finally, $L\ge0$ and $0\le T-t_k\le T$ imply
+\begin{equation}
+e^{L(T-t_k)}\le e^{LT}.
+\end{equation}
+Therefore
+\begin{align}
+e_n
+&\le
+\epsilon_s e^{LT}\sum_{k=1}^{n}\tau_k
+=\epsilon_s e^{LT}T,
+\end{align}
+proving the second inequality and the lemma. \qed
+
+\subsection{Proof of Lemma~\ref{lem:temporal_accumulation}}
+\label{app:proof_temporal}
+
+Fix a grid $h$, a partition $\Pi=(\tau_1,\ldots,\tau_n)$, and the corresponding action segments $u_i=u_{[t_{i-1},t_i]}$. Define the partitioned state after $i$ pieces by
+\begin{equation}
+p_0=z,
+\qquad
+p_i=\PhiOp^{h}_{\theta,\tau_i}(p_{i-1};u_i).
+\label{eq:temporal_p_recursion}
+\end{equation}
+Then $p_n=\PhiOp^{h}_{\theta,\Pi}(z;u)$.
+
+Define the direct state at the same elapsed time by
+\begin{equation}
+f_i
+:=
+\PhiOp^{h}_{\theta,t_i}(z;u_{[0,t_i]}),
+\qquad i=0,\ldots,n,
+\label{eq:temporal_f_definition}
+\end{equation}
+with $f_0=z$ and $f_n=\PhiOp^{h}_{\theta,T}(z;u_{[0,T]})$. Let
+\begin{equation}
+d_i:=\norm{f_i-p_i}.
+\end{equation}
+Clearly $d_0=0$. Also, for $i=1$,
+\begin{equation}
+f_1=\PhiOp^{h}_{\theta,\tau_1}(z;u_1)=p_1,
+\end{equation}
+so $d_1=0$.
+
+Now take $i\ge2$. By definition,
+\begin{equation}
+d_i
+=
+\norm{
+\PhiOp^{h}_{\theta,t_i}(z;u_{[0,t_i]})
+-
+\PhiOp^{h}_{\theta,\tau_i}(p_{i-1};u_i)
+}.
+\end{equation}
+Because $t_i=t_{i-1}+\tau_i$ and
+$u_{[0,t_i]}=u_{[0,t_{i-1}]}\oplus u_i$, we may add and subtract
+\begin{equation}
+\PhiOp^{h}_{\theta,\tau_i}
+\left(
+\PhiOp^{h}_{\theta,t_{i-1}}(z;u_{[0,t_{i-1}]});
+ u_i
+\right)
+=
+\PhiOp^{h}_{\theta,\tau_i}(f_{i-1};u_i).
+\end{equation}
+The triangle inequality yields
+\begin{align}
+d_i
+&\le
+\norm{
+\PhiOp^{h}_{\theta,t_i}(z;u_{[0,t_i]})
+-
+\PhiOp^{h}_{\theta,\tau_i}(f_{i-1};u_i)
+}
+\nonumber\\
+&\quad+
+\norm{
+\PhiOp^{h}_{\theta,\tau_i}(f_{i-1};u_i)
+-
+\PhiOp^{h}_{\theta,\tau_i}(p_{i-1};u_i)
+}.
+\label{eq:temporal_triangle}
+\end{align}
+The first term is exactly a local temporal-composition defect with the first duration $t_{i-1}$ and the second duration $\tau_i$. By \cref{eq:local_temporal_defect},
+\begin{equation}
+\norm{
+\PhiOp^{h}_{\theta,t_i}(z;u_{[0,t_i]})
+-
+\PhiOp^{h}_{\theta,\tau_i}(f_{i-1};u_i)
+}
+\le
+\epsilon_t t_{i-1}\tau_i.
+\label{eq:temporal_local_applied}
+\end{equation}
+The second term is bounded by \cref{eq:lipschitz_assumption}:
+\begin{align}
+&\norm{
+\PhiOp^{h}_{\theta,\tau_i}(f_{i-1};u_i)
+-
+\PhiOp^{h}_{\theta,\tau_i}(p_{i-1};u_i)
+}
+\nonumber\\
+&\qquad\le
+e^{L\tau_i}\norm{f_{i-1}-p_{i-1}}
+=e^{L\tau_i}d_{i-1}.
+\label{eq:temporal_lipschitz_applied}
+\end{align}
+Combining \cref{eq:temporal_triangle,eq:temporal_local_applied,eq:temporal_lipschitz_applied},
+\begin{equation}
+d_i
+\le
+\epsilon_t t_{i-1}\tau_i
++e^{L\tau_i}d_{i-1}.
+\label{eq:temporal_recursion}
+\end{equation}
+
+We again unroll the recursion by induction. We claim that for every $i\ge2$,
+\begin{equation}
+d_i
+\le
+\epsilon_t
+\sum_{k=2}^{i}
+ t_{k-1}\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right).
+\label{eq:temporal_induction_claim}
+\end{equation}
+For $i=2$, since $d_1=0$, \cref{eq:temporal_recursion} gives
+\begin{equation}
+d_2\le\epsilon_t t_1\tau_2,
+\end{equation}
+and the right-hand side of \cref{eq:temporal_induction_claim} is the same quantity because the exponent contains an empty sum.
+
+Assume \cref{eq:temporal_induction_claim} holds at $i-1$. Then \cref{eq:temporal_recursion} implies
+\begin{align}
+d_i
+&\le
+\epsilon_t t_{i-1}\tau_i
++e^{L\tau_i}
+\epsilon_t
+\sum_{k=2}^{i-1}
+ t_{k-1}\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i-1}\tau_j
+\right)
+\nonumber\\
+&=
+\epsilon_t t_{i-1}\tau_i
++
+\epsilon_t
+\sum_{k=2}^{i-1}
+ t_{k-1}\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right)
+\nonumber\\
+&=
+\epsilon_t
+\sum_{k=2}^{i}
+ t_{k-1}\tau_k
+\exp\!\left(
+L\sum_{j=k+1}^{i}\tau_j
+\right),
+\end{align}
+where the final line absorbs the first term as the $k=i$ term. The induction is complete.
+
+Setting $i=n$ and using $\sum_{j=k+1}^{n}\tau_j=T-t_k$ yields
+\begin{equation}
+d_n
+\le
+\epsilon_t
+\sum_{k=2}^{n}
+ t_{k-1}\tau_k e^{L(T-t_k)},
+\end{equation}
+which proves \cref{eq:temporal_accumulation_sharp}.
+
+To obtain the coarser closed form, note that $e^{L(T-t_k)}\le e^{LT}$, hence
+\begin{equation}
+d_n
+\le
+\epsilon_t e^{LT}
+\sum_{k=2}^{n}t_{k-1}\tau_k.
+\label{eq:temporal_before_identity}
+\end{equation}
+Expand $t_{k-1}$:
+\begin{align}
+\sum_{k=2}^{n}t_{k-1}\tau_k
+&=
+\sum_{k=2}^{n}
+\left(\sum_{j=1}^{k-1}\tau_j\right)\tau_k
+\nonumber\\
+&=
+\sum_{1\le j<k\le n}\tau_j\tau_k.
+\label{eq:pairwise_sum}
+\end{align}
+On the other hand,
+\begin{align}
+T^2
+&=\left(\sum_{i=1}^{n}\tau_i\right)^2
+\nonumber\\
+&=\sum_{i=1}^{n}\tau_i^2
++2\sum_{1\le j<k\le n}\tau_j\tau_k.
+\label{eq:square_expansion}
+\end{align}
+Rearranging \cref{eq:square_expansion} and using \cref{eq:pairwise_sum},
+\begin{equation}
+\sum_{k=2}^{n}t_{k-1}\tau_k
+=\frac{1}{2}
+\left(T^2-\sum_{i=1}^{n}\tau_i^2\right).
+\label{eq:pairwise_identity}
+\end{equation}
+Substituting \cref{eq:pairwise_identity} into \cref{eq:temporal_before_identity} proves \cref{eq:temporal_accumulation_coarse}. \qed
+
+\subsection{Proof of Theorem~\ref{thm:joint_discrepancy}}
+\label{app:proof_joint}
+
+Let $R:=\Restr_{h\rightarrow h'}$. For compactness define
+\begin{align}
+X&:=R\PhiOp^{h}_{\theta,\Pi}(z;u),\\
+Y&:=\PhiOp^{h'}_{\theta,\Pi}(Rz;u),\\
+Z&:=\PhiOp^{h'}_{\theta,T}(Rz;u_{[0,T]}),\\
+W&:=\PhiOp^{h'}_{\theta,\Pi'}(Rz;u).
+\end{align}
+The quantity in \cref{thm:joint_discrepancy} is $\norm{X-W}$. Insert $Y$ and $Z$ and apply the triangle inequality twice:
+\begin{align}
+\norm{X-W}
+&=\norm{(X-Y)+(Y-Z)+(Z-W)}
+\nonumber\\
+&\le
+\norm{X-Y}+\norm{Y-Z}+\norm{Z-W}.
+\label{eq:joint_triangle}
+\end{align}
+We now bound the three terms separately.
+
+\paragraph{First term: spatial discrepancy along $\Pi$.}
+By Lemma~\ref{lem:spatial_accumulation},
+\begin{equation}
+\norm{X-Y}
+\le
+\epsilon_s
+\sum_{i=1}^{n}\tau_i e^{L(T-t_i)}.
+\label{eq:joint_term1}
+\end{equation}
+
+\paragraph{Second term: replacing $\Pi$ by a direct horizon-$T$ prediction on grid $h'$.}
+The norm is symmetric, so
+\begin{equation}
+\norm{Y-Z}
+=
+\norm{
+\PhiOp^{h'}_{\theta,T}(Rz;u_{[0,T]})
+-
+\PhiOp^{h'}_{\theta,\Pi}(Rz;u)
+}.
+\end{equation}
+Applying Lemma~\ref{lem:temporal_accumulation} on grid $h'$ gives
+\begin{equation}
+\norm{Y-Z}
+\le
+\epsilon_t
+\sum_{i=2}^{n}t_{i-1}\tau_i e^{L(T-t_i)}.
+\label{eq:joint_term2}
+\end{equation}
+
+\paragraph{Third term: replacing the direct prediction by partition $\Pi'$.}
+Again by Lemma~\ref{lem:temporal_accumulation}, now with partition $\Pi'$,
+\begin{equation}
+\norm{Z-W}
+\le
+\epsilon_t
+\sum_{j=2}^{n'}t'_{j-1}\tau'_j e^{L(T-t'_j)}.
+\label{eq:joint_term3}
+\end{equation}
+Substituting \cref{eq:joint_term1,eq:joint_term2,eq:joint_term3} into \cref{eq:joint_triangle} yields the sharp bound \cref{eq:joint_bound_sharp}.
+
+For the first coarse bound, apply the second inequality of Lemma~\ref{lem:spatial_accumulation} to \cref{eq:joint_term1} and \cref{eq:temporal_accumulation_coarse} to the two temporal terms. This gives
+\begin{align}
+\norm{X-W}
+&\le
+\epsilon_sTe^{LT}
++
+\frac{\epsilon_te^{LT}}{2}
+\left(T^2-\sum_{i=1}^{n}\tau_i^2\right)
+\nonumber\\
+&\quad+
+\frac{\epsilon_te^{LT}}{2}
+\left(T^2-\sum_{j=1}^{n'}(\tau'_j)^2\right)
+\nonumber\\
+&=
+ e^{LT}
+ \left[
+ \epsilon_sT
+ +\frac{\epsilon_t}{2}
+ \left(
+ 2T^2
+ -\sum_{i=1}^{n}\tau_i^2
+ -\sum_{j=1}^{n'}(\tau'_j)^2
+ \right)
+ \right],
+\end{align}
+which is \cref{eq:main_bound}.
+
+Finally, every squared duration is nonnegative, so
+\begin{equation}
+2T^2
+-\sum_{i=1}^{n}\tau_i^2
+-\sum_{j=1}^{n'}(\tau'_j)^2
+\le 2T^2.
+\end{equation}
+Therefore
+\begin{align}
+\norm{X-W}
+&\le
+ e^{LT}
+ \left(\epsilon_sT+\frac{\epsilon_t}{2}\cdot2T^2\right)
+\nonumber\\
+&=e^{LT}(\epsilon_sT+\epsilon_tT^2),
+\end{align}
+which is \cref{eq:main_bound_simple}. This completes the proof. \qed
+
+\subsection{Proof of Corollary~\ref{cor:zero_defect}}
+\label{app:proof_zero_defect}
+
+Set $\epsilon_s=0$ and $\epsilon_t=0$ in \cref{eq:main_bound_simple}. Because $e^{LT}$ is finite for finite $L$ and $T$,
+\begin{equation}
+0
+\le
+\norm{
+R\PhiOp^{h}_{\theta,\Pi}(z;u)
+-
+\PhiOp^{h'}_{\theta,\Pi'}(Rz;u)
+}
+\le
+ e^{LT}(0\cdot T+0\cdot T^2)
+=0.
+\end{equation}
+A norm is nonnegative and equals zero if and only if its argument is the zero vector. Hence
+\begin{equation}
+R\PhiOp^{h}_{\theta,\Pi}(z;u)
+-
+\PhiOp^{h'}_{\theta,\Pi'}(Rz;u)
+=0,
+\end{equation}
+which is exactly the claimed identity. \qed
+
+\subsection{What the bound does and does not establish}
+The theorem is a stability statement for the \emph{learned} evolution family. It does not establish that the visual latent is Markov, that the operator equals the environment's true physical flow, or that $\epsilon_s$ and $\epsilon_t$ are small. Those are empirical questions. The result establishes the following conditional implication: if the predictor is uniformly stable and if the two local defects are small on the relevant data manifold, then two evaluations of the same action-conditioned trajectory---even when they use different temporal partitions and different latent grids---cannot disagree by more than the explicit accumulated bound. This is the precise sense in which the proposed losses target discretization sensitivity.
+
+\paragraph{Relation to the training losses.}
+The theoretical assumptions are uniform bounds, whereas \cref{eq:ltime,eq:lspace} minimize empirical mean-square normalized defects. A small empirical objective therefore does not by itself prove Assumption~\ref{ass:local_defects}; a finite-sample generalization argument would require additional assumptions on the data distribution and function class. For this reason the final experimental paper should report the held-out distributions of TCD and SCD, including high quantiles, rather than only training averages.
+
+\section{Training Algorithm}
+\label{app:algorithm}
+
+\begin{algorithm}[H]
+\caption{One training iteration of \POJEPA{}}
+\label{alg:po_jepa}
+\begin{algorithmic}[1]
+\STATE Sample a trajectory window $(o_t,a_t,\ldots,o_{t+H})$.
+\STATE Encode context and target observations with the JEPA encoder/target encoder.
+\STATE Sample prediction duration $\tau$ and obtain the corresponding action segment $u_{[t,t+\tau]}$.
+\STATE Predict $\widehat{Z}_{t+\tau}^{h}=\PhiOp^{h}_{\theta,\tau}(Z_t^h;u)$ and compute $\Loss_{\mathrm{JEPA}}$.
+\STATE Sample a split $\tau=\tau_1+\tau_2$; compare one-shot and composed predictions to obtain $\Loss_{\mathrm{time}}$.
+\STATE Sample a second latent grid $h'$ using deterministic restriction $\Restr_{h\rightarrow h'}$.
+\STATE Compare restrict-after-evolve with evolve-after-restrict to obtain $\Loss_{\mathrm{space}}$.
+\STATE Update predictor parameters using \cref{eq:full_loss}; update target encoder by the base JEPA rule if it is not frozen.
+\end{algorithmic}
+\end{algorithm}
+
+\section{Architecture and Implementation Details}
+\label{app:implementation}
+
+\subsection{Recommended first implementation}
+To maximize interpretability of ablations, the first implementation should modify as little of V-JEPA 2-AC as possible.
+\begin{itemize}
+    \item \textbf{Encoder:} public V-JEPA 2 backbone, frozen.
+    \item \textbf{Dynamic width:} project encoder tokens to $d_x\in\{64,128\}$.
+    \item \textbf{Modes:} $K=\min(128,N_h)$ lowest graph-Laplacian modes; $K=N_h$ may be used on small grids.
+    \item \textbf{Modal channels:} even-dimensional groups so each pair admits the damped-rotation block in \cref{eq:damped_rotation}.
+    \item \textbf{Interactions:} top-$r$ modal attention with $r\in\{8,16,32\}$.
+    \item \textbf{Integrator:} exact exponential for the linear block plus midpoint or exponential-Euler update for forcing/residual terms.
+    \item \textbf{Horizons:} sample from $\{1,2,4,8\}$ base control intervals during initial training.
+    \item \textbf{Spatial restrictions:} $1\times$, $1/2\times$, and $1/4\times$ token-grid resolutions where feasible.
+\end{itemize}
+The exact dimensions should be parameter-matched against the Transformer baseline to separate architectural bias from parameter count.
+
+\subsection{Modal interaction parameterization}
+Let $q_k=W_qc_k$, $k_j=W_kc_j$, and $v_j=W_vc_j$. Sparse interaction scores are
+\begin{equation}
+s_{kj}
+=\frac{q_k^\top k_j}{\sqrt{d_q}}
++b_\lambda(\lambda_k,\lambda_j)
++b_x(\phi_k,\phi_j),
+\end{equation}
+where the last two terms allow interactions to depend on spectral and spatial overlap. Only the top-$r$ scores for each $k$ are retained. The nonlinear residual is
+\begin{equation}
+\mathcal{N}_k(C,a)
+=\sum_{j\in\operatorname{TopR}(k)}
+\alpha_{kj}v_j
++M_a(c_k,a),
+\end{equation}
+with $\alpha$ the renormalized sparse softmax. A simpler low-rank bilinear interaction should be included as an ablation.
+
+\subsection{Encoder adaptation schedule}
+Stage~1 freezes all encoder parameters. Stage~2 may unfreeze the final $B$ transformer blocks or introduce LoRA adapters. The temporal and spatial consistency losses remain applied to the predictor output. Any gain from Stage~2 should be reported separately because joint adaptation can move the representation toward the operator bias and obscure whether the predictor alone is responsible for improved generalization.
+
+\section{Evaluation Details}
+\label{app:evaluation}
+
+\begin{table}[H]
+\caption{Pre-specified OOD evaluation axes. Entries are protocol definitions, not experimental results.}
+\label{tab:ood_protocol}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Axis & Train regime & Test regime \\
+\midrule
+Time step & sampled $\tau\in\mathcal{Q}$ & held-out durations \\
+Rollout & $\le 8$ steps & $16$--$64$ steps \\
+Latent grid & canonical + coarse & unseen grids \\
+Raw resolution & canonical & resized inputs \\
+Action & recorded actions & shuffled / perturbed \\
+Scene/task & train split & held-out split \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Temporal OOD protocol}
+A robust protocol must avoid a trivial confound in which test frame rates correspond to images never seen by the encoder. We therefore report two settings:
+\begin{enumerate}
+    \item \textbf{Latent-time OOD:} encode the canonical frame stream once and evaluate the operator at held-out durations using the same latent endpoints.
+    \item \textbf{Raw-video frame-rate OOD:} resample the input video before encoding and evaluate the full encoder--operator stack.
+\end{enumerate}
+The first isolates the evolution law. The second measures the end-to-end system.
+
+\subsection{Spatial OOD protocol}
+Similarly, we distinguish predictor-level and encoder-level spatial generalization:
+\begin{enumerate}
+    \item \textbf{Latent-grid OOD:} apply unseen restriction/interpolation operators to a canonical encoded token field.
+    \item \textbf{Raw-resolution OOD:} resize the visual input and, where supported, run the encoder at an unseen resolution.
+\end{enumerate}
+The main claim of this paper concerns the first setting; the second is a stronger systems-level evaluation.
+
+\subsection{Planning evaluation}
+For V-JEPA 2-AC, the planner, candidate action parameterization, planning horizon, goal-image encoder, and scoring function should be held fixed across predictors. This controls for improvements due to planning hyperparameters. We will report task success, number of replans, computation per planning step, and disagreement between predicted and realized goal-latent distance.
+
+\subsection{Action intervention diagnostics}
+To test whether the world model actually uses action rather than extrapolating passive video dynamics, we construct an action-shuffle diagnostic. For each state and future target, compare prediction error under the executed action sequence $u$ and a temporally aligned action sequence $\widetilde{u}$ sampled from another trajectory:
+\begin{equation}
+\Delta_{\mathrm{act}}
+=
+ d(\PhiOp(z;\widetilde{u}),z^*)
+-
+ d(\PhiOp(z;u),z^*).
+\end{equation}
+A positive margin indicates that the predictor distinguishes the executed intervention from a plausible but incorrect control sequence. This diagnostic uses only actions already contained in the dataset.
+
+\section{Baseline Definitions}
+\label{app:baselines}
+
+\paragraph{Transformer predictor.}
+A standard token Transformer with matched parameter count, identical encoder features, action embeddings, target loss, horizon sampling, and optimizer. It does not receive $\Loss_{\mathrm{time}}$ or $\Loss_{\mathrm{space}}$ unless explicitly stated in a separate ablation.
+
+\paragraph{Transformer + consistency.}
+The same Transformer augmented with both consistency losses. This baseline is essential: it tests whether the proposed gains come from the objectives alone or from the operator parameterization.
+
+\paragraph{Fixed Fourier operator.}
+Replace the graph basis with a 2-D Fourier basis on the token grid while retaining the same stable modal generator and losses. This directly measures the value of scene-adaptive geometry.
+
+\paragraph{Koopman-style spectral predictor.}
+Use a finite vector latent with bounded rotation--scaling blocks and action terms, inspired by Koopman Dreamer~\citep{li2026koopman}, but trained on the same JEPA latent targets. This baseline tests whether function-space structure matters beyond spectral stability.
+
+\paragraph{Port-Hamiltonian predictor.}
+Where action/state dimensions allow a matched implementation, compare against a dissipative port-Hamiltonian latent transition inspired by H-JEPA~\citep{zoabi2026hjjepa} and port-Hamiltonian neural networks~\citep{desai2021port}. This baseline tests whether cross-discretization consistency adds value beyond energetic structure.
+
+\section{Planned Ablation and Reporting Tables}
+\label{app:tables}
+
+\begin{table}[H]
+\caption{Ablation table template. No values are populated before experiments.}
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Model & JEPA & Time & Space & Modal & Stable & Nonlin. \\
+\midrule
+Transformer & \checkmark & -- & -- & -- & -- & \checkmark \\
+Transformer + cons. & \checkmark & \checkmark & \checkmark & -- & -- & \checkmark \\
+Fixed Fourier Op. & \checkmark & \checkmark & \checkmark & Fourier & \checkmark & \checkmark \\
+\POJEPA{} w/o $\mathcal{N}$ & \checkmark & \checkmark & \checkmark & Graph & \checkmark & -- \\
+\POJEPA{} & \checkmark & \checkmark & \checkmark & Graph & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Primary result table template. ``--'' indicates values to be filled after the experiment.}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & ID pred. & Time OOD & Space OOD & Long rollout & MPC success \\
+\midrule
+V-JEPA 2-AC predictor & -- & -- & -- & -- & -- \\
+Transformer matched & -- & -- & -- & -- & -- \\
+Koopman-style & -- & -- & -- & -- & -- \\
+Port-Hamiltonian & -- & -- & -- & -- & -- \\
+\POJEPA{} & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Additional Discussion and Limitations}
+\label{app:limitations}
+
+\paragraph{Latent consistency is not physical truth.}
+The method tests whether a representation admits discretization-consistent dynamics; it does not prove that latent coordinates correspond uniquely to physical variables. Any invertible reparameterization that preserves the evolution can represent the same controlled process. Consequently, $\omega_k$, $\gamma_k$, and modal interactions should be interpreted as latent structural quantities unless separate physical probes justify stronger claims.
+
+\paragraph{Partial observability and the Markov assumption.}
+Single-view robot video can hide velocities, contacts, and occluded objects. The exact cocycle law is a property of a sufficient state; it need not hold for a representation that aliases different hidden states. The base implementation therefore uses a short video context rather than a single image whenever supported by the backbone. An informative negative result would be that increasing temporal context reduces TCD substantially more than changing the predictor, indicating that state sufficiency, rather than operator parameterization, is the dominant bottleneck.
+
+\paragraph{Discontinuities and hybrid dynamics.}
+Hard contact, stick--slip transitions, impacts, and mode switching can produce non-smooth or hybrid evolution. Sparse nonlinear modal interaction supplies capacity for such events but does not guarantee faithful representation of discontinuities. Event-conditioned or hybrid operators are a natural extension if systematic errors concentrate around contact transitions.
+
+\paragraph{Spatial coordinates are observational.}
+The base spatial domain is induced by visual token coordinates. Cross-grid commutation therefore concerns two discretizations of the same \emph{visual latent field}; it is not a statement that pixel-plane distances equal metric distances in the physical scene. Multi-view geometry, depth, or camera calibration could strengthen geometric interpretation, but those signals are intentionally excluded from the primary no-extra-label experiment.
+
+\paragraph{Computational overhead.}
+Scene-adaptive graph construction and eigendecomposition add cost relative to a token Transformer. The scientific value of the modal basis therefore depends not only on prediction quality but also on whether its OOD benefit survives parameter-, memory-, and wall-clock-matched comparisons. Approximate eigensolvers, Nystr\"om methods, cached bases, or learned integral kernels may be required at large token counts.
+
+\section{Complexity Considerations}
+For $N$ latent tokens and $K$ retained modes, a dense eigendecomposition is $O(N^3)$, which may dominate at large resolution. Several practical reductions are available: (i) use Lanczos iteration for the lowest $K$ eigenpairs; (ii) compute the basis at a coarser grid and interpolate; (iii) cache coordinate-dominated bases when feature adaptation is weak; or (iv) replace explicit eigenvectors with a learned integral operator. The sparse mode-interaction cost is $O(Krd)$ rather than $O(K^2d)$. A fair empirical study should report wall-clock time, peak memory, and planner throughput, not only prediction quality.
+
+\section{Failure Modes and Falsification Criteria}
+\label{app:falsification}
+The central hypothesis should be considered unsupported if any of the following occurs consistently across controlled experiments:
+\begin{enumerate}
+    \item lowering TCD/SCD does not improve held-out frame-rate or grid generalization;
+    \item a parameter-matched Transformer with the same consistency losses matches \POJEPA{} across OOD settings, indicating that the modal operator is unnecessary;
+    \item the model improves latent consistency but degrades downstream planning, indicating that discretization consistency removes task-relevant information;
+    \item performance gains disappear when encoder and planner are held fixed, suggesting that improvements come from unrelated adaptation;
+    \item scene-adaptive modes fail to outperform a fixed Fourier basis, weakening the geometry-adaptation motivation.
+\end{enumerate}
+Reporting these outcomes is important because the research question is about whether a discretization-consistent latent evolution law exists in practice, not merely whether a particular architecture can reduce training loss.
+
+\section{Reproducibility Checklist for the Final Submission}
+The final experimental paper should report: dataset versions and trajectory filters; exact V-JEPA/OpenVLA checkpoints; token resolutions; action parameterization and control frequency; all temporal strides; definitions of train/validation/test scene splits; optimizer, learning rate, batch size, training steps, random seeds, and hardware; parameter counts for all baselines; operator mode count and sparse-interaction degree; numerical integrator and tolerances; values of $\lambda_t$ and $\lambda_s$; planner hyperparameters; and all failure cases or unstable runs. The source code should expose a configuration that reproduces the frozen-encoder experiment without requiring privileged simulator state.
+
+\end{document}
