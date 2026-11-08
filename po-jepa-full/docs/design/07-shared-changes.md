@@ -127,7 +127,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
    - 输入：v7 的 `encode_v7.py --fake-encoder` 生成的假特征（van_der_pol，40 条轨迹，两棵树读同一份）。每棵树各起一个子进程，运行本树的 `tools/smoke_v7_cpu.py --updates 20 --seed 1703 --jobs po_jepa_full,po_jepa_no_consistency,matched_transformer,identity,vjepa2_ac_small,vjepa2_ac`：每个条件训练 20 步（第 0、10、20 步验证）加评测，identity 以外的 5 个条件另做一次只评测重跑。
    - vjepa2_ac：CPU 上做不了官方规模（约 3 亿参数，要官方权重），两棵树都换成测试专用的缩小规格 `ACSpec(width=64, depth=2, heads=4, mlp_ratio=4.0)` 和同一份假权重，走的代码路径（载入官方权重、微调、检查点、评测）和正式运行相同；官方规模的数值等价由第 3 项核。
    - 只在 1 线程、固定环境下跑：`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`、`OMP_DYNAMIC=FALSE`、`MKL_DYNAMIC=FALSE`、`MKL_CBWR=COMPATIBLE,STRICT`、`PYTHONHASHSEED=0`。实测 v7 树自己在 2 线程、4 线程下连跑两次就不能逐位复现（标定的 λ 就不同），多线程下两棵树的不同分不清是代码还是线程调度造成的。
-   - 逐位相同的项：标定结果、初始权重哈希、每一步的训练记录（损失、梯度量、学习率、调用次数）、每个验证文件的逐窗口值和选点、第 20 步的 `model_state`、每一条测试评测行（含只评测重跑）和评测汇总。不比耗时、绝对路径和来源字段（源码 SHA 在 S08a 以后会合法地变化）。完整的比较表和每项的条数在 `docs/segments/S00.md` §3.4.5。
+   - 逐位相同的项：标定结果、初始权重哈希、每一步的训练记录（损失、梯度量、学习率、调用次数）、每个验证文件的逐窗口值和选点、第 20 步的 `model_state`、每一条测试评测行（含只评测重跑）和评测汇总。不比耗时、绝对路径和来源字段（源码 SHA 在 S08a 以后会合法地变化）。除了按项点名比较，还对 `smoke/` 下的全部文件做整份比较：文件集合相同，全部 JSON 和全部检查点在删掉一组固定的键（耗时、含耗时的文件 SHA、绝对路径、源码 SHA、从不播种的全局随机状态）以后相同，所以表里没点名的字段也不会漏掉。完整的比较表、排除的键和每项的条数在 `docs/segments/S00.md` §3.4.5。
    - 一次约 1 小时 50 分（两棵树并行，各占 1 个核；S00 实测 1:47:37），时间几乎都花在评测上，要放到后台跑，并在独立会话里起（`setsid`），免得被后台命令的 2 小时时限打断。
 3. **真实检查点等价核对**：D4 在每个 v7 检查点上重算 v7 的标准指标，和 v7 自己的评测记录比较（10 §4）。这一步在机哥的机器上随 D4 一起跑。
 4. **快照核对**：对 6 个 v7 条件，新树里现建模型的 `_model_config`、`_loss_config`、Transformer 规格、AC 规格序列化后和 v7 检查点里存的逐字节相同。
