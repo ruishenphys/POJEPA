@@ -147,13 +147,13 @@ class POJEPA(nn.Module):
             raise ValueError("raw_z must use a real dense model device")
         x = self.project_in(raw_z)
         graph = self.spectrum.config
-        # affinity 内部只取 detach 副本；encoder 模式用编码器输出 Z 建图，不经过可训练 P_in。
-        affinity = self.spectrum.affinity(raw_z if graph.affinity_source == "encoder" else x, grid)
-        laplacian = self.spectrum.normalized_laplacian(affinity).laplacian
         if graph.fixed_modes and x.shape[1] < graph.max_modes:
             raise ValueError("fixed_modes requires every grid to have at least K tokens")
         modes = graph.max_modes if graph.fixed_modes else min(graph.max_modes, x.shape[1])
-        spectrum = self.spectrum.lowest_eigenpairs(laplacian, k=modes, model_device=x.device)
+        # affinity 内部只取 detach 副本；encoder 模式用编码器输出 Z 建图，不经过可训练 P_in。
+        # 07 §2.1：建图、规范化、求谱由 spectrum_for 按 v7 原顺序一次做完，所以 N<K 的检查提到它前面。
+        spectrum = self.spectrum.spectrum_for(raw_z if graph.affinity_source == "encoder" else x, grid,
+                                              k=modes, model_device=x.device)
         initial = modal_analysis(x, spectrum.basis)
         context = self.dynamics.prepare_context(x, spectrum.eigenvalues, spectrum.basis, grid.coords)
         return QueryContext(x, grid, spectrum, initial, context)

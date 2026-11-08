@@ -592,12 +592,49 @@ def consistency_share(condition, model, batch, loss_config, completed):
     return dict(**norms, warmup_scale=scale,
         share={k: w*scale*norms["grad_"+k]/norms["grad_jepa"] if norms["grad_jepa"] > 0 else None for k, w in weights.items()})
 
+def monitored_consistency_terms(condition, loss_config):
+    """07 §2.4：一致性监控和提前检查看哪几项。
+
+    po_jepa_full 固定看 ("time", "space")，不读权重（v7 行为）；其余 v7 条件和 identity 不看，返回 None；
+    其他条件看权重 > 0 的项（按 time、space 的顺序），一项都没有就返回 None。
+    """
+    if condition == "po_jepa_full":
+        return ("time", "space")
+    if condition in V7_CONDITIONS or condition == "identity":
+        return None
+    if not isinstance(loss_config, LossConfig):
+        raise TypeError("loss_config must be a LossConfig")
+    terms = tuple(name for name, weight in (("time", loss_config.time_weight), ("space", loss_config.space_weight))
+                  if weight > 0)
+    return terms or None
+
+def _checked_terms_monitor_summary(output, loss_config, target_rho, terms):
+    """07 §2.4：po_jepa_full 以外条件的一致性监控汇总，只看 terms 里的项，另加 checked_terms。
+
+    读记录、预热过滤、门槛、中位数的写法与 consistency_monitor_summary 里 po_jepa_full 的那段逐行相同。
+    """
+    config = check.load_protocol()
+    rho = config["calibration"]["rho"] if target_rho is None else target_rho
+    threshold = config["monitoring"]["min_share"]
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((Path(output)/"updates").glob("*.json"))]
+    rows = [r for r in rows if r.get("consistency_gradient") and r["completed_updates"] >= loss_config.consistency_warmup_updates]
+    if not rows:
+        return dict(measurements=0, rho=rho, active=False, median_share=None, threshold=threshold,
+                    checked_terms=list(terms))
+    median = {k: statistics.median(r["consistency_gradient"]["share"][k] for r in rows) for k in terms}
+    return dict(measurements=len(rows), rho=rho, threshold=threshold,
+                median_share=median, active=all(v >= threshold for v in median.values()), checked_terms=list(terms))
+
 def consistency_monitor_summary(output, condition, loss_config, target_rho=None):
     """v6：读本条件全部更新记录，取一致性预热结束后各次测量的中位数；任一项低于 monitoring.min_share 判为“没有真正参与”。
 
     门槛是绝对比例（默认 0.5%，v5 约 0.001%），不随 rho 变：CPU 冒烟里实际占比稳定在 rho 的 1/10–1/5
     （标定点之后一致性梯度相对变小），按 rho 的比例判会误杀正常候选。rho 只作记录，默认取 v4.yaml 的 calibration.rho。
+    07 §2.4：po_jepa_full 以外、有权重 > 0 的一致性项的条件交给 _checked_terms_monitor_summary；po_jepa_full 仍走下面 v7 的原文。
     """
+    terms = None if condition == "po_jepa_full" else monitored_consistency_terms(condition, loss_config)
+    if terms is not None:
+        return _checked_terms_monitor_summary(output, loss_config, target_rho, terms)
     if condition != "po_jepa_full":
         return None
     config = check.load_protocol()
@@ -618,7 +655,7 @@ def early_check(output, condition, loss_config, completed, target_rho=None):
     """v6：full 条件在第 monitoring.early_check_updates 次更新后检查一次；占比中位数低于 min_share 立即停止，
     不再花完整训练时间去跑一个“一致性没参与”的模型（v5 的情形约 1e-5）。"""
     step = check.load_protocol()["monitoring"]["early_check_updates"]
-    if condition != "po_jepa_full" or completed != step:
+    if monitored_consistency_terms(condition, loss_config) is None or completed != step:
         return
     monitor = consistency_monitor_summary(output, condition, loss_config, target_rho)
     data.cache._write_json(Path(output)/"early-check.json", dict(completed_updates=completed, **monitor))

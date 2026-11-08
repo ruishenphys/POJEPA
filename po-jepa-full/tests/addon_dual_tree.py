@@ -53,10 +53,13 @@ POLL_SECONDS = 5            # 并行时轮询两个子进程的间隔（不超�
 KILL_GRACE_SECONDS = 30     # 一个子进程失败后，另一个收到 SIGTERM 30 s 内不退出就 SIGKILL
 WORKER_SAME_FIELDS = ("threads", "torch_version", "smoke_v7_cpu_sha256", "ac_reduced_official_spec",
                       "ac_checkpoint_sha256", "env")
-# 整份比较时在任何层级删掉的键：耗时；含耗时和来源的文件的 SHA；绝对路径；源码 SHA（S08a 以后会合法地变）
+# 整份比较时在任何层级删掉的键：耗时；含耗时和来源的文件的 SHA；绝对路径；源码 SHA（S08a 以后会合法地变）；
+# preregistration.json 的摘要（它含 consumer_sha256，所以随源码变；preregistration.json 本身照样整份比较）
 EXCLUDED_KEYS = frozenset({"seconds", "update_and_observer_seconds", "gpu_memory", "checkpoint_sha256",
                            "report_sha256", "training_run", "provenance", "checkpoint_provenance", "consumer_sha256",
-                           "source_files_sha256", "generator_source_sha256"})
+                           "source_files_sha256", "generator_source_sha256",
+                           "training_consumer_sha256", "evaluation_source_sha256",
+                           "registration_sha256", "preregistration_sha256"})
 # 检查点另删 Python/NumPy/torch 的全局随机状态：训练只用显式生成器，全局状态从不播种，进程之间本来就不同
 CHECKPOINT_EXCLUDED_KEYS = EXCLUDED_KEYS | {"rng_state"}
 WHOLE_CALIBRATION = "smoke/calibrate/calibration.json"

@@ -145,7 +145,7 @@ def _provenance(value: dict) -> dict:
     return value
 
 def _loss_config(config: LossConfig, condition: str) -> dict:
-    """消费合法Real为原生float64快照；训练full双正、批准对照双零，不新增消融。"""
+    """消费合法Real为原生float64快照；full双正、no_consistency双零，单项消融time_only只时间正、space_only只空间正。"""
     if not isinstance(config, LossConfig):
         raise TypeError("loss_config must be LossConfig")
     config.__post_init__()
@@ -158,6 +158,14 @@ def _loss_config(config: LossConfig, condition: str) -> dict:
     weights = (native["time_weight"], native["space_weight"])
     if (condition == "full" and all(w > 0 for w in weights)) or (condition == "no_consistency" and weights == (0., 0.)):
         return native
+    if condition == "time_only":
+        if weights[0] > 0 and weights[1] == 0.:
+            return native
+        raise ValueError("condition time_only requires a positive time weight and a zero space weight")
+    if condition == "space_only":
+        if weights[0] == 0. and weights[1] > 0:
+            return native
+        raise ValueError("condition space_only requires a zero time weight and a positive space weight")
     raise ValueError("condition must be full with two positive weights or no_consistency with two zero weights")
 
 def _parameters(model: POJEPA) -> list:

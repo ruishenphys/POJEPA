@@ -539,10 +539,19 @@ def test_whole_json_ignores_excluded_keys_at_any_depth(runs):
           lambda v: v["source"]["generation"]["sources"][0].update(generator_source_sha256={"src/y.py": "0"*64}))
     for root, value in ((a, 1), (b, 2)):
         _edit(root/E/"rows"/"00001.json", lambda v: v.update(audit=[{"deep": {k: value for k in dual.EXCLUDED_KEYS}}]))
+    # 真实输出里随源码变的位置（S08a 的双树对照实测）：评测登记的 sources，任务报告、训练报告里预登记的摘要
+    for root, x in ((a, "1"), (b, "2")):
+        _edit(root/E/"registration.json", lambda v: v.update(sources=dict(
+            training_consumer_sha256={"src/po_jepa/model.py": x*64},
+            evaluation_source_sha256={"src/po_jepa/runtime/evaluation.py": x*64})))
+        _edit(root/"smoke/jobs/po_jepa_full/report.json", lambda v: v.update(registration_sha256=x*64))
+        _edit(root/T/"report.json", lambda v: v.update(preregistration_sha256=x*64))
     assert compare(a, b)["identical"] is True
     assert dual.EXCLUDED_KEYS == {"seconds", "update_and_observer_seconds", "gpu_memory", "checkpoint_sha256",
                                   "report_sha256", "training_run", "provenance", "checkpoint_provenance",
-                                  "consumer_sha256", "source_files_sha256", "generator_source_sha256"}
+                                  "consumer_sha256", "source_files_sha256", "generator_source_sha256",
+                                  "training_consumer_sha256", "evaluation_source_sha256",
+                                  "registration_sha256", "preregistration_sha256"}
 
 
 def test_extra_svg_is_caught(runs):

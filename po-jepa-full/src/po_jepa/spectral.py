@@ -279,6 +279,18 @@ class GraphSpectrum(nn.Module):
                                   eigenvalues_cpu.to(device=model_device, dtype=torch.float32).detach(),
                                   basis_cpu.to(device=model_device, dtype=torch.float32).detach(), diagnostics)
 
+    def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int,
+                     model_device: torch.device) -> SpectralResult:
+        """07 §2.2：建图并求最低 k 个特征对，与 v7 POJEPA.prepare_query 里原来的三步完全相同。
+
+        source 为 affinity 的输入（encoder 模式是 raw Z [B,N,feature_dim]，projected 模式是 X [B,N,64]），
+        依次 affinity → normalized_laplacian → lowest_eigenpairs，参数原样转交，不另加检查或缓存。
+        子类（固定 Fourier，08 §4）重写本方法。
+        """
+        affinity = self.affinity(source, grid)
+        laplacian = self.normalized_laplacian(affinity).laplacian
+        return self.lowest_eigenpairs(laplacian, k=k, model_device=model_device)
+
 
 def _validate_modal_tensors(values: Tensor, basis: Tensor) -> None:
     """核同设备 float32 模态张量：正 B/N、1<=K<=N、特征宽 64。
