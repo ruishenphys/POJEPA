@@ -115,9 +115,17 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | `src/po_jepa/generic_consistency.py` | 不限模型类型的 `temporal_predictions`、`spatial_predictions` | 08 §3 |
 | `src/po_jepa/ln_metrics.py` | LN 空间的差异度量 | 10 §3.1 |
 | `src/po_jepa/runtime/addon/conditions.py` | 新条件的构造、优化器、单步、检查点 | 08 |
-| `src/po_jepa/runtime/addon/calibration.py` | 导入 v7 标定、补跑标定、通用梯度范数 | 16 §3 |
-| `src/po_jepa/runtime/addon/v7load.py` | 读 v7 检查点（放宽来源核对） | 10 §4 |
-| `src/po_jepa/runtime/addon/d4.py`、`long_window.py`、`spectral_gap.py`、`encoder_identity.py` | D4 评测和几项核对 | 10 §3–§6 |
+| `src/po_jepa/runtime/addon/calibration.py` | 补跑标定的读取和核对、`generic_gradient_norms`（S10b） | 16 §3.2、08 §3 |
+| `src/po_jepa/runtime/addon/calibrate.py` | `run.py calibrate-addon`：补跑标定的计算和写入（S17） | 16 §3.2 |
+| `src/po_jepa/runtime/addon/check_addon.py`、`entry.py` | `run.py check-addon`；`calibrate-addon`、`check-addon` 的子进程入口（S17） | 16 §5 |
+| `tools/import_v7_calibration.py` | 导入 v7 标定，写 `configs/calibration/IMPORTED.json`（S17） | 16 §3.1 |
+| `tools/addon_preflight.py`、`tools/make_addon_jobs.py` | 补跑开跑前的核对；补跑任务文件（S17） | 16 §5、§7、§12 |
+| `补跑说明.md` | 给机哥的补跑说明（S17；不进 MANIFEST） | 16 §9 |
+| `src/po_jepa/runtime/addon/v7load.py` | 读 v7 检查点（放宽来源核对）（S18a） | 10 §4 |
+| `src/po_jepa/runtime/addon/d4.py`、`long_window.py`、`spectral_gap.py`、`encoder_identity.py` | D4 评测和几项核对（S18a） | 10 §3–§6 |
+| `src/po_jepa/runtime/addon/eval_cli.py` | `run.py d4`、`run.py spectral-gap` 的子进程入口（S18a） | 10 §3–§5 |
+| `tools/encoder_identity.py` | 编码器核对的命令行工具（S18a） | 10 §6、16 §7.1 |
+| `tools/summarize_addon.py` | 补跑汇总（S18b） | 13 §1–§7 |
 
 ## 5. 怎么验证“v7 条件逐位不变”
 
