@@ -23,7 +23,7 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 
 `tools/import_v7_calibration.py --v7-tree ../../po-jepa --stage full`：
 
-1. 要求 v7 目录的 git HEAD 是 `911bc09e79e4e92b89a823e083aac7d95edaa029`，否则报错（v7 不应有任何改动）。
+1. 要求 v7 目录的 git HEAD 是 `653e2d07477d809e933fdedddebfc77c655b71c5` 或 `911bc09e79e4e92b89a823e083aac7d95edaa029`，否则报错（v7 的代码不应有任何改动）。653e2d0 是 2026-11-08 给机哥的交接更新（试跑的 double_well-200 改读 v6 特征目录），只改了 README.md、交接说明.md 和 MANIFEST.json，代码和 911bc09 逐字节相同；正式运行用的是 653e2d0。`IMPORTED.json` 记下实际读到的 HEAD。
 2. 对每个场景，读 `<v7 目录>/configs/calibration/<tag>-u<步数>.yaml`（tag 如 `double_well-2000`、`landscape~shape=multi_well-2000`），要求 `sigma_z`、`time_weight`、`space_weight` 都不为空。
 3. 原字节复制到 po-jepa-full 的 `configs/calibration/` 下同名文件。目标已存在且字节相同就跳过，不同就报错。
 4. 写 `configs/calibration/IMPORTED.json`：每个文件的源路径、SHA、导入时间、v7 的 commit。
