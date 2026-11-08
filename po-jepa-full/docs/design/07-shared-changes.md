@@ -93,7 +93,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | 文件 | 改什么 |
 |---|---|
 | `tools/run_jobs.py` | 默认日志目录改成 `workdir.parent.parent/"logs-addon"/<任务文件名>`（即 工作目录/logs-addon/…）；启动检查的提示改成“请在 full-model/po-jepa-full 目录里运行”；把半截输出改名重跑的子命令名单扩成 `calibrate`、`calibrate-addon`、`check`、`check-addon`、`transfer`、`evaluate`、`d4`、`spectral-gap`；`priority` 里 transformer_consistency、fixed_fourier、两个单项消融排 1，koopman 排 2 |
-| `tools/refresh_manifests.py` | `EXCLUDE_DIRS` 加 `docs` 和 `.vscode`，`MUTABLE` 加 `README.md`（连同它上面的注释共三行，原文见 S00 段说明 §3.2）。改设计文档、编辑器设置或项目状态页都不改变 MANIFEST，`verify_bundle` 不会因此失败，续训和只评测的登记也不会对不上 |
+| `tools/refresh_manifests.py` | `EXCLUDE_DIRS` 加 `docs` 和 `.vscode`，`MUTABLE` 加 `README.md`（连同它上面的注释共三行，原文见 S00 段说明 §3.2）。改设计文档、编辑器设置或项目状态页都不改变 MANIFEST，`verify_bundle` 不会因此失败，续训和只评测的登记也不会对不上。注意 `EXCLUDE_DIRS` 按路径里任何一级目录名匹配，所以以后任何一层叫 `docs` 或 `.vscode` 的目录（如 `src/po_jepa/docs/`）都不进 MANIFEST；新代码不要放进这样命名的目录 |
 | `tools/plan_v7.py` | 接受新条件（读检查点走 `evaluation.load_selected_checkpoint`）；其余不变 |
 | `tools/make_v7_jobs.py`、`tools/summarize_v7.py` | 原样保留，不用于补跑；补跑用新的 `make_addon_jobs.py`、`summarize_addon.py` |
 
@@ -128,6 +128,6 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
    - vjepa2_ac：CPU 上做不了官方规模（约 3 亿参数，要官方权重），两棵树都换成测试专用的缩小规格 `ACSpec(width=64, depth=2, heads=4, mlp_ratio=4.0)` 和同一份假权重，走的代码路径（载入官方权重、微调、检查点、评测）和正式运行相同；官方规模的数值等价由第 3 项核。
    - 只在 1 线程、固定环境下跑：`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`、`OMP_DYNAMIC=FALSE`、`MKL_DYNAMIC=FALSE`、`MKL_CBWR=COMPATIBLE,STRICT`、`PYTHONHASHSEED=0`。实测 v7 树自己在 2 线程、4 线程下连跑两次就不能逐位复现（标定的 λ 就不同），多线程下两棵树的不同分不清是代码还是线程调度造成的。
    - 逐位相同的项：标定结果、初始权重哈希、每一步的训练记录（损失、梯度量、学习率、调用次数）、每个验证文件的逐窗口值和选点、第 20 步的 `model_state`、每一条测试评测行（含只评测重跑）和评测汇总。不比耗时、绝对路径和来源字段（源码 SHA 在 S08a 以后会合法地变化）。除了按项点名比较，还对 `smoke/` 下的全部文件做整份比较：文件集合相同，全部 JSON 和全部检查点在删掉一组固定的键（耗时、含耗时的文件 SHA、绝对路径、源码 SHA、从不播种的全局随机状态）以后相同，所以表里没点名的字段也不会漏掉。完整的比较表、排除的键和每项的条数在 `docs/segments/S00.md` §3.4.5。
-   - 一次约 1 小时 50 分（两棵树并行，各占 1 个核；S00 实测 1:47:37），时间几乎都花在评测上，要放到后台跑，并在独立会话里起（`setsid`），免得被后台命令的 2 小时时限打断。
+   - 一次约 1 小时 50 分（两棵树并行，各占 1 个核；S00 实测 1:47:37，机器有别的负载时到 2:18:26），时间几乎都花在评测上，要放到后台跑，并在独立会话里起（`setsid`），免得被后台命令的 2 小时时限打断。
 3. **真实检查点等价核对**：D4 在每个 v7 检查点上重算 v7 的标准指标，和 v7 自己的评测记录比较（10 §4）。这一步在机哥的机器上随 D4 一起跑。
 4. **快照核对**：对 6 个 v7 条件，新树里现建模型的 `_model_config`、`_loss_config`、Transformer 规格、AC 规格序列化后和 v7 检查点里存的逐字节相同。
