@@ -3,7 +3,7 @@
   "scientific_results_verified": false,
   "files_sha256": {
     "DATASET.md": "d5c2a3684f10d15205a85244dff15d62104d6aa731caeae334f885a17fa89091",
-    "README.md": "2a9d40a5155a0a81f79f814ba877a5dfa1ecd3c52e4e924769831c49dc8b3090",
+    "README.md": "c2330d1a12c19596ed2aabb3368351ff7404941e7f9ca6b8c056fbbb555278e0",
     "README_v4.md": "9a6e83bc507086d0e4d5d4d17724e3808bf57c37d16788bb519c1b3e109e004a",
     "SOURCE_MAP.json": "a50d0825d770b7f4c8b5a95e6d720b2662c7a16aec06f4bf5e8cb91562a8ed96",
     "VALIDATION_STATUS.json": "0d9aa3836c0f14dc3896a0dda2666aeff747b76cda09f27430e298000b98ce75",
@@ -95,6 +95,6 @@
     "tools/v4_validation/short_train_v4_result_rho005.json": "b24adee1b03ac0b3bf66fabaafee62e3bbc47788cb9caf123fe2164c83eb955b",
     "tools/v4_validation/short_train_v4_result_space_only.json": "eadc31327d7295a8b61af84787f491a92a72f5f730e38d0b3bcd239ba6d06b04",
     "tools/v4_validation/short_train_v4_result_time_only.json": "682b58761b41e9c10bcb2e3a70ba631292044749b55f364a8b70fc73eb21afb1",
-    "交接说明.md": "6dd930c0e4937560176849a345096b785fd2e334044d2fffe9185e9edccb76c8"
+    "交接说明.md": "083ecb092caf72dd25cb14b0b4f40c087f97f6996e31175aba9055b639910ffa"
   }
 }

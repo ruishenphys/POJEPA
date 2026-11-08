@@ -1,4 +1,54 @@
-> **v7 实验请看 [交接说明.md](交接说明.md)**，数据集说明见 [DATASET.md](DATASET.md)。下文是 v3 时期的旧说明，仅供参考。
+# PO-JEPA v7
+
+**帮忙跑 v7 实验的同学：完整步骤在 [交接说明.md](交接说明.md)，照着复制命令就行，不需要改任何代码或配置。** 数据集说明见 [DATASET.md](DATASET.md)。
+
+> **2026-11-08 更新**：和上一版交接说明相比只改了一处，试跑里的 double_well 改用你机器上 v6 时的特征目录，试跑的命令换了（见下面，交接说明第二节是同一段）。代码没有改动。已经 clone 过的，在 `po-jepa` 目录里执行 `git pull` 拿到这一版。
+
+## 流程一览
+
+| 步骤 | 做什么 | 两张 RTX PRO 6000 大约要 |
+|---|---|---|
+| 一、准备 | 装环境（版本必须一致）、clone 本仓库的 v7 分支和 V-JEPA 2、下载两个权重（交接说明第一节） | 只做一次 |
+| 二、试跑 | 5 个场景 × 200 条轨迹，2000 步，1 个种子；double_well 用 v6 的特征 | 8–10 小时 |
+| 三、正式运行 | 5 个场景 × 2000 条轨迹，10000 步，3 个种子，再做分布外评测和规划 | 3.5–4 天 |
+| 四、传回结果 | 打包 `results-v7`、`logs-v7` 发给 Jerry（交接说明第五节） | 几分钟 |
+
+## 试跑（新版命令）
+
+试跑的 double_well 是 v6 用过的那 200 条数据。v7 对这份数据只认 v6 编码出的那份特征，在本机重新编码的会在标定时被拒绝（报 `approved F02 encode report SHA mismatch`），所以试跑要指向 v6 时的特征目录：就是 v6 运行时 `--features-root` 指的那个 `features` 目录，里面有 `0000` 到 `0199` 共 200 个子目录。新 clone 的 `po-jepa/features/` 里只有几个登记文件、没有特征数组，不能用。
+
+把下面第二行换成那个目录的绝对路径，核对三项，再生成任务：
+
+```bash
+cd po-jepa
+V6=/v6/的/features/目录的/绝对路径
+sha256sum "$V6/report.json"                    # 必须是 e464495fee79f2f0367d99fca456c8ecf7066f329e37935ce2c7ae87083b269e
+ls -d "$V6"/[0-9][0-9][0-9][0-9] | wc -l       # 必须是 200
+ls "$V6"/0000/raw_z.npy "$V6"/0199/raw_z.npy   # 两个文件都在
+python tools/make_v7_jobs.py --stage pilot --v6-features "$V6" > jobs-pilot.txt
+python tools/run_jobs.py jobs-pilot.txt --gpus 0,1
+```
+
+三项里有一项不对就先别跑，告诉 Jerry。生成的 `jobs-pilot.txt` 一共 57 条任务：double_well 不再编码，它的标定和 6 条训练任务都读 `$V6`，其余 4 个场景和以前一样在本机编码。
+
+- 最后打印 **“全部完成。”**：试跑通过，直接开始正式运行，同时把试跑结果打包发给 Jerry，不用等他回复。
+- 打印 **“有任务失败，已停下”**：把 `../logs-v7/` 和 `../results-v7/` 打包发给 Jerry，先不要开始正式运行。
+
+## 正式运行（命令没变）
+
+```bash
+python tools/make_v7_jobs.py --stage full > jobs-full.txt
+python tools/make_v7_jobs.py --stage variants > jobs-variants.txt
+python tools/run_jobs.py jobs-full.txt --gpus 0,1 && python tools/run_jobs.py jobs-variants.txt --gpus 0,1
+```
+
+正式运行每个场景是 2000 条轨迹，全部在本机编码，不用 v6 的特征。
+
+中断了（关机、断电、Ctrl-C、显卡出错）就重新运行同一条 `run_jobs.py` 命令，不用删任何东西。报错先查交接说明第六节的表，别的报错把 `../logs-v7/` 发给 Jerry。
+
+---
+
+## 附：v3 时期的旧说明（仅供参考，跑 v7 不用看）
 
 # PO-JEPA v3 运行说明
 
