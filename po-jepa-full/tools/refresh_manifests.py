@@ -14,8 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDE_DIRS = {"results", "features", "__pycache__", ".git", ".pytest_cache", "calibration", "docs", ".vscode"}
 MANIFEST_SUFFIXES = {".py", ".yaml", ".md", ".json", ".toml", ".tex"}
-# 运行时会被 calibrate 改写的配置（与 v4–v6 相同）和常改的状态页 README.md 不进清单。
-MUTABLE = {"configs/train/v4.yaml", "configs/train/v7_calibration.yaml", "README.md"}
+# 运行时会被 calibrate 改写的配置（与 v4–v6 相同）、常改的状态页 README.md 和给机哥的补跑说明.md 不进清单。
+MUTABLE = {"configs/train/v4.yaml", "configs/train/v7_calibration.yaml", "README.md", "补跑说明.md"}
 
 
 def sha(path: Path) -> str:

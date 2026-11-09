@@ -5,11 +5,14 @@ from pathlib import Path
 import subprocess
 import sys
 
+ADDON_ENTRY=('calibrate-addon','check-addon')   # 16 §5：补跑子命令交给 po_jepa.runtime.addon.entry，v7 的 cli.py 不动
+
 
 def main(argv=None):
     """只启动当前解释器的唯一运行实现；help没有缓存、权重或GPU访问。"""
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate','sweep','transfer'))
+    parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate','sweep','transfer',
+                        'calibrate-addon','check-addon'))
     parser.add_argument('--features-root',required=True)
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--output',type=Path,required=True)
@@ -34,6 +37,8 @@ def main(argv=None):
     if args.command=='resume' and args.resume_from is None:parser.error('resume需要--resume-from')
     if args.command!='resume' and args.resume_from is not None:parser.error('--resume-from仅用于resume')
     if args.command in ('calibrate','sweep') and args.seed!=1703:parser.error('calibrate只用种子1703；三个种子共用同一组λ')
+    if args.command in ADDON_ENTRY and (args.seed!=1703 or args.condition or args.training_run or args.test_variant):
+        parser.error(f'{args.command} 只用种子 1703，不带 --condition、--training-run、--test-variant（16 §3.2、§5）')
     if args.command=='transfer' and (args.condition is None or not args.test_variant):parser.error('transfer 需要 --condition 和 --test-variant')
     if args.command=='transfer' and args.condition!='identity' and args.training_run is None:parser.error('transfer 需要 --training-run（基础场景上的任务目录）')
     if args.command in ('run','resume','evaluate') and args.condition is None:parser.error('v7 的 run/resume/evaluate 需要 --condition')
@@ -52,7 +57,7 @@ def main(argv=None):
     env['PO_JEPA_DATASET']=f"{args.system}{'~'+args.variant if args.variant else ''}:{args.trajectories}"
     env['PO_JEPA_UPDATES']=str(args.updates)
     if args.ac_checkpoint:env['PO_JEPA_AC_CHECKPOINT']=str(args.ac_checkpoint.resolve())
-    child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.cli',args.command,
+    child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.addon.entry' if args.command in ADDON_ENTRY else 'po_jepa.runtime.cli',args.command,
         '--features-root',str(Path(args.features_root).resolve()),'--device',args.device,'--output',str(args.output.resolve()/'run')]
     child+=['--seed',str(args.seed)]
     if args.condition:child+=['--condition',args.condition]
