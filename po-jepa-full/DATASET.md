@@ -15,7 +15,7 @@
 
 ## 场景
 
-所有场景都是一阶系统：画面里能看到决定未来的全部状态，因为 v7 的模型只看当前一帧（`occluders` 调节项有意破坏这一点，见下）。需要速度的系统（有惯性的小球、弹簧、波动）要等以后改成两帧输入再加。两帧输入是否可行由 S22 的两帧 tubelet 探针（`tools/tubelet_probe.py`，单摆，不进数据集）验证，定义和判据见 `docs/segments/S22.md`。
+所有场景都是一阶系统：画面里能看到决定未来的全部状态，因为 v7 的模型只看当前一帧（`occluders` 调节项有意破坏这一点，见下）。需要速度的系统（有惯性的小球、弹簧、波动）要等以后改成两帧输入再加。两帧输入是否可行由 S22 的两帧 tubelet 探针（`tools/tubelet_probe.py`，单摆，不进数据集）验证，定义和判据见 `docs/segments/S22.md`。五个二阶场景（pendulum、bouncing_balls、wave、cart_pole、spring_chain）的物理和渲染已在 `src/po_jepa/second_order.py`（S23a，每条轨迹多画 t = −1 一帧，共 34 帧），还没有登记进数据集，公式、参数范围和验收单见 `docs/segments/S23a.md`。
 
 | 场景 | 方程 | 画面 | 隐藏状态维数 |
 |---|---|---|---|
