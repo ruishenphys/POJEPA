@@ -1,0 +1,8 @@
+# 正式运行（docs/design/01-droid-config.md §2）：只覆盖 01 §2 允许的键，其余取同目录的 base.yaml。
+# training.updates、model.spectral_backend 和 resources.*.time_limit_minutes 在 check/env 测速后、看任何评测结果之前定（12 §6），改后配置 SHA 随之变化。
+name: full
+data:
+  train_episodes: 20000
+training:
+  updates: 30000
+  seeds: [1703, 1704, 1705]

@@ -1,0 +1,7 @@
+# 试跑（docs/design/01-droid-config.md §2）：只覆盖 01 §2 允许的键，其余取同目录的 base.yaml。
+name: pilot
+data:
+  train_episodes: 500
+training:
+  updates: 2000
+  seeds: [1703]

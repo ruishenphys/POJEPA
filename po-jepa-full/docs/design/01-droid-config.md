@@ -174,7 +174,7 @@ def poses_to_diffs(poses):            # 逐字取自 vjepa2@204698b app/vjepa_dr
     return np.concatenate([xyz_diff, angle_diff, closedness_delta], axis=1)
 ```
 
-函数体一字不改（含 scipy 的 `Rotation`），S05 用 5 条金标准回合核对逐位相同（14 §3 S05）。
+函数体一字不改（含 scipy 的 `Rotation`），S05 用 5 条金标准回合核对逐位相同（14 §3 S05）。上游是 `DROIDVideoDataset` 的方法（带 `self`），这里写成模块函数，函数体按 AST 相同；上游文件原样放在 `droid-golden/official_droid_204698b.py`。scipy 由 S01 加进 `pyproject.toml`，锁 `scipy==1.16.3`（1.15.3、1.16.3、1.17.1、1.18.1 在 5 条金标准回合上都和参照逐位相同）。
 
 `source: commanded` 时把状态换成 `concat(action/cartesian_position, action/gripper_position[:, None])[idx]`，其余相同。只作开关，主实验不用。
 
@@ -184,7 +184,7 @@ def poses_to_diffs(poses):            # 逐字取自 vjepa2@204698b app/vjepa_dr
 
 ### 5.3 `ControlSpec`
 
-`droid_control_spec(scale: dict) -> ControlSpec`：
+`droid_control_spec(scale: dict, *, source: str, config: DroidConfig) -> ControlSpec`（S01 补：界和周期取自 `config`，所以要传配置）。`scale` 是 `prepared/action_scale.json` 的内容：每个动作源一个键（`realized`、`commanded`），值正好是 `{position, rotation, gripper}` 三个正的有限 float；其余顶层键（uuid 列表、分位数、算法）只作记录。definition_source 里的 SHA 是 `cache._json_bytes(scale)` 的 SHA-256，等于 `_write_json` 写出的文件的 SHA。
 
 | 字段 | 值 |
 |---|---|
@@ -227,7 +227,7 @@ class DroidConfig:            # 字段和 §3 一一对应，嵌套的冻结 dat
 
 def load_config(path: Path) -> DroidConfig: ...
 def poses_to_diffs(poses: np.ndarray) -> np.ndarray: ...       # §5.1，逐字
-def droid_control_spec(scale: dict, *, source: str) -> ControlSpec: ...
+def droid_control_spec(scale: dict, *, source: str, config: DroidConfig) -> ControlSpec: ...
 ```
 
 `loss_config` 返回 v7 的 `LossConfig`（不加字段）：`jepa_exponent`、`layer_norm_epsilon`、`time_epsilon`、`space_epsilon`、`consistency_metric` 取 v7 协议（`checks.load_protocol()` 在 v7 下的值）里的同名项，`grad_clip_norm = 1.0`、`lr_min = 1e-4`、`lr_decay_updates = U`、`lr_warmup_updates`、`consistency_warmup_updates` 取上表，两个权重由调用者给（09 §3）。
