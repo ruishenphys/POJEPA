@@ -9,6 +9,12 @@
   random ：随机动作；
   oracle ：同样的 CEM，但代价用真值仿真器里的状态距离（能做到多好的上界）。
 成功判据（--success 可改）：最终状态误差 ≤ 0.5 × 不动时的误差（对所有场景通用）；小球场景另报受控小球到目标的平均距离（像素）。
+“状态误差”用的状态摘要（报告里的 state_summary）：小球场景是受控小球位置；advection_diffusion 是 16×16 平均浓度场；
+S21b 新场景 gray_scott 是 U、V 的 16×16 池化场（512 维，和 advection_diffusion 同一类），push 是方块位姿
+(b_x, b_y, size/2·θ)，也就是要把方块推到目标，推杆在哪不算。push 的真值规划（oracle）代价用完整状态
+(c_x, c_y, b_x, b_y, size/2·θ) 到目标状态的距离：只看方块时推杆碰到方块之前代价处处相同，CEM 无从下手；模型规划的代价
+本来就是到目标画面（推杆也在画面里）的特征距离。push 的目标动作不是纯随机（随机动作很少碰到方块）：
+每 2 个 tick 一段，方向 = 起点时推杆指向方块中心的方向 ± 30° 内均匀，幅值 ∈ [0.25, 0.5]，同样要求方块位姿和“不动”差 ≥ 0.15。
 
 用法（GPU，需要冻结编码器做目标与重规划编码）：
   python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/po_jepa_full \
@@ -26,6 +32,38 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def summary(system_name, system, v, state):
+    """规划误差用的状态摘要（见文件头）。state 是 variant_trajectory / variant_fields 的一帧。"""
+    import numpy as np
+    if system_name == "advection_diffusion":
+        return state.reshape(16, 16, 16, 16).mean((1, 3)).reshape(-1)
+    if system_name == "gray_scott":
+        return system.hidden(state[None])[0][:512]               # U、V 池化场；注入点不计入
+    if system_name == "push":
+        return np.array([state[2], state[3], .5*v.param("push", "size")*state[4]])   # 方块位姿
+    return state[:2]                                             # 受控小球（多粒子场景是第 0 个）
+
+
+def oracle_target(system_name, system, v, state):
+    """真值规划的代价用的状态：push 是完整状态（见文件头），其他场景就是 summary。"""
+    import numpy as np
+    if system_name == "push":
+        return np.array([state[0], state[1], state[2], state[3], .5*v.param("push", "size")*state[4]])
+    return summary(system_name, system, v, state)
+
+
+def goal_controls(system_name, state, horizon, goal_rng):
+    """目标动作 [H,2]：每 2 个 tick 一段。push 朝方块推（见文件头），其他场景均匀随机（与 S21b 之前逐位相同）。"""
+    import numpy as np
+    n = (horizon+1)//2
+    if system_name == "push":
+        d = state[2:4]-state[:2]
+        angle = math.atan2(d[1], d[0])+goal_rng.uniform(-math.pi/6, math.pi/6, n)
+        size = goal_rng.uniform(.25, .5, n)
+        return np.repeat(np.stack((size*np.cos(angle), size*np.sin(angle)), 1), 2, 0)[:horizon]
+    return np.repeat(goal_rng.uniform(-.5, .5, (n, 2)), 2, 0)[:horizon]
 
 
 def _parse():
@@ -114,29 +152,32 @@ def main():
         return torch.from_numpy(z).float().to(device)            # [1,256,1408]
 
     field_scene = spec.system == "advection_diffusion"
+    new_scene = spec.system in ("gray_scott", "push")             # S21b：没有 v6 原实现，基础场景也走可调实现
+    relative_gap = field_scene or spec.system == "gray_scott"     # 场：目标与“不动”的差按场的范数的 5% 判
 
-    def simulate(tid, state, start, actions):
-        """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。"""
+    def simulate(tid, state, start, actions, render=True):
+        """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。render=False 不画（真值规划的代价只看状态）。"""
         k = actions.shape[0]
         starts = np.arange(32, dtype=np.int64); vals = np.zeros((32, 2))
         vals[start:start+k] = np.clip(actions, -.5, .5)
         c = simulation.TrajectoryControls(tid, starts, starts+1, vals)
         if field_scene:
             f = system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)[-1]
-            return f, picture(f, tid, start+k)
+            return f, picture(f, tid, start+k) if render else None
         q = system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)[-1]
-        return q, picture(q, tid, start+k)
+        return q, picture(q, tid, start+k) if render else None
 
     def picture(state, tid, tick):
-        """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。tick：这一帧的时刻（S21a 会动的干扰光点要用）。"""
+        """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。tick：这一帧的时刻（会动的干扰光点、像素噪声要用）。"""
         if field_scene:
-            return (system.render_fields(state[None]) if v.is_default else system.draw_fields(state[None], tid, v))[0]
-        return (system.render(state[None]) if v.is_default else system.draw(state[None], tid, v, ticks=[tick]))[0]
+            return (system.render_fields(state[None]) if v.is_default else system.draw_fields(state[None], tid, v, ticks=[tick]))[0]
+        if v.is_default and not new_scene:
+            return system.render(state[None])[0]
+        return system.draw(state[None], tid, v, ticks=[tick])[0]
 
-    def summary_state(state):
-        if field_scene:
-            return state.reshape(16, 16, 16, 16).mean((1, 3)).reshape(-1)
-        return state[:2]                                          # 受控小球（多粒子场景是第 0 个）
+    summary_state = lambda state: summary(spec.system, system, v, state)
+    oracle_state = lambda state: oracle_target(spec.system, system, v, state)
+    goal_actions = lambda state: goal_controls(spec.system, state, a.horizon, goal_rng)
 
     spec_c = ControlSpec(2, .25, ("u_x", "u_y"), ("simulation_position_per_second",)*2,
                          (-.5, -.5), (.5, .5), (1., 1.), (0., 0.), "reference/protocol.md")
@@ -164,7 +205,7 @@ def main():
         return torch.cat(out).cpu().numpy()
 
     def oracle_cost(tid, state, start, goal_state, u):
-        return np.array([np.linalg.norm(summary_state(simulate(tid, state, start, ui)[0])-goal_state) for ui in u])
+        return np.array([np.linalg.norm(oracle_state(simulate(tid, state, start, ui, render=False)[0])-goal_state) for ui in u])
 
     def cem(cost, k, rng, samples):
         mu, sd = np.zeros((k, 2)), np.full((k, 2), .3)
@@ -186,20 +227,20 @@ def main():
         states0 = (system.variant_fields(tid, v) if field_scene else system.variant_trajectory(tid, v))
         s0 = states0[start]
         # 目标：同起点按随机下达动作（每 2 个 tick 换一次）走 H 个 tick；与“不动”的结果差得足够远才用（最多重抽 20 次）
-        zero_final = summary_state(simulate(tid, s0, start, np.zeros((a.horizon, 2)))[0])
+        zero_final = summary_state(simulate(tid, s0, start, np.zeros((a.horizon, 2)), render=False)[0])
         for _ in range(20):
-            gu = np.repeat(goal_rng.uniform(-.5, .5, ((a.horizon+1)//2, 2)), 2, 0)[:a.horizon]
+            gu = goal_actions(s0)
             goal_state, goal_frame = simulate(tid, s0, start, gu)
             g = summary_state(goal_state)
             gap = np.linalg.norm(g-zero_final)
-            if gap >= (.05*np.linalg.norm(g) if field_scene else .15):
+            if gap >= (.05*np.linalg.norm(g) if relative_gap else .15):
                 break
-        z_goal = encode(goal_frame, tid)
+        z_goal = encode(goal_frame, tid); g_oracle = oracle_state(goal_state)
         result = {}
         for planner in ("model",) if a.no_baselines else ("model", "oracle", "random"):
             state, t, frame = s0, start, None
             if planner == "random":
-                state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)))[0]
+                state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)), render=False)[0]
             else:
                 left = a.horizon
                 frame_z = encode(picture(s0, tid, start), tid) if planner == "model" else None
@@ -207,7 +248,7 @@ def main():
                     if planner == "model":
                         plan = cem(lambda u: model_cost(frame_z, z_goal, torch.from_numpy(u)), left, rng, a.samples)
                     else:
-                        plan = cem(lambda u: oracle_cost(tid, state, t, g, u), left, rng, a.oracle_samples)
+                        plan = cem(lambda u: oracle_cost(tid, state, t, g_oracle, u), left, rng, a.oracle_samples)
                     step = min(a.replan, left)
                     state, frame = simulate(tid, state, t, plan[:step])
                     t += step; left -= step
@@ -220,14 +261,16 @@ def main():
         shown = "  ".join(f"{k} {val:.3f}" for k, val in result.items())
         print(f"[{condition} {spec.tag}] 回合 {ep+1}/{a.episodes}：{shown}  zero {zero_err:.3f}  {time.perf_counter()-started:.0f}s", flush=True)
 
-    scale = 1. if field_scene else (48. if spec.system in ("double_well", "multi_particle", "landscape") else 27.)
+    scale = 1. if relative_gap else (48. if spec.system in ("double_well", "multi_particle", "landscape", "push") else 27.)
     def stats(name):
         e = np.array([r[name] for r in rows]); z = np.array([r["zero"] for r in rows])
         ok = (e <= a.success*np.maximum(z, 1e-9))
         return dict(success_rate=float(ok.mean()), mean_error=float(e.mean()),
-                    mean_error_px=None if field_scene else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
+                    mean_error_px=None if relative_gap else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
+    summary_name = {"advection_diffusion": "16×16 平均浓度场", "gray_scott": "U、V 的 16×16 池化场（512 维）",
+                    "push": "方块位姿 (b_x, b_y, size/2·θ)"}.get(spec.system, "受控小球位置")
     report = dict(kind="planning", job=str(job_dir), condition=condition, train_dataset=base.tag, dataset=spec.tag,
-                  seed=job["seed"], horizon_ticks=a.horizon, replan_ticks=a.replan,
+                  seed=job["seed"], horizon_ticks=a.horizon, replan_ticks=a.replan, state_summary=summary_name,
                   cem=dict(samples=a.samples, oracle_samples=a.oracle_samples, iterations=a.iterations, elites=a.elites), success_rule=f"误差 ≤ {a.success} × 不动时的误差",
                   model=stats("model"), oracle=None if a.no_baselines else stats("oracle"),
                   random=None if a.no_baselines else stats("random"),

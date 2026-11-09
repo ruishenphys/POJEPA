@@ -17,7 +17,7 @@ import math
 import numpy as np
 
 from . import variants
-from .systems import COLORS, DISTRACTOR_COLOR, SIZE, _texture, blend_spots, frame_ticks, mover_centers, occlude
+from .systems import COLORS, DISTRACTOR_COLOR, SIZE, _texture, blend_spots, frame_ticks, mover_centers, occlude, pixel_noise
 
 TICKS = 32
 PERIOD = .25
@@ -47,11 +47,12 @@ def _check_controls(u):
     return u
 
 
-def _finish(image, trajectory_id, system, v):
+def _finish(image, trajectory_id, system, v, ticks=None):
+    """ticks：每帧的 tick；只画部分帧且有像素噪声时必须给（S21b，见 systems.pixel_noise）。"""
     if v.occluders:          # S21a：遮挡块画在场景之上、像素噪声之前（与 systems.compose 同一顺序、同一随机流）
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if v.pixel_noise:
-        image = image+rng(system, trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
+        image = image+pixel_noise(rng(system, trajectory_id, 4), v.pixel_noise, image.shape, ticks)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -134,22 +135,48 @@ class GrayScott:
 
     def fields(self, trajectory_id, u, params, *, dt=None, burn_in=None):
         """→ (U [33,N,N], V [33,N,N], p [33,2])。u 是执行动作 [32,2]。"""
-        u = _check_controls(u); dt = self.DT if dt is None else dt
+        u = _check_controls(u)
+        U, V, p = self.start_state(trajectory_id, params, dt=dt, burn_in=burn_in)
+        return self.advance(U, V, p, u, params, 0, TICKS, dt=dt)
+
+    def start_state(self, trajectory_id, params, *, dt=None, burn_in=None):
+        """第 0 帧的完整状态 (U, V, p)：初值（流 0）+ 注入点不动烧入 BURN_IN 个时间单位。"""
+        dt = self.DT if dt is None else dt
         F, k, a = (param(self.name, params, n) for n in ("feed", "kill", "inject"))
         U, V, p = self.initial(trajectory_id)
-        U, V, p = self._run(U, V, p, np.zeros(2), self.BURN_IN if burn_in is None else burn_in, dt, F, k, a)
+        return self._run(U, V, p, np.zeros(2), self.BURN_IN if burn_in is None else burn_in, dt, F, k, a)
+
+    def advance(self, U, V, p, u, params, start, ticks, *, dt=None):
+        """S21b：从 tick=start 的完整状态推进 ticks 个 tick（执行动作取 u[start:start+ticks]）→ (U, V, p) 各 [ticks+1,…]。
+        fields() 就是 start_state + advance(0, 32)，所以从整条轨迹的第 start 帧续算与整条轨迹逐位相同（反事实、规划用）。"""
+        u = _check_controls(u); dt = self.DT if dt is None else dt
+        if not 0 <= start <= start+ticks <= TICKS:
+            raise ValueError("续算区间必须满足 0 ≤ start ≤ start+ticks ≤ 32")
+        F, k, a = (param(self.name, params, n) for n in ("feed", "kill", "inject"))
         Us, Vs, ps = [U], [V], [p]
-        for tick in range(TICKS):
+        for tick in range(start, start+ticks):
             velocity = self.SPEED*u[tick]*PERIOD/self.UNITS_PER_TICK    # 域长/时间单位
             U, V, p = self._run(U, V, p, velocity, self.UNITS_PER_TICK, dt, F, k, a)
             Us.append(U); Vs.append(V); ps.append(p)
         return np.stack(Us), np.stack(Vs), np.stack(ps)
 
+    def pack(self, U, V, p):
+        """S21b：完整状态 (U [L,N,N], V [L,N,N], p [L,2]) → [L, 2N²+2]（续算用；隐藏状态 states() 是它的池化）。"""
+        L = U.shape[0]
+        return np.concatenate((U.reshape(L, -1), V.reshape(L, -1), p), axis=1)
+
+    def unpack(self, X):
+        n = self.N*self.N
+        if X.ndim != 2 or X.shape[1] != 2*n+2:
+            raise ValueError(f"gray_scott 完整状态必须是 [L,{2*n+2}]")
+        return X[:, :n].reshape(-1, self.N, self.N), X[:, n:2*n].reshape(-1, self.N, self.N), X[:, 2*n:]
+
     def states(self, U, V, p):
         pool = lambda X: X.reshape(X.shape[0], 16, self.N//16, 16, self.N//16).mean((2, 4)).reshape(X.shape[0], -1)
         return np.concatenate((pool(U), pool(V), p), axis=1)
 
-    def draw(self, U, V, p, trajectory_id, v):
+    def draw(self, U, V, p, trajectory_id, v, ticks=None):
+        """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（S21b）。"""
         rep = SIZE//self.N
         up = lambda X: np.repeat(np.repeat(X, rep, axis=1), rep, axis=2)
         # 线性、不饱和：V 和 1−U 在物理域 [0,1] 内各占一个不平行的颜色方向，叠加后最大约 221 < 255，
@@ -163,7 +190,7 @@ class GrayScott:
         d = np.sqrt(dr[:, :, None]**2+dc[:, None, :]**2)
         wm = np.exp(-(d-5.)**2/2.)[..., None]
         image = image+(self.COLOR_MARK-image)*wm
-        return _finish(image, trajectory_id, self.name, v)
+        return _finish(image, trajectory_id, self.name, v, ticks)
 
     def frames(self, trajectory_id, u, params, v):
         """→ (隐藏状态 [33,514], 画面 [33,256,256,3] uint8)。"""
@@ -246,12 +273,16 @@ class Push:
         s = max(0., 1.-mu*self.W*math.sqrt(1.-slope**2)/norm) if norm > 0 else 0.
         return np.array([dc[0], dc[1], s*F[0]/self.ETA_B, s*F[1]/self.ETA_B, s*tau/(rho**2*self.ETA_B)])
 
-    def trajectory(self, trajectory_id, u, params, *, steps_per_tick=None, state=None):
-        """→ 隐藏状态 [33,5]。"""
+    def trajectory(self, trajectory_id, u, params, *, steps_per_tick=None, state=None, start=0, ticks=None):
+        """→ 隐藏状态 [ticks+1,5]（默认整条 33 帧）。S21b：start、ticks 从 tick=start 的状态 state 续算 ticks 个 tick
+        （执行动作取 u[start:start+ticks]），反事实探针和规划用；默认值时与原来逐位相同。"""
         u = _check_controls(u); n = self.STEPS_PER_TICK if steps_per_tick is None else steps_per_tick
+        stop = TICKS if ticks is None else start+ticks
+        if not 0 <= start <= stop <= TICKS:
+            raise ValueError("续算区间必须满足 0 ≤ start ≤ start+ticks ≤ 32")
         q = (self.initial(trajectory_id, params) if state is None else np.asarray(state, dtype=np.float64)).copy()
         out = [q.copy()]; h = PERIOD/n
-        for tick in range(TICKS):
+        for tick in range(start, stop):
             for _ in range(n):
                 k1 = self.field(q, u[tick], params); k2 = self.field(q+h*k1/2, u[tick], params)
                 k3 = self.field(q+h*k2/2, u[tick], params); k4 = self.field(q+h*k3, u[tick], params)
@@ -290,7 +321,7 @@ class Push:
             wp = np.exp(-((X-cx)**2+(Y-cy)**2)*self.SCALE**2/(2*sigma**2))[..., None]
             image = image+(np.array(COLORS[v.color])-image)*wp
             frames.append(image)
-        return _finish(np.stack(frames), trajectory_id, self.name, v)
+        return _finish(np.stack(frames), trajectory_id, self.name, v, ticks)
 
     def frames(self, trajectory_id, u, params, v):
         states = self.trajectory(trajectory_id, u, params)

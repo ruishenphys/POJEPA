@@ -186,5 +186,5 @@ def test_guards(use):
     use("push")
     with pytest.raises(ValueError):
         systems.get().render(np.zeros((33, 5)))
-    with pytest.raises(NotImplementedError):
-        systems.get().variant_trajectory(0, Variant())
+    with pytest.raises(ValueError):          # S21b 接上了续算接口；调节项与当前数据集不一致时报错
+        systems.get().variant_trajectory(0, Variant(gain=2.))

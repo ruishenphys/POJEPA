@@ -1,4 +1,4 @@
-# PO-JEPA 可调物理基准（v7）
+# PO-JEPA 可调物理基准（v7，v8 扩展中）
 
 一个可生成、可调节的“画面 + 动作 + 真值物理状态”数据集。每条轨迹是 33 帧 256×256 RGB 画面（4 fps，0.25 s 一帧）、32 个 tick 的二维动作，以及生成画面用的隐藏物理状态。仿真数据的价值在于有真值方程和真值状态：可以检验模型学到的是不是正确的物理演化，这一点真实数据做不到。
 
@@ -105,8 +105,55 @@
 | 前向预测 | 给当前帧、动作和时长，预测未来帧的特征。在时长留出（3、12 周期）、网格留出（8×8、12×12）和二者同时留出上评测 | `run.py run` |
 | 自洽性 | 时间组合缺陷 TCD、跨网格缺陷 SCD | `run.py run` |
 | 动作敏感性 | 换成另一条轨迹的动作后，误差应该变大多少（delta_act），并与完美模型的上界比较 | `run.py run`，`tools/probe_actions.py` |
-| 分布外泛化 | 在基础场景上训练，在换了物理参数、控制方式或外观的测试集上评测 | `run.py transfer` |
-| 规划 | 给目标画面，用模型和 CEM 搜动作，把小球推到目标；报成功率，并给不动、随机、真值规划三个参照 | `tools/plan_v7.py` |
+| 分布外泛化 | 在基础场景上训练，在换了物理参数、控制方式或外观的测试集上评测（按下面的评测协议） | `run.py transfer` |
+| 规划 | 给目标画面，用模型和 CEM 搜动作，把受控物体推到目标；报成功率，并给不动、随机、真值规划三个参照 | `tools/plan_v7.py` |
+
+7 个场景都能跑动作探针和规划（S21b 接上了 `gray_scott`、`push`）。规划的“状态误差”按场景取：小球场景是受控小球位置，
+`advection_diffusion` 是 16×16 平均浓度场，`gray_scott` 是 U、V 的 16×16 池化场，`push` 是方块位姿（推杆在哪不算）。
+`push` 的目标由“朝方块推”的动作生成（随机动作很少碰到方块），真值规划的代价用推杆加方块的完整状态。细节见 `tools/plan_v7.py` 文件头。
+
+## 评测协议
+
+训练只在基础场景上（`landscape` 取多势阱地形）。测试按协议换调节项，每个协议在基础场景测试段同一批 200 条轨迹上评
+（变体测试集的编号与基础场景测试段一一对应，初值相同），写法参照 CausalWorld：每个协议只动一类变量，P13 把物理、执行、
+观察三类叠在一起。P0 是分布内（基础场景测试段本身）。强度分轻、标准、重三档：分布外评测
+（`tools/make_v8_jobs.py --stage variants`）只评标准档，强度曲线（`--stage strength`）评轻档和重档。规划只在 P0 上做。
+
+v7 的分布外测试表（`tools/make_v7_jobs.py` 的 `TEST_VARIANTS`，30 个）正好是这里对应协议在 v7 五个场景上的标准档，
+v7 的表本身不改（v7 正式实验和仿真补跑都在用）。协议的唯一来源是 `src/po_jepa/protocols.py`，下表由
+`tools/protocol_table.py --write` 生成。
+
+<!-- protocols:begin（由 tools/protocol_table.py 生成，不要手改）-->
+| 协议 | 类别 | 变什么 | 轻 | 标准 | 重 | 不适用的场景 |
+|---|---|---|---|---|---|---|
+| P1 物理参数 A | 物理 | 每个场景自己的第一个物理参数调大 | 见下表 | 见下表 | 见下表 | — |
+| P2 物理参数 B | 物理 | 第二个物理参数（只有一个参数的场景把它往另一边调） | 见下表 | 见下表 | 见下表 | — |
+| P3 过程噪声 | 物理 | dq = f dt + σ dW（只用于粒子类 ODE 场景） | `process_noise=0.05` | `process_noise=0.1` | `process_noise=0.2` | `advection_diffusion`、`gray_scott`、`push` |
+| P4 执行增益 | 执行 | 执行动作 = 增益 × 下达动作（模型看不到） | `gain=1.5` | `gain=2` | `gain=3` | — |
+| P5 执行延迟 | 执行 | 执行动作晚若干 tick（模型看不到） | — | `delay=1` | `delay=2` | — |
+| P6 执行饱和 | 执行 | 执行动作按分量截断到 [−s, s]（模型看不到） | `saturation=0.4` | `saturation=0.3` | `saturation=0.15` | — |
+| P7 采集策略 | 动作分布 | 测试轨迹的动作换成朝目标（goal）或一半朝目标（mixed） | `policy=mixed` | `policy=goal` | — | `advection_diffusion`、`gray_scott` |
+| P8 外观 | 观察 | 背景和受控物体颜色 | `color=white` | `background=checker,color=white` | `background=noise,color=blue` | — |
+| P9 静止干扰光点 | 观察 | 灰色干扰光点，不受控制 | `distractors=1` | `distractors=2` | `distractors=4` | `advection_diffusion`、`gray_scott` |
+| P10 会动的干扰光点 | 观察 | 绕画面中心匀速转的灰色光点 | `movers=1` | `movers=2` | `movers=4` | `advection_diffusion`、`gray_scott` |
+| P11 像素噪声 | 观察 | 每帧独立的高斯像素噪声（0–255 刻度） | `pixel_noise=5` | `pixel_noise=10` | `pixel_noise=20` | — |
+| P12 遮挡 | 观察 | 48×48 像素的静止遮挡块（部分可观测） | `occluders=1` | `occluders=2` | `occluders=3` | — |
+| P13 组合 | 组合 | P1、P4、P8 的同一档叠加 | 见下表 | 见下表 | 见下表 | — |
+
+P1、P2 各场景的档位（P13 用 P1 的同一档）：
+
+| 场景 | P1 轻 | P1 标准 | P1 重 | P2 轻 | P2 标准 | P2 重 |
+|---|---|---|---|---|---|---|
+| `double_well` | `coupling=0.4` | `coupling=0.5` | `coupling=0.6` | `tilt=0.1` | `tilt=0.2` | `tilt=0.3` |
+| `van_der_pol` | `mu=0.8` | `mu=1` | `mu=1.5` | `mu=0.35` | `mu=0.2` | `mu=0.1` |
+| `multi_particle` | `repulsion=2` | `repulsion=2.5` | `repulsion=3` | `trap=0.65` | `trap=0.8` | `trap=1` |
+| `advection_diffusion` | `diffusion=0.0005` | `diffusion=0.001` | `diffusion=0.002` | `flow=0.6` | `flow=0.8` | `flow=1` |
+| `landscape` | `depth=1.5` | `depth=2` | `depth=3` | `depth=0.75` | `depth=0.5` | `depth=0.25` |
+| `gray_scott` | `feed=0.043` | `feed=0.046` | `feed=0.05` | `kill=0.061` | `kill=0.062` | `kill=0.063` |
+| `push` | `mu_s=0.45` | `mu_s=0.6` | `mu_s=0.9` | `slope=0.1` | `slope=0.2` | `slope=0.25` |
+
+适用的测试格（7 个场景合计）：标准档 82 个，轻档 75 个，重档 77 个。P0 分布内就是基础场景的测试段，不另编码。
+<!-- protocols:end -->
 
 ## 生成与划分
 
@@ -121,7 +168,8 @@
 - 只有一阶系统，模型只看单帧。
 - `process_noise` 只用于粒子类 ODE 场景；`policy` 不用于场方程（`advection_diffusion` 的动作是整场流速，`gray_scott` 是注入点速度，没有要推到目标的受控点）。
 - `policy=goal` 是开环推算，不知道执行时的增益、延迟、噪声、饱和和场景的动力学，所以并不总能到目标；它的作用是让动作更多地作用在受控物体上（`push` 上推动方块的轨迹比例明显高于 random，实测见 `docs/segments/S21a.md` §4）。
-- `gray_scott`、`push` 还没接反事实动作探针（`tools/probe_actions.py`）和规划（`tools/plan_v7.py`），也还不在 `tools/make_v7_jobs.py` 的任务表里。
+- `gray_scott`、`push` 在 v8 的任务表（`tools/make_v8_jobs.py`）里，不在 v7 的任务表里。它们的真值规划参照每个 tick 的仿真比粒子类场景贵 10–20 倍，v8 任务表把它们的 `--oracle-samples` 降到 16（`gray_scott`）和 32（`push`）。
+- 只画部分帧时（动作探针、规划），像素噪声按 tick 取整条轨迹同一份噪声（S21b 起）；以前单帧重画用的是第 0 帧的噪声。
 - `push` 在 v6 的随机动作下，大约三分之一的轨迹真正推动了方块，动作的作用偏弱。
 - 动作统一是二维，范围 [−0.5, 0.5]²。
 - 画面是合成的简单图形，和真实视频有差距。真实数据（DROID）放在下一阶段。

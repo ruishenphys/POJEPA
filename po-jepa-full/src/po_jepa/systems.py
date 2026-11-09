@@ -123,7 +123,7 @@ def frame_ticks(L, ticks):
     """每帧对应的 tick：整条轨迹（33 帧）默认 0…32；单帧或几帧（反事实、规划）必须给出 ticks。"""
     if ticks is None:
         if L != TICKS+1:
-            raise ValueError("会动的干扰光点需要知道每帧的 tick：只画部分帧时要传 ticks")
+            raise ValueError("会动的干扰光点和像素噪声需要知道每帧的 tick：只画部分帧时要传 ticks")
         return np.arange(TICKS+1)
     ticks = np.asarray(ticks)
     if ticks.shape != (L,) or ticks.min() < 0 or ticks.max() > TICKS:
@@ -147,6 +147,15 @@ def blend_spots(image, centers, color, sigma):
         w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
         image = image+(color-image)*w
     return image
+
+
+def pixel_noise(g, sigma, shape, ticks=None):
+    """像素噪声（随机流 4）：整条轨迹一次抽 [33,256,256,3]，第 t 帧用第 t 份。
+    画整条 33 帧且不给 ticks 时就是原来的一次抽取（逐位不变）；只画部分帧（反事实、规划，S21b）时按 ticks 取同一份噪声，
+    所以单帧重画与整条轨迹的那一帧逐位相同。部分帧不给 ticks 报错（不静默地把第 0 帧的噪声用到别的 tick 上）。"""
+    if ticks is None and shape[0] == TICKS+1:
+        return g.normal(0., sigma, shape)
+    return g.normal(0., sigma, (TICKS+1,)+tuple(shape[1:]))[frame_ticks(shape[0], ticks)]
 
 
 def occlude(image, g, count):
@@ -183,7 +192,7 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
     if v.occluders:
         image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
     if v.pixel_noise:
-        image = image+simulation._rng(trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
+        image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -261,6 +270,10 @@ class System:
 
     def backdrop(self, v):
         return None
+
+    def hidden(self, states):
+        """variant_trajectory 的（可续算）状态 → frames() 返回的隐藏状态。粒子类场景两者相同；gray_scott 要池化（S21b）。"""
+        return states
 
     def policy_anchor(self, trajectory_id, v, g):
         """S21a 采集策略的开环推算起点：(受控点初值 p̂0 [2], 目标 [2], 下达动作到受控点速度的倍数 K)。
@@ -496,14 +509,15 @@ class AdvectionDiffusion(System):
             out.append(np.fft.ifft2(spectrum).real)
         return np.stack(out)
 
-    def draw_fields(self, fields, trajectory_id, v):
+    def draw_fields(self, fields, trajectory_id, v, ticks=None):
+        """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（见 pixel_noise）。"""
         w = np.clip(fields, 0., 1.)[..., None]
         bg = _texture(v.background)[None]
         image = bg+(np.array(COLORS[v.color])-bg)*w
         if v.occluders:
             image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
         if v.pixel_noise:
-            image = image+simulation._rng(trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
+            image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks)
         return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -577,14 +591,19 @@ class NewSystem(System):
     new_systems 在方法里才导入：它自己导入本模块，而且 v7 的 5 个场景不需要加载它。
     """
 
-    def _impl(self, trajectory_id):
+    def _impl(self, trajectory_id, v=None, controls=None):
+        """→ (new_systems 里的实现, 执行动作 [32,2], 当前数据集的调节项)。controls：下达动作，None = 这条轨迹自己的
+        （反事实探针、规划换成别的动作）。v：调用方以为的调节项，必须就是当前数据集的（S21b：探针和规划传进来的 v）。"""
         spec = datasets.active()
         if spec.system != self.name:
             # 动作、随机流和调节项都按当前数据集取，系统不一致会静默拿到别的场景的随机流和参数
             raise ValueError(f"{self.name} 需要当前数据集是 {self.name}，现在是 {spec.system}")
+        if v is not None and v != spec.knobs:
+            raise ValueError(f"{self.name}：传入的调节项与当前数据集 {spec.tag} 的不一致")
         from . import new_systems
         v = spec.knobs
-        return new_systems.SYSTEMS[self.name], applied_ticks(trajectory_id, v, commanded_controls(trajectory_id)), v
+        c = commanded_controls(trajectory_id) if controls is None else controls
+        return new_systems.SYSTEMS[self.name], applied_ticks(trajectory_id, v, c), v
 
     def frames(self, trajectory_id):
         impl, u, v = self._impl(trajectory_id)
@@ -593,17 +612,56 @@ class NewSystem(System):
     def render(self, states):
         raise ValueError(f"{self.name} 的画面要用 frames() 生成")
 
-    def variant_trajectory(self, *args, **kwargs):
-        # 反事实探针（tools/probe_actions.py）和规划（tools/plan_v7.py）要从任意 tick 出发，第 2 阶段再接
-        raise NotImplementedError(f"{self.name} 还没接反事实探针和规划")
+    @staticmethod
+    def _window(start, state, ticks):
+        """反事实/规划的续算区间检查：start>0 时必须给出 tick=start 的状态。→ 推进的 tick 数。"""
+        ticks = TICKS-start if ticks is None else ticks
+        if type(start) is not int or type(ticks) is not int or not (0 <= start and 0 <= ticks and start+ticks <= TICKS):
+            raise ValueError("续算区间必须是整数 0 ≤ start ≤ start+ticks ≤ 32")
+        if start > 0 and state is None:
+            raise ValueError("从 tick>0 出发要给出那一刻的状态 state")
+        return ticks
+
+    def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
+        """S21b：反事实探针（tools/probe_actions.py）和规划（tools/plan_v7.py）用的续算接口，参数与 System.variant_trajectory
+        相同：从 tick=start 的（可续算）状态 state 出发，用下达动作 controls（经 applied_ticks）推进 ticks 个 tick，
+        返回 [ticks+1, …]。state=None、start=0 时从这条轨迹的初值出发，整条结果与 frames() 用的仿真逐位相同。"""
+        raise NotImplementedError
+
+    def draw(self, states, trajectory_id, v, ticks=None):
+        raise NotImplementedError
 
 
 class GrayScottSystem(NewSystem):
-    """Gray–Scott 反应扩散，动作移动注入点（new_systems.GrayScott）。隐藏状态 514 维：U、V 各 16×16 池化 + 注入点。"""
+    """Gray–Scott 反应扩散，动作移动注入点（new_systems.GrayScott）。隐藏状态 514 维：U、V 各 16×16 池化 + 注入点。
+
+    S21b：池化后的隐藏状态不能续算，所以 variant_trajectory 返回的是完整状态（GrayScott.pack：U、V 各 128×128 展平，
+    再接注入点 p，共 32770 维）；hidden() 把它池化成 frames() 的 514 维隐藏状态，draw() 从它画画面。"""
 
     def reference_trajectory(self, trajectory_id, *, steps_per_tick=128):
         impl, u, v = self._impl(trajectory_id)
         return impl.states(*impl.fields(trajectory_id, u, dict(v.params)))
+
+    def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
+        impl, u, v = self._impl(trajectory_id, v, controls)
+        ticks = self._window(start, state, ticks); params = dict(v.params)
+        if state is None:
+            U, V, p = impl.start_state(trajectory_id, params)
+        else:
+            (U,), (V,), (p,) = impl.unpack(np.asarray(state, dtype=np.float64)[None])
+        return impl.pack(*impl.advance(U, V, p, u, params, start, ticks))
+
+    def hidden(self, states):
+        from . import new_systems
+        impl = new_systems.SYSTEMS[self.name]
+        return impl.states(*impl.unpack(states))
+
+    def draw(self, states, trajectory_id, v, ticks=None):
+        from . import new_systems
+        impl = new_systems.SYSTEMS[self.name]
+        if v.sigma is not None or v.distractors or v.movers:
+            raise ValueError("gray_scott 没有光点：sigma/distractors/movers 不适用")
+        return impl.draw(*impl.unpack(states), trajectory_id, v, ticks)
 
 
 class PushSystem(NewSystem):
@@ -612,6 +670,15 @@ class PushSystem(NewSystem):
     def reference_trajectory(self, trajectory_id, *, steps_per_tick=256):
         impl, u, v = self._impl(trajectory_id)
         return impl.trajectory(trajectory_id, u, dict(v.params), steps_per_tick=steps_per_tick)
+
+    def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
+        impl, u, v = self._impl(trajectory_id, v, controls)
+        ticks = self._window(start, state, ticks)
+        return impl.trajectory(trajectory_id, u, dict(v.params), state=state, start=start, ticks=ticks)
+
+    def draw(self, states, trajectory_id, v, ticks=None):
+        from . import new_systems
+        return new_systems.SYSTEMS[self.name].draw(states, trajectory_id, dict(v.params), v, ticks)
 
     PUSH_THROUGH = .6       # goal 策略：推杆的目标点在方块中心再往前 0.6（沿推杆→方块方向），让推杆穿过方块中心把它推走
 

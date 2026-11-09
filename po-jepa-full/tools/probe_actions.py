@@ -7,6 +7,8 @@
 - 动作上限 Δ_act* d(Z_cf, Z_{t+τ})                     ：一个完美模型的 delta_act（换动作后误差应该涨多少）
 - 像素位移        |q_cf − q_true|、|q_{t+τ} − q_t|        ：同一件事在画面里有多大
 d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
+*_px 列：粒子类场景是状态的 L2 × 每单位像素数；advection_diffusion 是 16×16 平均浓度场的 L2；S21b 新场景 push 是推杆和
+方块中心 4 个位置坐标的 L2 × 48（不含朝向角），gray_scott 是 U、V 池化场（512 维）的 L2（不是像素，注入点不计入）。
 若 Δ_act* 和 identity 误差同量级，而训练好的模型 delta_act≈1e-6，说明是模型/训练没学会用动作，不是数据里没有动作信号。
 
 用法（GPU 上几分钟；和 encode_v7.py 用同一个编码器与权重）：
@@ -24,6 +26,18 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DURATIONS = (1, 2, 4, 8)
+NEW_SYSTEMS = ("gray_scott", "push")      # S21b：走 System.variant_trajectory 的续算接口（基础场景也走，没有 v6 原实现）
+_FULL = {}                                # S21b：新场景每条轨迹的整条仿真只算一次（gray_scott 约 5 秒/条）
+
+
+def motion(system_name, a, b, scale):
+    """*_px 列的距离（见文件头）。"""
+    import numpy as np
+    if system_name == "push":
+        return float(np.linalg.norm(a[:4]-b[:4])*48.)
+    if system_name == "gray_scott":
+        return float(np.linalg.norm(a[:512]-b[:512]))
+    return float(np.linalg.norm(a-b)*scale)
 
 
 def _parse():
@@ -46,13 +60,21 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
     import numpy as np
     from po_jepa import datasets, systems
     v = datasets.active().knobs
+    if system.name in NEW_SYSTEMS:       # S21b：从第 start 帧的完整状态续算；隐藏状态用 hidden() 换成 frames() 的那种
+        if (tid, datasets.active().tag) not in _FULL:
+            _FULL.clear(); _FULL[tid, datasets.active().tag] = system.variant_trajectory(tid, v)
+        full = _FULL[tid, datasets.active().tag]
+        q = system.variant_trajectory(tid, v, controls=systems.commanded_controls(donor), start=start,
+                                      state=full[start], ticks=duration)[-1]
+        return (system.hidden(full[start+duration][None])[0], system.hidden(q[None])[0],
+                system.draw(q[None], tid, v, ticks=[start+duration])[0])
     if not v.is_default:      # v7 可调数据集：同一套可调仿真与渲染
         controls = systems.commanded_controls(donor)
         if system.name == "advection_diffusion":
             fields = system.variant_fields(tid, v)
             field = system.variant_fields(tid, v, controls=controls, start=start, field=fields[start], ticks=duration)[-1]
             pool = lambda f: f.reshape(16, 16, 16, 16).mean((1, 3)).reshape(-1)
-            return pool(fields[start+duration]), pool(field), system.draw_fields(field[None], tid, v)[0]
+            return pool(fields[start+duration]), pool(field), system.draw_fields(field[None], tid, v, ticks=[start+duration])[0]
         states = system.variant_trajectory(tid, v)
         q = system.variant_trajectory(tid, v, controls=controls, start=start, state=states[start], ticks=duration)[-1]
         return states[start+duration], q, system.draw(q[None], tid, v, ticks=[start+duration])[0]   # S21a：movers 要知道 tick
@@ -137,8 +159,8 @@ def main():
                 z_cf = encode(cf_frame[None], tid)[0]
                 rows.append(dict(trajectory_id=tid, donor_id=donor, start_tick=start, duration_cycles=tau,
                                  identity=d(z[start], z[start+tau]), oracle_delta_act=d(z_cf, z[start+tau]),
-                                 motion_px=float(np.linalg.norm(states[start+tau]-states[start])*scale),
-                                 action_swap_px=float(np.linalg.norm(cf_state-true_end)*scale)))
+                                 motion_px=motion(system.name, states[start+tau], states[start], scale),
+                                 action_swap_px=motion(system.name, cf_state, true_end, scale)))
         print(f"[{spec.tag}] {i+1}/{len(test)} 条，{time.perf_counter()-started:.0f} s", flush=True)
 
     def summary(sel):
