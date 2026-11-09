@@ -6,7 +6,7 @@
 
 ## 1. 训练集
 
-`train_episodes(splits, prepared, config) -> list[str]`：取 `splits.train_order(splits, config.data)`（完整训练顺序；`use_failures: false` 时去掉失败回合，02 §5）的前 `train_episodes` 条，再去掉 `passed_<source>` 为假的回合，保持原顺序。结果的条数、uuid 列表的 SHA 写进训练登记。正式运行的条数会略少于 20,000（去掉的条数在 `prepared/STATS.json` 里）。
+`train_episodes(splits, prepared, config) -> list[str]`：取 `splits.train_order(splits, config.data)`（完整训练顺序；`use_failures: false` 时去掉失败回合，02 §5）的前 `train_episodes` 条，再去掉 `passed_<source>` 为假的回合，保持原顺序。结果的条数、uuid 列表的 SHA 写进训练登记。正式运行的条数会略少于 20,000（去掉的条数在 `prepared/stats/<配置名>.json` 的 `train_excluded` 里，S05）。
 
 每条回合的可用行数 F 取自准备文件 JSON 的 `rows`。
 
@@ -69,7 +69,7 @@ def step_rng(seed: int, step: int, stream: int) -> np.random.Generator:
 }
 ```
 
-窗口按（回合在划分列表里的顺序，时长，哈希顺序）排列。`val.json` 只有 `windows` 和 `counts`。
+窗口按（回合在划分列表里的顺序，时长，哈希顺序）排列。`val.json` 除了文件头（`schema`、`split`、`salt`、`splits_sha256`、`prepared_sha256`）只有 `windows` 和 `counts`。`prepared_sha256` 含划分列表里没通过检查的回合（便于追溯为什么少了窗口），写盘时键按字母排序。哈希相同时按起点或窗口编号再排（S05，`src/po_jepa/droid/windows.py`）。
 
 ## 4. 组装 `TrainingBatch`
 
