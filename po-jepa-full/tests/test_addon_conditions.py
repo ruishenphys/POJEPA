@@ -875,8 +875,9 @@ def test_transformer_consistency_registration_uses_transformer_count():
 
 def test_consumer_sources_register_new_files(v7, monkeypatch):
     sources = comparison.consumer_sources()
-    added = ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py",
-             "src/po_jepa/runtime/addon/__init__.py", "src/po_jepa/runtime/addon/calibration.py", "src/po_jepa/runtime/addon/conditions.py"]
+    addon = sorted(p.relative_to(comparison.ROOT).as_posix() for p in (comparison.ROOT/"src/po_jepa/runtime/addon").glob("*.py"))
+    assert {"__init__.py", "calibration.py", "conditions.py"} <= {name.rsplit("/", 1)[1] for name in addon}   # S17、S18 加的文件也在这里
+    added = ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py", *addon]
     assert checks.is_v7()
     assert list(sources)[-len(added):] == added
     for name in added:

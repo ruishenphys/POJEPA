@@ -1,14 +1,14 @@
-"""在一台多卡机器上自动跑完 make_v7_jobs.py 生成的任务列表（没有排队系统时用）。
+"""在一台多卡机器上自动跑完 make_addon_jobs.py 生成的任务列表（仿真补跑，在 full-model/po-jepa-full 里运行）。
 
-  python tools/run_jobs.py jobs-pilot.txt --gpus 0,1
-  python tools/run_jobs.py jobs-full.txt  --gpus 0,1
-  python tools/run_jobs.py jobs-variants.txt --gpus 0,1
+  python tools/run_jobs.py jobs-addon-pilot.txt --gpus 0,1
+  python tools/run_jobs.py jobs-addon-full.txt  --gpus 0,1
+  python tools/run_jobs.py jobs-addon-variants.txt --gpus 0,1
 
 - 按 “# =====” 分段：一段里的命令分给各张卡同时跑（每张卡同一时间只跑一条），整段完成后才开始下一段。
-- 每条命令的输出存到 --logs 下（默认 ../logs-v7/<任务文件名>/），完成的命令留一个 .done 标记。
+- 每条命令的输出存到 --logs 下（默认 ../../logs-addon/<任务文件名>/），完成的命令留一个 .done 标记。
 - **断了（关机、断电、Ctrl-C、某条报错）直接重新运行同一条命令即可**：
   已完成的跳过；编码会跳过已完成的轨迹；训练任务（run.py run）自动改成从原目录续训（resume，输出到 原目录-resumeN）；
-  其他 GPU 任务（calibrate / check / transfer）把半截的输出目录改名为 原目录.brokenN 后重跑。
+  其他 run.py 任务（calibrate-addon / check-addon / transfer / d4 / spectral-gap 等）把半截的输出目录改名为 原目录.brokenN 后重跑。
   后面段里用 --training-run / --job 指向的训练目录，如果是靠续训完成的，会自动换成续训的新目录。
 - 某段有命令失败：同段其他命令照常跑完，然后停下，不进入下一段，并列出失败命令的日志。重新运行会再试失败的那几条。
 """
@@ -56,7 +56,7 @@ def set_option(argv, name, value):
 
 def complete(path):
     path = Path(path)
-    return any((path/sub/"COMPLETE.json").exists() for sub in ("", "run/job", "job"))
+    return any((path/sub/"COMPLETE.json").exists() for sub in ("", "run/job", "job", "run"))
 
 
 def has_job(path):
@@ -119,7 +119,7 @@ def prepare(cmd, workdir):
                 notes.append(f"上次中断，从 {os.path.relpath(source, workdir)} 续训，输出到 {out}-resume{k}")
             else:
                 notes.append(f"上次中断在开始训练之前，旧目录改名为 {os.path.relpath(aside(out_path), workdir)}")
-        elif sub in ("calibrate", "check", "transfer", "evaluate"):
+        elif sub in ("calibrate", "calibrate-addon", "check", "check-addon", "transfer", "evaluate", "d4", "spectral-gap"):
             if complete(out_path):
                 return None, "已完成"
             notes.append(f"上次没跑完，旧目录改名为 {os.path.relpath(aside(out_path), workdir)}")
@@ -132,22 +132,24 @@ def priority(cmd):
         return 0
     if "--condition po_jepa" in cmd or "--condition matched_transformer" in cmd or "--condition vjepa2_ac_small" in cmd:
         return 1
+    if "--condition transformer_consistency" in cmd or "--condition fixed_fourier" in cmd:   # 07 §2.8；两个单项消融已含在 po_jepa 里
+        return 1
     return 2
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("jobs", type=Path, help="make_v7_jobs.py 生成的任务文件")
+    p.add_argument("jobs", type=Path, help="make_addon_jobs.py 生成的任务文件")
     p.add_argument("--gpus", default="0,1", help="用哪几张卡，逗号分隔（默认 0,1）")
-    p.add_argument("--logs", type=Path, help="日志目录（默认 ../logs-v7/<任务文件名>）")
+    p.add_argument("--logs", type=Path, help="日志目录（默认 ../../logs-addon/<任务文件名>）")
     p.add_argument("--only", help="只跑这些段，逗号分隔（例如 A,B）")
     p.add_argument("--dry-run", action="store_true", help="只列出将要执行的命令")
     a = p.parse_args()
     workdir = Path.cwd()
     if not (workdir/"run.py").exists():
-        raise SystemExit("请在 code-v7/po-jepa 目录里运行")
+        raise SystemExit("请在 full-model/po-jepa-full 目录里运行")
     gpus = [g.strip() for g in a.gpus.split(",") if g.strip()]
-    logs = a.logs or workdir.parent/"logs-v7"/a.jobs.stem
+    logs = a.logs or workdir.parent.parent/"logs-addon"/a.jobs.stem
     logs.mkdir(parents=True, exist_ok=True)
     lock = logs/"RUNNING.pid"
     if lock.exists() and not a.dry_run:
