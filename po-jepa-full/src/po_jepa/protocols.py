@@ -24,6 +24,8 @@ SCENES = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion",
 # S25a：二阶场景（S23b 登记，序号 7–11）。make_v8_jobs 要显式 --scenes 才排它们（见文件头）
 SECOND_ORDER_SCENES = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
 ALL_SCENES = SCENES+SECOND_ORDER_SCENES
+# S25d：时间采样测试集（S24b 的四个调节项；不进 P1–P13 的协议表，按帧评测走 runtime/timing_eval.py、tools/timing_eval.py）
+TIMING_TESTS = ("fps=2", "fps=8", "fps=16", "jitter=0.4", "exposure=1", "switch_offset=0.5")
 
 
 @dataclass(frozen=True)

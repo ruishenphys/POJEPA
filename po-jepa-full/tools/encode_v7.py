@@ -14,6 +14,10 @@
 S25c 长时程测试集（--variant 带 horizon=64/128）：只能 --splits test（只用来评测，tools/long_rollout.py），整条 65/129 帧都存
 （float16 每条约 47/93 MB，每类 200 条约 9/19 GB）；按 --batch 33 分批，所以前 33 帧和主实验缓存同一批送进编码器。
 
+S25d 时间采样测试集（--variant 带 fps/jitter/exposure/switch_offset）：也只能 --splits test（只用来评测，tools/timing_eval.py），
+不能和 horizon≠32 一起用；帧数 = 32·fps/4 + 1（17/33/65/129），manifest 的 frames 记每帧的实际时刻 time_ticks（timing.frame_times），
+编码器的时刻参数取实际时刻；switch_offset > 0 时下达动作是 SubtickControls，controls 记 starts_subticks/ends_subticks。
+
 中途断了直接重跑同一条命令：已完成（有 COMPLETE.json）的轨迹会跳过，未完成的残留会被清掉重做。
 """
 import argparse
@@ -55,17 +59,20 @@ def main():
     sys.path.insert(0, str(ROOT/"src"))
     import numpy as np
     import torch
-    from po_jepa import datasets, simulation, systems, vjepa
+    from po_jepa import datasets, simulation, systems, timing, vjepa
     from po_jepa.runtime import cache
 
     spec = datasets.active()
-    frames_per_trajectory = spec.knobs.horizon+1     # S25c：33 帧；长时程 65、129 帧（整条都存）
+    timed = spec.knobs.changes_timing()              # S25d：时间采样测试集
+    frames_per_trajectory = spec.knobs.horizon*spec.knobs.fps//4+1   # S25c：33 帧；长时程 65、129 帧（整条都存）；S25d：17/33/65/129
     if spec.knobs.horizon != systems.TICKS and _splits(args.splits) != ("test",):
         # S25c：长时程测试集只用来评测（tools/long_rollout.py），只编码测试段；训练和验证仍用 33 帧的主实验缓存
         raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程测试集：只能 --splits test（只用来评测，见 tools/long_rollout.py）")
-    if spec.knobs.changes_timing():
-        # S24b：帧数、帧时刻、tick 内部切换的动作都不是缓存格式（33 帧、每 tick 一帧、TrajectoryControls）能表示的
-        raise SystemExit(f"{spec.scene} 带时间采样调节项（fps/jitter/exposure/switch_offset）：编码和缓存还没接（S24b 只做数据生成，第 6 阶段接入）")
+    if timed and spec.knobs.horizon != systems.TICKS:
+        raise SystemExit(f"{spec.scene}：时间采样调节项（fps/jitter/exposure/switch_offset）只接 horizon=32（长时程加时间采样没接）")
+    if timed and _splits(args.splits) != ("test",):
+        # S25d：时间采样测试集只用来评测（tools/timing_eval.py），只编码测试段；模型在 4 fps 的基础场景上训练
+        raise SystemExit(f"{spec.scene} 带时间采样调节项：只能 --splits test（只用来评测，见 tools/timing_eval.py）")
     if spec.knobs.changes_space():
         # S24c：分辨率不是 256、画布外有 SURROUND，缓存格式（[33,256,256,3] 画面、16×16 特征）和 V-JEPA 2 的输入尺寸都要在第 6 阶段定
         raise SystemExit(f"{spec.scene} 带空间采样调节项（resolution/zoom/pan/drift）：编码和缓存还没接（S24c 只做数据生成，第 6 阶段接入）")
@@ -106,7 +113,7 @@ def main():
 
     generator_sources = {name: cache.file_sha(ROOT/name) for name in
                          ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/new_systems.py", "src/po_jepa/second_order.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
-                          "src/po_jepa/datasets.py", "tools/encode_v7.py")}
+                          "src/po_jepa/datasets.py", "tools/encode_v7.py")+(("src/po_jepa/timing.py",) if timed else ())}
     environment = dict(python=sys.version.split()[0], torch=torch.__version__, cuda_runtime=torch.version.cuda,
                        numpy=np.__version__, platform=platform.platform(), encoder_device=str(device),
                        device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
@@ -123,7 +130,9 @@ def main():
         states, frames = system.frames(tid)
         if frames.shape[0] != frames_per_trajectory:
             raise ValueError(f"trajectory {tid}: {frames.shape[0]} frames, expected {frames_per_trajectory}")
-        raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder)
+        # S25d：每帧的实际时刻（tick）；不带时间采样时就是 0…H
+        ticks = timing.frame_times(tid) if timed else np.arange(frames_per_trajectory, dtype=np.float64)
+        raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None)
         stored = raw.astype(dtype)
         if not np.isfinite(stored).all():
             raise ValueError(f"trajectory {tid}: features overflow {args.dtype}")
@@ -139,10 +148,14 @@ def main():
             states_file="states.npy", states_sha256=cache.file_sha(folder/"states.npy"),
             grid=[16, 16], token_order="row_major", observation_variant="canonical",
             preprocess_sha256=cache.v7_preprocess_sha256(),
-            controls=dict(starts_ticks=controls.starts_ticks.tolist(), ends_ticks=controls.ends_ticks.tolist(),
-                          values=controls.values.tolist(), units="simulation_position_per_second"),
-            frames=[dict(tick=t, time_seconds=t*.25, image_sha256=hashlib.sha256(frames[t].tobytes()).hexdigest())
-                    for t in range(frames_per_trajectory)],
+            controls=_controls_record(controls, systems),
+            frames=([dict(frame=k, time_ticks=float(ticks[k]), time_seconds=float(ticks[k])*.25,
+                          image_sha256=hashlib.sha256(frames[k].tobytes()).hexdigest()) for k in range(frames_per_trajectory)]
+                    if timed else
+                    [dict(tick=t, time_seconds=t*.25, image_sha256=hashlib.sha256(frames[t].tobytes()).hexdigest())
+                     for t in range(frames_per_trajectory)]),
+            **({"timing": dict(fps=spec.knobs.fps, jitter=spec.knobs.jitter, exposure=spec.knobs.exposure,
+                               switch_offset=spec.knobs.switch_offset)} if timed else {}),
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,
@@ -160,8 +173,19 @@ def main():
     print(f"[{spec.tag} shard {index}/{total}] 完成", flush=True)
 
 
-def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake):
-    """按 v3 规则：每帧前把同一条轨迹的预处理 generator 重置到同一初始状态，再单帧预处理并编码。"""
+def _controls_record(controls, systems):
+    """manifest 的 controls：按 tick 的段（TrajectoryControls、LongControls）记 starts_ticks/ends_ticks；
+    S25d switch_offset > 0 的 SubtickControls 记 starts_subticks/ends_subticks（1/4 tick 为单位，不当成 tick）。"""
+    if isinstance(controls, systems.SubtickControls):
+        return dict(starts_subticks=controls.starts_subticks.tolist(), ends_subticks=controls.ends_subticks.tolist(),
+                    values=controls.values.tolist(), units="simulation_position_per_second")
+    return dict(starts_ticks=controls.starts_ticks.tolist(), ends_ticks=controls.ends_ticks.tolist(),
+                values=controls.values.tolist(), units="simulation_position_per_second")
+
+
+def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None):
+    """按 v3 规则：每帧前把同一条轨迹的预处理 generator 重置到同一初始状态，再单帧预处理并编码。
+    ticks：每帧的时刻（tick，S25d 时间采样时不是 0…L−1）；编码器只把它当元数据（vjepa._encode 不用它算特征）。"""
     rgb = torch.from_numpy(frames)
     if fake:
         x = rgb.permute(0, 3, 1, 2).float()/255.
@@ -176,7 +200,8 @@ def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch
     out = []
     for s in range(0, pre.shape[0], batch):
         chunk = pre[s:s+batch]
-        times = torch.arange(s, s+chunk.shape[0], dtype=torch.float64)*.25
+        times = (torch.arange(s, s+chunk.shape[0], dtype=torch.float64) if ticks is None
+                 else torch.tensor(ticks[s:s+chunk.shape[0]], dtype=torch.float64))*.25
         out.append(encoder.encode_target(chunk, target_time_seconds=times).raw_z.cpu().double())
     return torch.cat(out).numpy()
 

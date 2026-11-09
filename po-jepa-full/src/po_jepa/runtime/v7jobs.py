@@ -177,6 +177,9 @@ def transfer_job(features, output, device, condition, *, training_run, test_vari
     if test_spec.knobs.horizon != base.knobs.horizon:
         # S25c：transfer 只评起点 ≤ 20、时长 ≤ 12 的窗口，长时程缓存的前 33 帧和基础测试集相同，评出来一样；长时程用 tools/long_rollout.py
         raise ValueError("--test-variant 不能改 horizon：长时程测试集用 tools/long_rollout.py 评测")
+    if test_spec.knobs.changes_timing():
+        # S25d：时间采样测试集的帧数、帧时刻、动作边界不是 33 帧缓存（cache.read_window）的格式；按帧评测用 tools/timing_eval.py
+        raise ValueError("--test-variant 不能带时间采样调节项（fps/jitter/exposure/switch_offset）：时间采样测试集用 tools/timing_eval.py 评测")
     features, output = Path(features), Path(output)
     output.mkdir(parents=True, exist_ok=False)
     model, loss, selected, registration = load_for_evaluation(condition, training_run, device)

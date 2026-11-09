@@ -6,6 +6,7 @@
   python tools/make_v8_jobs.py --stage variants > jobs-v8-variants.txt   # 分布外评测（评测协议的标准档）+ 规划（full 之后）
   python tools/make_v8_jobs.py --stage strength > jobs-v8-strength.txt   # 强度曲线（轻档、重档；variants 之后）
   python tools/make_v8_jobs.py --stage long     > jobs-v8-long.txt       # 长时程滚动（16–64 步；full 之后，S25c）
+  python tools/make_v8_jobs.py --stage timing   > jobs-v8-timing.txt     # 时间采样按帧评测（帧率、抖动、曝光、切换；full 之后，S25d）
 
 和 v7 的区别（S21b）：
 - 场景是 po_jepa.protocols.SCENES：v7 的 5 个加 gray_scott、push。
@@ -21,6 +22,9 @@ S25a：五个二阶场景（protocols.SECOND_ORDER_SCENES）能排了，但要�
 
 S25c：--stage long 排长时程测试集（<场景>~horizon=128 的测试段，每类 200 条 × 129 帧，只编码测试段）的编码、汇总和
 tools/long_rollout.py 滚动评测（3 个种子 × 各条件；模型是 full 阶段在基础场景上训练好的，不再训练）。
+
+S25d：--stage timing 排时间采样测试集（<场景>~<po_jepa.protocols.TIMING_TESTS 之一> 的测试段，每类 200 条，只编码测试段）的
+编码、汇总和 tools/timing_eval.py 按帧评测（3 个种子 × 各条件；同样只评测）。
 """
 import argparse
 from pathlib import Path
@@ -46,7 +50,7 @@ def split_scene(scene):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long"), required=True)
+    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=",".join(CONDITIONS), help="分布外评测和规划评哪些条件")
@@ -109,6 +113,31 @@ def main():
                     print(f"python tools/long_rollout.py --job {root}/{name(s)}/seed{seed}/{c} --features {feats(s, long)} "
                           f"--horizon {LONG_HORIZON} --output {root}/long/{name(s)}/seed{seed}/{c}.json --device cuda:0{extra}")
         print("# ===== L4 汇总（CPU）=====")
+        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        return
+
+    if a.stage == "timing":
+        tests = [(s, t) for s in scenes for t in protocols.TIMING_TESTS]
+        print("# 前提：--stage full 的 A–D 段已完成（模型在 4 fps 的基础场景上训练好），本文件只做评测，不再训练。")
+        print(f"# 时间采样测试集：{', '.join(protocols.TIMING_TESTS)}；每条帧数 = 32·fps/4 + 1（fps=16 时 129 帧，float16 每条约 93 MB），"
+              "整 tick 的帧和主实验测试段逐位相同；指标见 src/po_jepa/runtime/timing_eval.py。")
+        print(f"# ===== T1 编码时间采样测试集（GPU，{len(tests)*a.shards} 条；只编码测试段）=====")
+        for s, t in tests:
+            for i in range(a.shards):
+                print(f"python tools/encode_v7.py encode --system {split_scene(s)[0]} --variant {protocols.merged(s, t)} "
+                      f"--trajectories {n} --splits test {enc} --output {feats(s, t)} --device cuda:0 --shard {i}/{a.shards}")
+        print("# ===== T2 汇总编码（CPU）=====")
+        for s, t in tests:
+            print(f"python tools/encode_v7.py finalize --system {split_scene(s)[0]} --variant {protocols.merged(s, t)} "
+                  f"--trajectories {n} --splits test --output {feats(s, t)}")
+        print(f"# ===== T3 按帧评测（GPU，{len(tests)*len(seeds)*len(conditions)} 条，互不依赖）=====")
+        for s, t in tests:
+            for seed in seeds:
+                for c in conditions:
+                    extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
+                    print(f"python tools/timing_eval.py --job {root}/{name(s)}/seed{seed}/{c} --test-variant {t} --features {feats(s, t)} "
+                          f"--output {root}/timing/{name(s, t)}/seed{seed}/{c}.json --device cuda:0{extra}")
+        print("# ===== T4 汇总（CPU）=====")
         print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
         return
 

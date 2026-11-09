@@ -175,6 +175,7 @@ def main():
 
     summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across,
                    transfer=transfer_drops(groups), planning=planning_reports(a.results), long=long_reports(a.results),
+                   timing=timing_reports(a.results),
                    problems=problems, missing=missing, duplicates=duplicates, scientific_conclusions_verified=False)
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
@@ -269,6 +270,60 @@ def long_reports(root):
     return dict(rows=rows, comparisons=comparisons, duplicates=duplicates)
 
 
+def timing_reports(root):
+    """S25d tools/timing_eval.py 的结果（kind = timing_eval）：每个 (时间采样测试集, 条件) 跨种子平均（按帧数 n）；
+    full − 对照按同一窗口（轨迹、起点帧、帧数）配对，比直接预测（先每个种子内逐窗口相减取平均，再跨种子平均）。"""
+    reports = []
+    for path in sorted(Path(root).rglob("*.json")):
+        if path.stat().st_size > 50_000_000:
+            continue
+        try:
+            r = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(r, dict) and r.get("kind") == "timing_eval":
+            reports.append(dict(r, file=str(path)))
+    by = defaultdict(dict)                     # (测试集, 步数) -> (条件, 种子) -> 报告
+    duplicates = []
+    for r in reports:
+        key, sub = (r["dataset"], r["updates"]), (r["condition"], r["seed"])
+        if sub in by[key]:
+            duplicates.append(r["file"]); continue
+        by[key][sub] = r
+    rows, comparisons = [], []
+
+    def mean_of(seeds, key):
+        xs = [r["means"][key] for r in seeds if key in r["means"]]
+        return _mean(xs) if len(xs) == len(seeds) else None
+
+    for (dataset, updates), group in sorted(by.items()):
+        steps = group[next(iter(group))]["definitions"]["frame_steps"]
+        for c in CONDITIONS:
+            seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
+            if seeds:
+                rows.append(dict(dataset=dataset, updates=updates, condition=c, seeds=len(seeds), frames=steps,
+                                 duration=[mean_of(seeds, f"duration_ticks:n={n}") for n in steps],
+                                 **{k: [mean_of(seeds, f"{k}:n={n}") for n in steps] for k in ("direct", "composed", "pd_ln", "frame_step")}))
+        for ref in REFERENCES:
+            for n in steps:
+                diffs = []
+                for (cc, seed), r in sorted(group.items()):
+                    other = group.get((ref, seed))
+                    if cc != "po_jepa_full" or other is None:
+                        continue
+                    theirs = {(w["trajectory_id"], w["start_frame"], w["frames"]): w["values"] for w in other["rows"]}
+                    d = [w["values"][f"direct:n={n}"]-theirs[k][f"direct:n={n}"] for w in r["rows"]
+                         for k in [(w["trajectory_id"], w["start_frame"], w["frames"])] if w["frames"] == n and k in theirs]
+                    if d:
+                        diffs.append(dict(seed=seed, mean=sum(d)/len(d), windows=len(d), full_better=sum(x < 0 for x in d)))
+                if diffs:
+                    ms = [x["mean"] for x in diffs]
+                    comparisons.append(dict(dataset=dataset, updates=updates, comparison=f"po_jepa_full − {ref}", frames=n,
+                                            seeds=len(diffs), mean=_mean(ms), seed_std=statistics.stdev(ms) if len(ms) > 1 else None,
+                                            per_seed=diffs))
+    return dict(rows=rows, comparisons=comparisons, duplicates=duplicates)
+
+
 def _f(x, digits=5):
     return "—" if x is None else f"{x:.{digits}f}" if abs(x) >= 1e-3 or x == 0 else f"{x:.2e}"
 
@@ -312,6 +367,26 @@ def _markdown(s):
                       "|---|---|---|---|---|---|---|---|"]
             lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['T']:g} | {c['seeds']} | {_f(c['mean'])} | {_f(c['seed_std'])} | "
                       + ", ".join(f"{x['full_better']}/{x['trajectories']}" for x in c["per_seed"]) + " |" for c in s["long"]["comparisons"]]
+    timing = s.get("timing") or dict(rows=[], comparisons=[])
+    if timing["rows"]:
+        lines += ["", "## 时间采样（按帧评测，跨种子平均；n = 往后预测的帧数，T = 平均时长（tick）；直接 / 逐帧组合 / AC 一帧一步）", ""]
+        frames = timing["rows"][0]["frames"]
+        lines += ["| 测试集 | 步数 | 条件 | 种子 | " + " | ".join(f"n={n}" for n in frames) + " |", "|---|---|---|---|" + "---|"*len(frames)]
+        for r in (r for r in timing["rows"] if r["frames"] == frames):
+            cells = []
+            for i in range(len(frames)):
+                if r["direct"][i] is None:
+                    cells.append("—"); continue
+                text = f"T={r['duration'][i]:.3g}: {_f(r['direct'][i])} / {_f(r['composed'][i])}"
+                if r["frame_step"][i] is not None:
+                    text += f" / {_f(r['frame_step'][i])}"
+                cells.append(text)
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {r['seeds']} | " + " | ".join(cells) + " |")
+        if timing["comparisons"]:
+            lines += ["", "| 测试集 | 步数 | 比较（直接预测） | 帧数 n | 种子 | 平均差 | 种子间 SD | 每个种子里 full 更好的窗口 |",
+                      "|---|---|---|---|---|---|---|---|"]
+            lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['frames']} | {c['seeds']} | {_f(c['mean'])} | {_f(c['seed_std'])} | "
+                      + ", ".join(f"{x['full_better']}/{x['windows']}" for x in c["per_seed"]) + " |" for c in timing["comparisons"]]
     if s["missing"]:
         lines += ["", "## 缺失任务", ""] + [f"- {m['dataset']} {m['updates']} 步 种子 {m['seed']}：{m['condition']}" for m in s["missing"]]
     if s["duplicates"]:
