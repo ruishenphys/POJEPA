@@ -482,3 +482,79 @@ def test_long_horizon_manifest_is_checked(tree):
     scene = f"{SCENE}-u{UPDATES}"
     assert s["scenes"][scene]["failed"] == ["features"]
     assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "features") == [f"d4 long po_jepa_full seed 1703 trajectory {TIDS[1]}"]
+
+
+# ---------- Codex 复审（2026-11-09，S18b-fix1）后补的核对 ----------
+
+def test_extra_failed_row_next_to_complete_ok_rows_blocks_the_scene(tree):
+    """ok 行一条不少，再追加一条同查询的失败行：evaluation_queries 也不通过（失败行计数进门禁）。"""
+    v7, addon, cal, tmp = tree
+    rows = v7/SCENE/"seed1703"/"matched_transformer"/"run"/"job"/"evaluation"/"matched_transformer"/"rows"
+    write(rows/"99999.json", dict(read_json(rows/"00003.json"), status="failed", values=None))
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert s["scenes"][scene]["failed"] == ["evaluation_queries"]
+    assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "evaluation_queries") == ["matched_transformer seed 1703"]
+
+
+@pytest.mark.parametrize("how", ["missing", "failed", "failed_extra", "duplicate", "wrong_seed", "wrong_condition", "registration"])
+def test_incomplete_transfer_rows_block_the_scene(tree, how):
+    """V3 变体评测任务的行少了、失败、重复、种子或条件不对、登记被改：场景的 evaluation_queries 不通过，T8 不在剩下的行上重算。"""
+    v7, addon, cal, tmp = tree
+    folder = v7/"transfer"/VARIANT/"seed1703"/"po_jepa_full"/"run"/"job"/"evaluation"/"po_jepa_full"
+    rows, first = folder/"rows", read_json(folder/"rows"/"00001.json")
+    if how == "missing":
+        (rows/"00001.json").unlink()
+    elif how == "failed":
+        write(rows/"00001.json", dict(first, status="failed", values=None))
+    elif how == "failed_extra":
+        write(rows/"99999.json", dict(first, status="failed", values=None))
+    elif how == "duplicate":
+        write(rows/"99999.json", first)
+    elif how == "wrong_seed":
+        write(rows/"00001.json", dict(first, seed=1704))
+    elif how == "wrong_condition":
+        write(rows/"00001.json", dict(first, condition="identity"))
+    else:
+        write(folder/"registration.json", dict(queries=queries()[:-1], condition="po_jepa_full"))
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert s["scenes"][scene]["status"] == "blocked" and s["scenes"][scene]["failed"] == ["evaluation_queries"]
+    assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "evaluation_queries") == [f"transfer {VARIANT} po_jepa_full seed 1703"]
+
+
+def test_transfer_registrations_must_agree_across_conditions(tree):
+    """同一变体的两个评测任务登记的查询不同：evaluation_queries 不通过。"""
+    v7, addon, cal, tmp = tree
+    run_job(v7, "identity", 1703, transfer=VARIANT)
+    assert run_main(tree) == 0
+    folder = v7/"transfer"/VARIANT/"seed1703"/"identity"/"run"/"job"/"evaluation"/"identity"
+    for i in range(len(queries())-1, len(queries())):
+        (folder/"rows"/f"{i:05d}.json").unlink()
+    write(folder/"registration.json", dict(queries=queries()[:-1], condition="identity"))
+    assert run_main(tree, "again") == 1
+    s = read_json(tmp/"again"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "evaluation_queries") == [f"transfer {VARIANT} registration differs"]
+
+
+@pytest.mark.parametrize("part,tid,sha", [("long", 999, None), ("long", 999, "m999"), ("long", TIDS[1], None), ("long", TIDS[1], ""),
+                                          ("rows", 999, None), ("rows", TIDS[0], None), ("rows", TIDS[0], "")])
+def test_unknown_trajectory_or_missing_manifest_sha_fails_features(tree, part, tid, sha):
+    """长时程行或窗口行的轨迹不在 preflight 映射里、或行内 SHA 缺失/为空：features 不通过（不再有双空值放行）。"""
+    v7, addon, cal, tmp = tree
+    job = addon/"d4"/SCENE/"seed1703"/"po_jepa_full"/"run"/"job"
+    path = job/"long"/f"{TIDS[1]:04d}.json" if part == "long" else sorted((job/"rows").glob("*.json"))[0]
+    r = dict(read_json(path), trajectory_id=tid)
+    r.pop("manifest_sha256", None)
+    if sha is not None:
+        r["manifest_sha256"] = sha
+    write(path, r)
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert "features" in s["scenes"][scene]["failed"]
+    detail = next(c["detail"] for c in s["checks"][scene] if c["item"] == "features")
+    assert detail == [f"d4 {'long ' if part == 'long' else ''}po_jepa_full seed 1703 trajectory {tid}"]

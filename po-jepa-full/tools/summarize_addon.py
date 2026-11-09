@@ -301,8 +301,21 @@ def calibrations(calibration_root, scene, updates):
             yaml.safe_load(addon.read_text(encoding="utf-8")) if addon.exists() else None)
 
 
-def scene_checks(cells, gap, v7_cal, addon_cal, imported):
-    """一个场景的 8 项核对：[dict(item, ok, detail)]。只核已有的任务（缺的进 missing.json）。"""
+def _manifest_ok(by_id, tid, sha):
+    """轨迹在 preflight 的映射里、两边的 manifest SHA 都是非空字符串且相等（双空值不算相等；Codex 复审 2026-11-09）。"""
+    want = by_id.get(str(tid))
+    return isinstance(want, str) and bool(want) and isinstance(sha, str) and want == sha
+
+
+def _rows_incomplete(r):
+    """一个评测任务（D 任务或 V3 变体评测）的逐查询行不完整：没登记、有失败行或坏行、行的查询键集合不等于登记的。"""
+    return r["queries"] is None or r["failed_rows"] or r["bad_rows"] or set(r["rows"]) != {_row_key(q) for q in r["queries"]}
+
+
+def scene_checks(cells, gap, v7_cal, addon_cal, imported, transfers=None):
+    """一个场景的 8 项核对：[dict(item, ok, detail)]。只核已有的任务（缺的进 missing.json）。transfers 是本场景训练出的
+    V3 变体评测任务 {(变体, 种子, 条件): 任务}，它们的逐查询行也进 evaluation_queries（T8 不在剩下的行上重算）。"""
+    transfers = transfers or {}
     runs = {k: c["run"] for k, c in cells.items() if c.get("run")}
     d4s = {k: c["d4"] for k, c in cells.items() if c.get("d4")}
     out = []
@@ -311,22 +324,24 @@ def scene_checks(cells, gap, v7_cal, addon_cal, imported):
     by_id = (identities[0] or {}).get("manifest_sha256_by_id", {}) if identities else {}
     for (seed, condition), job in sorted(d4s.items()):
         for (tid, _), r in job["rows"].items():
-            if by_id.get(str(tid)) != r["manifest_sha256"]:
+            if not _manifest_ok(by_id, tid, r.get("manifest_sha256")):
                 problems.append(f"d4 {condition} seed {seed} trajectory {tid}")
                 break
         for tid, r in job["long"].items():
-            if by_id.get(str(tid)) != r.get("manifest_sha256"):
+            if not _manifest_ok(by_id, tid, r.get("manifest_sha256")):
                 problems.append(f"d4 long {condition} seed {seed} trajectory {tid}")
                 break
-    if gap is not None and any(by_id.get(str(w["trajectory_id"])) != w["manifest_sha256"] for w in gap["windows"]):
+    if gap is not None and any(not _manifest_ok(by_id, w["trajectory_id"], w.get("manifest_sha256")) for w in gap["windows"]):
         problems.append("spectral gap windows")
     out.append(dict(item="features", ok=not problems, detail=problems))
     bad = [seed for seed in sorted({s for s, _ in runs}) if not _same(
         [r["sequence_sha256"] for (s, c), r in runs.items() if s == seed and c != "identity"])
         or any(r["sequence_sha256"] is None for (s, c), r in runs.items() if s == seed and c != "identity")]
     out.append(dict(item="training_query_sequence", ok=not bad, detail=bad))
-    incomplete = [f"{c} seed {s}" for (s, c), r in sorted(runs.items()) if r["queries"] is None or r["bad_rows"]
-                  or set(r["rows"]) != {_row_key(q) for q in r["queries"]}]
+    incomplete = [f"{c} seed {s}" for (s, c), r in sorted(runs.items()) if _rows_incomplete(r)]
+    incomplete += [f"transfer {v} {c} seed {s}" for (v, s, c), r in sorted(transfers.items()) if _rows_incomplete(r)]
+    incomplete += [f"transfer {v} registration differs" for v in sorted({v for v, _, _ in transfers})
+                   if not _same([r["queries"] for (x, _, _), r in transfers.items() if x == v])]
     counts = lambda j: (j["report"].get("counts") or {})  # noqa: E731
     incomplete += [f"d4 {c} seed {s}" for (s, c), j in sorted(d4s.items()) if
                    counts(j).get("windows") != len(j["rows"]) or counts(j).get("windows") != j["files"]["windows"] or
@@ -566,7 +581,8 @@ def summarize(v7_root, addon_root, calibration_root):
                 cells[(s, c)]["d4"] = job
         cells = dict(cells)
         v7_cal, addon_cal = calibrations(calibration_root, dataset, updates)
-        checks = scene_checks(cells, gaps.get((dataset, updates)), v7_cal, addon_cal, imported)
+        scene_transfers = {(v, s, c): job for (v, t, s, u, c), job in transfers.items() if (t, u) == (dataset, updates)}
+        checks = scene_checks(cells, gaps.get((dataset, updates)), v7_cal, addon_cal, imported, scene_transfers)
         out["checks"][scene] = checks
         if not all(c["ok"] for c in checks):
             out["scenes"][scene] = dict(status="blocked", failed=[c["item"] for c in checks if not c["ok"]])
