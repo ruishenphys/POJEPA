@@ -165,11 +165,20 @@ def _parameters(model: POJEPA) -> list:
     if not isinstance(model, POJEPA):
         raise TypeError("model must be POJEPA")
     model._validate_components()
-    modules = ("dynamics.condition_trunk.0", "dynamics.gamma_head",
-        "dynamics.omega_head", "dynamics.b_head", "dynamics.q_proj", "dynamics.k_proj", "dynamics.v_proj",
-        "dynamics.spectral_bias_net.0", "dynamics.spectral_bias_net.2", "dynamics.spatial_bias_net.0",
-        "dynamics.spatial_bias_net.2", "dynamics.action_residual_net.0", "dynamics.action_residual_net.2", "p_in", "p_out")
-    expected = [name+"."+field for name in modules for field in (("weight",) if name.endswith(("q_proj", "k_proj", "v_proj")) else ("weight", "bias"))]
+    if model.dynamics.config.forcing_space == "token":
+        # v7 主模型（导师 2026-11-08）：token 空间动作场 B 与交互 F，共 29 个参数张量
+        modules = ("dynamics.condition_trunk.0", "dynamics.gamma_head", "dynamics.omega_head",
+            "dynamics.token_b_net.0", "dynamics.token_b_net.2", "dynamics.token_q", "dynamics.token_k", "dynamics.token_v",
+            "dynamics.token_bias_net.0", "dynamics.token_bias_net.2", "dynamics.token_residual_net.0",
+            "dynamics.token_residual_net.2", "p_in", "p_out")
+        no_bias = ("token_q", "token_k", "token_v")
+    else:
+        modules = ("dynamics.condition_trunk.0", "dynamics.gamma_head",
+            "dynamics.omega_head", "dynamics.b_head", "dynamics.q_proj", "dynamics.k_proj", "dynamics.v_proj",
+            "dynamics.spectral_bias_net.0", "dynamics.spectral_bias_net.2", "dynamics.spatial_bias_net.0",
+            "dynamics.spatial_bias_net.2", "dynamics.action_residual_net.0", "dynamics.action_residual_net.2", "p_in", "p_out")
+        no_bias = ("q_proj", "k_proj", "v_proj")
+    expected = [name+"."+field for name in modules for field in (("weight",) if name.endswith(no_bias) else ("weight", "bias"))]
     parameters = list(model.named_parameters())
     if [n for n, _ in parameters] != expected or len({id(p) for _, p in parameters}) != len(expected):
         raise ValueError("complete predictor parameter names/order must remain unchanged and unique")

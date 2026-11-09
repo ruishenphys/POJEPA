@@ -10,7 +10,8 @@ transformer:
   width: 64
   heads: 4
   layers: 1
-  feedforward_candidates: [112, 128, 144]
+  feedforward_candidates: [112, 128, 144]          # 模态写法（v6 复现）PO 215778 参数
+  feedforward_candidates_token: [208, 224, 240]    # 2026-11-08 token 写法（v7 主模型）PO 227617 参数
   dropout: 0.0
   activation: gelu
   layer_norm_epsilon: 0.00001

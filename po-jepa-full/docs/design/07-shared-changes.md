@@ -1,6 +1,6 @@
 # 07 共享模块改动
 
-从 v7（提交 `911bc09`）复制来的模块，只允许做本文件列出的改动。新功能尽量放进新文件；必须动旧文件时，只加可选分支，v7 已有的 6 个条件（po_jepa_full、po_jepa_no_consistency、matched_transformer、identity、vjepa2_ac、vjepa2_ac_small）走的代码路径一行不变；分发用的判断行可以换成对 v7 条件真值相同、不读新参数的写法（例如 `early_check` 的第一行，§2.4）。
+从 v7（提交 `0ac45fe`；S00 复制时是 `911bc09`，S00t 跟进）复制来的模块，只允许做本文件列出的改动。新功能尽量放进新文件；必须动旧文件时，只加可选分支，v7 已有的 6 个条件（po_jepa_full、po_jepa_no_consistency、matched_transformer、identity、vjepa2_ac、vjepa2_ac_small）走的代码路径一行不变；分发用的判断行可以换成对 v7 条件真值相同、不读新参数的写法（例如 `early_check` 的第一行，§2.4）。
 
 ## 1. 总规则
 
@@ -94,7 +94,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 |---|---|
 | `tools/run_jobs.py` | 默认日志目录改成 `workdir.parent.parent/"logs-addon"/<任务文件名>`（即 工作目录/logs-addon/…）；启动检查的提示改成“请在 full-model/po-jepa-full 目录里运行”；把半截输出改名重跑的子命令名单扩成 `calibrate`、`calibrate-addon`、`check`、`check-addon`、`transfer`、`evaluate`、`d4`、`spectral-gap`；`priority` 里 transformer_consistency、fixed_fourier、两个单项消融排 1，koopman 排 2；`complete()` 在 v7 认的 `<输出>/`、`<输出>/run/job/`、`<输出>/job/` 之外多认 `<输出>/run/`（`calibrate-addon`、`check-addon` 和 v7 的 `check` 一样只写 `<输出>/run/COMPLETE.json`，不加的话重跑任务文件时完成了的 calibrate-addon 会被改名重跑，并因补跑标定文件已存在而失败）。S18 的 `d4`、`spectral-gap` 把完成标志写在 `<输出>/run/COMPLETE.json` 和 `<输出>/run/job/COMPLETE.json`（10 §7） |
 | `tools/refresh_manifests.py` | `EXCLUDE_DIRS` 加 `docs` 和 `.vscode`，`MUTABLE` 加 `README.md`（连同它上面的注释共三行，原文见 S00 段说明 §3.2）。改设计文档、编辑器设置或项目状态页都不改变 MANIFEST，`verify_bundle` 不会因此失败，续训和只评测的登记也不会对不上。注意 `EXCLUDE_DIRS` 按路径里任何一级目录名匹配，所以以后任何一层叫 `docs` 或 `.vscode` 的目录（如 `src/po_jepa/docs/`）都不进 MANIFEST；新代码不要放进这样命名的目录。S17 再在 `MUTABLE` 加 `补跑说明.md`（连同注释 +2 −2），理由同 `README.md`：试跑后要按实测改时间，进清单的话一改就让正在跑的任务报 `delivery source changed` |
-| `tools/plan_v7.py` | 不用改（S10b 的分发已经覆盖）：911bc09 的 `plan_v7.py` 已经按条件名经 `comparison.build_condition`、`evaluation.load_selected_checkpoint` 建模型、读检查点，S10b 之后就接受新条件；一个字节都不改 |
+| `tools/plan_v7.py` | 不用改（S10b 的分发已经覆盖）：911bc09（0ac45fe 相同）的 `plan_v7.py` 已经按条件名经 `comparison.build_condition`、`evaluation.load_selected_checkpoint` 建模型、读检查点，S10b 之后就接受新条件；一个字节都不改 |
 | `tools/make_v7_jobs.py`、`tools/summarize_v7.py` | 原样保留，不用于补跑；补跑用新的 `make_addon_jobs.py`、`summarize_addon.py` |
 
 ## 3. 第二期（S08b，DROID）要改的地方

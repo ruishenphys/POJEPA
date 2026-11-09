@@ -26,7 +26,7 @@
 ```
 po-jepa-full/
   run.py                    # 从 v7 复制，加补跑的子命令和条件
-  src/po_jepa/              # 从 v7 提交 911bc09 复制；新文件 fourier.py、koopman.py、generic_consistency.py、ln_metrics.py
+  src/po_jepa/              # 从 v7 复制（S00 时是 911bc09，S00t 跟进到 0ac45fe）；新文件 fourier.py、koopman.py、generic_consistency.py、ln_metrics.py
   src/po_jepa/runtime/addon/  # 仿真补跑：条件分发、标定、v7 检查点读取、D4 评测、截断间隙、编码器核对
   src/po_jepa/droid/        # DROID 数据入口（第二期以后）
   tools/                    # make_addon_jobs.py、import_v7_calibration.py、summarize_addon.py、run_jobs.py（复制后改默认日志目录）

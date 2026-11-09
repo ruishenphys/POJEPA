@@ -64,7 +64,7 @@
 - **初始权重**：同一种子下 time_only、space_only、fixed_fourier 的 `_model_hash` 等于 po_jepa_full 的；transformer_consistency 的等于 matched_transformer 的。
 - **transformer_consistency**：每步 6 次前向、6 次读出；第 0 步（预热系数 0）的参数更新和 matched_transformer 的第 0 步逐值相同（一致性项贡献 ±0，JEPA 梯度为 −0 的位置可能变成 +0，用 `torch.equal` 比）；第 1 步起一致性项有非零梯度（初始化时 `p_out` 为零、一致性梯度恰为 0，测试另用扰动过 `p_out` 的模型核）。
 - **koopman**
-  - K 的规则给出 m = 2 时 76、m = 7 时 72，参数量 215,744 和 236,992。
+  - K 的规则给出 m = 2 时 103、m = 7 时 87，参数量 227,840 和 248,512（对 token 写法的 PO-JEPA 227,617、248,737，08 §5.6）。
   - T = 0 时输出与输入逐位相同。
   - 同一个常数动作段拆成两半积分，结果和不拆在 1e-6（相对）内一致。
   - φ1 在 |w| = 1e-4 两侧的两种算法相对差 < 1e-10。

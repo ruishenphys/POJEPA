@@ -4,6 +4,13 @@
 完整右端为 Ac+Ba+N；N 将内容/谱/空间分数相加后稀疏聚合，再加 M_a。
 每次查询固定起点上下文，每步重算当前 C/动作交互，调度不跨控制边界。
 网络宽度与初始化是固定实现选择；非线性完整流不继承自由块稳定性保证。
+
+forcing_space="token"（导师 2026-11-08）：动作驱动与非线性交互改在 token 特征空间计算再投影回模态，
+    Y = Psi C,   dC/dt = A(Lambda,g) C + Psi^T [ B(X_t, a) + F(Y, X_t, a) ]，
+其中 X_t=P_in(Z_t) 为起点 token 特征（每次查询固定），B 为逐 token 动作驱动场（对 a 线性），
+F 为 token 间稀疏注意力（内容分数+相对位置偏置）加逐 token 残差 M(Y,X_t,a)。A 仍是阻尼旋转块，只依赖
+(lambda_k,g)，与同一特征值子空间内的任意正交变换 Q（含符号翻转）对易，因此 Psi->Psi Q 时 C->Q^T C、
+Y 与预测不变。默认 "modal" 为 v7 原式，参数、随机数消耗与数值逐位不变。
 """
 
 from dataclasses import dataclass
@@ -37,9 +44,13 @@ class DynamicsConfig:
     action_hidden_width: int
     initial_damping: float
     head_weight_std: float
+    # "modal"：v7 原式 Ac+B(lambda,g)a+N(C,a)；"token"：Ac+Psi^T[B(X,a)+F(Psi C,X,a)]（见模块说明）
+    forcing_space: str = "modal"
 
     def __post_init__(self) -> None:
         """分配参数前验证严格整数/正有限实数，拒绝bool与未登记宽度。"""
+        if self.forcing_space not in ("modal", "token"):
+            raise ValueError("forcing_space must be 'modal' or 'token'")
         for name in ("action_dim", "top_r"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -132,7 +143,7 @@ class ConditionedCoefficients:
     gamma: Tensor
     omega: Tensor
     a_blocks: Tensor
-    b_matrix: Tensor
+    b_matrix: Tensor | None   # token 模式为 None（动作驱动改在 token 空间）
 
 
 @dataclass(frozen=True)
@@ -190,8 +201,13 @@ class DynamicsContext:
     coords: Tensor
     pooled: Tensor
     coefficients: ConditionedCoefficients
-    spectral_bias: Tensor
-    spatial_bias: Tensor
+    spectral_bias: Tensor | None
+    spatial_bias: Tensor | None
+    # 仅 forcing_space="token"：起点 token 特征 X_t [B,N,64]、动作驱动场 B(X_t) [B,N,64,m]、
+    # 相对位置偏置 [N,N]（只依赖网格）。modal 模式均为 None，上面两项模态偏置在 token 模式为 None。
+    token_x: Tensor | None = None
+    b_field: Tensor | None = None
+    token_bias: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -320,6 +336,11 @@ class ModalDynamics(nn.Module):
         damping = float(config.initial_damping)
         nn.init.constant_(self.gamma_head.bias, damping+math.log(-math.expm1(-damping)))
         nn.init.zeros_(self.omega_head.bias)
+        if config.forcing_space == "token":
+            self._init_token_modules(config)
+            if not all(torch.isfinite(parameter).all() for parameter in self.parameters()):
+                raise ValueError("initialized condition parameters must be finite float32")
+            return
         self.b_head = nn.Linear(64, 64*config.action_dim, bias=True, device="cpu", dtype=torch.float32)
         nn.init.normal_(self.b_head.weight, mean=0., std=config.head_weight_std)
         nn.init.zeros_(self.b_head.bias)
@@ -358,12 +379,41 @@ class ModalDynamics(nn.Module):
         if not all(torch.isfinite(parameter).all() for parameter in self.parameters()):
             raise ValueError("initialized condition parameters must be finite float32")
 
+    def _init_token_modules(self, config: DynamicsConfig) -> None:
+        """token 模式的新分支（在 A 头之后注册）：B 场、注意力 q/k/v、相对位置偏置、逐 token 残差。
+
+        B(X_i)=W2 SiLU(W1 X_i) 还原为 [64,m]，对动作线性；q/k 读 [Y_i,X_i] (128→32)，v 读 Y_i (64→64)；
+        相对位置偏置 5→32→1 读 [dx,dy,|dx|,|dy|,dist]（[0,1] 坐标，跨分辨率同义）；残差 (128+m)→64→64。
+        输出头 Normal(0,head_weight_std)，隐藏层 Xavier、偏置 0，与 modal 分支同一初始化规则。
+        """
+        m, std = config.action_dim, config.head_weight_std
+        def mlp(n_in, hidden, n_out):
+            net = nn.Sequential(nn.Linear(n_in, hidden, bias=True, device="cpu", dtype=torch.float32), nn.SiLU(),
+                                nn.Linear(hidden, n_out, bias=True, device="cpu", dtype=torch.float32))
+            nn.init.xavier_uniform_(net[0].weight, gain=1.); nn.init.zeros_(net[0].bias)
+            nn.init.normal_(net[2].weight, mean=0., std=std); nn.init.zeros_(net[2].bias)
+            return net
+        self.token_b_net = mlp(64, config.action_hidden_width, 64*m)
+        self.token_q = nn.Linear(128, config.query_dim, bias=False, device="cpu", dtype=torch.float32)
+        self.token_k = nn.Linear(128, config.query_dim, bias=False, device="cpu", dtype=torch.float32)
+        self.token_v = nn.Linear(64, 64, bias=False, device="cpu", dtype=torch.float32)
+        for layer in (self.token_q, self.token_k, self.token_v):
+            nn.init.xavier_uniform_(layer.weight, gain=1.)
+        self.token_bias_net = mlp(5, config.spatial_bias_width, 1)
+        self.token_residual_net = mlp(128+m, config.action_hidden_width, 64)
+
+    @property
+    def token_mode(self) -> bool:
+        return self.config.forcing_space == "token"
+
     def _validate_context(self, context: DynamicsContext) -> None:
         """核固定上下文及嵌套 A/B 合同，不重算网络或强迫输出带梯度。"""
         if not isinstance(context, DynamicsContext):
             raise TypeError("context must be DynamicsContext")
         if not isinstance(context.coefficients, ConditionedCoefficients):
             raise TypeError("context coefficients must be ConditionedCoefficients")
+        if self.token_mode:
+            return self._validate_token_context(context)
         for name in ("eigenvalues", "basis", "coords", "pooled", "spectral_bias", "spatial_bias"):
             _validate_model_tensor(getattr(context, name), self.condition_trunk[0], name)
         for name in ("eigenvalues", "basis", "coords"):
@@ -389,6 +439,86 @@ class ModalDynamics(nn.Module):
             _validate_model_tensor(value, self.condition_trunk[0], f"context {name}")
             if value.shape != shape:
                 raise ValueError(f"context {name} must have matching shape {shape}")
+
+    def _validate_token_context(self, context: DynamicsContext) -> None:
+        """token 模式上下文：谱常量无梯度，X_t/B 场/相对偏置形状匹配，A 系数形状匹配，无模态 B/偏置。"""
+        for name in ("eigenvalues", "basis", "coords", "pooled", "token_x", "b_field", "token_bias"):
+            _validate_model_tensor(getattr(context, name), self.condition_trunk[0], name)
+        for name in ("eigenvalues", "basis", "coords"):
+            if getattr(context, name).requires_grad:
+                raise ValueError(f"{name} must be constant without gradients")
+        batch, modes = context.eigenvalues.shape
+        tokens = context.basis.shape[1]
+        if context.basis.shape != (batch, tokens, modes) or tokens < modes:
+            raise ValueError("context basis must have matching shape [B, N >= K, K]")
+        if context.token_x.shape != (batch, tokens, 64) or context.b_field.shape != (batch, tokens, 64, self.config.action_dim):
+            raise ValueError("token context X/B field must have shapes [B,N,64]/[B,N,64,m]")
+        if context.token_bias.shape != (tokens, tokens) or context.coords.shape != (tokens, 2):
+            raise ValueError("token bias/coords must have shapes [N,N]/[N,2]")
+        if context.coefficients.b_matrix is not None or context.spectral_bias is not None or context.spatial_bias is not None:
+            raise ValueError("token mode has no modal B matrix or modal attention biases")
+        for name in ("raw_gamma", "gamma", "omega"):
+            if getattr(context.coefficients, name).shape != (batch, modes, 32):
+                raise ValueError(f"context {name} must have shape [B,K,32]")
+
+    def _token_pair_bias(self, coords: Tensor) -> Tensor:
+        """coords [N,2]→相对位置偏置 [N,N]（接收 i、来源 j；特征 [dx,dy,|dx|,|dy|,dist]，dx=x_j-x_i）。"""
+        delta = coords.unsqueeze(0)-coords.unsqueeze(1)
+        features = torch.cat((delta, delta.abs(), delta.square().sum(-1, keepdim=True).sqrt()), dim=-1)
+        return self.token_bias_net(features).squeeze(-1)
+
+    def select_context(self, context: DynamicsContext, index: Tensor) -> DynamicsContext:
+        """按 batch 下标取子上下文（积分时只推进 active 样本）；网格量（coords/相对偏置）不分 batch。"""
+        pick = lambda t: None if t is None else t.index_select(0, index)
+        fixed = context.coefficients
+        return DynamicsContext(
+            pick(context.eigenvalues), pick(context.basis), context.coords, pick(context.pooled),
+            ConditionedCoefficients(*(pick(getattr(fixed, name)) for name in
+                ("raw_gamma", "gamma", "omega", "a_blocks", "b_matrix"))),
+            pick(context.spectral_bias), pick(context.spatial_bias),
+            pick(context.token_x), pick(context.b_field), context.token_bias)
+
+    def token_forcing(self, coefficients: Tensor, action: Tensor, context: DynamicsContext) -> RHSResult:
+        """token 模式右端：free=Ac，linear=Psi^T(B(X)a)，interaction=self.nonlinear（Psi^T F(Y,X,a)）。"""
+        self._validate_context(context)
+        if coefficients.shape[:2] != context.eigenvalues.shape or coefficients.shape[2] != 64:
+            raise ValueError("coefficients must match context batch and modes")
+        if action.shape != (coefficients.shape[0], self.config.action_dim):
+            raise ValueError("action must have shape [matching B, action_dim]")
+        free = self.free_rhs(coefficients, context.coefficients.a_blocks)
+        drive = torch.einsum("bncd,bd->bnc", context.b_field, action)            # B(X)a [B,N,64]
+        linear = torch.bmm(context.basis.transpose(1, 2), drive)
+        interaction = self.nonlinear(coefficients, action, context)
+        derivative = free+linear+interaction.nonlinear
+        if not torch.isfinite(derivative).all():
+            raise ValueError("complete derivative must be finite float32")
+        return RHSResult(free, linear, interaction, derivative)
+
+    def _token_nonlinear(self, coefficients: Tensor, action: Tensor, context: DynamicsContext) -> NonlinearResult:
+        """F(Y,X,a)=top-r token 注意力（内容分数+相对位置偏置）+逐 token 残差 M(Y,X,a)，返回 Psi^T F。
+
+        content/total_scores/attention 为 token 空间 [B,N,*]；spectral_scores 为零（token 模式无谱偏置），
+        spatial_scores 为相对位置偏置；action_residual 为 token 空间 M [B,N,64]；nonlinear 为投影后 [B,K,64]。
+        """
+        self._validate_context(context)
+        if coefficients.shape[:2] != context.eigenvalues.shape or coefficients.shape[2] != 64:
+            raise ValueError("coefficients must match context batch and modes")
+        if action.shape != (coefficients.shape[0], self.config.action_dim):
+            raise ValueError("action must have shape [matching B, action_dim]")
+        basis, x = context.basis, context.token_x
+        field = torch.bmm(basis, coefficients)                                   # Y [B,N,64]
+        joint = torch.cat((field, x), dim=-1)
+        query, key, value = self.token_q(joint), self.token_k(joint), self.token_v(field)
+        scores = torch.bmm(query, key.transpose(1, 2))/math.sqrt(self.config.query_dim)
+        total = scores+context.token_bias
+        attention = self.sparse_attention(total, value)
+        tokens = field.shape[1]
+        residual = self.token_residual_net(torch.cat((joint, action.unsqueeze(1).expand(-1, tokens, -1)), dim=-1))
+        nonlinear = torch.bmm(basis.transpose(1, 2), attention.aggregate+residual)
+        if nonlinear.dtype != torch.float32 or not torch.isfinite(nonlinear).all():
+            raise ValueError("nonlinear contribution must be finite float32")
+        return NonlinearResult(ContentTerms(query, key, value, scores), torch.zeros_like(scores),
+                               context.token_bias.expand_as(scores), total, attention, residual, nonlinear)
 
     def prepare_context(
         self, x: Tensor, eigenvalues: Tensor, basis: Tensor, coords: Tensor,
@@ -418,6 +548,14 @@ class ModalDynamics(nn.Module):
             raise ValueError("coords must have shape [N,2], be finite in [0,1] and have no gradients")
         coords_model = coords.to(device=x.device, dtype=torch.float32)
         pooled = self.pool_context(x)
+        if self.token_mode:
+            free = self._condition_free(eigenvalues, pooled)
+            conditioned = ConditionedCoefficients(free.raw_gamma, free.gamma, free.omega, free.a_blocks, None)
+            b_field = self.token_b_net(x).reshape(*x.shape[:2], 64, self.config.action_dim)
+            context = DynamicsContext(eigenvalues, basis, coords_model, pooled, conditioned, None, None,
+                                      x, b_field, self._token_pair_bias(coords_model))
+            self._validate_context(context)
+            return context
         conditioned = self.condition(eigenvalues, pooled)
         spectral = self.spectral_bias(eigenvalues)
         descriptors = self.spatial_descriptors(basis, coords_model)
@@ -457,7 +595,10 @@ class ModalDynamics(nn.Module):
         重算 q/k/v 和内容分数，加固定谱/空间偏置后 top-r/softmax 聚合，
         再加当前动作残差。保持 C/a/参数梯度；不重算起点上下文或重置状态。
         输出 [B,K,64] 系数/周期，不含 Ac/Ba/积分；非有限求和报错。
+        token 模式改为 Psi^T F(Psi C, X_t, a)，见 _token_nonlinear。
         """
+        if self.token_mode:
+            return self._token_nonlinear(coefficients, action, context)
         self._validate_context(context)
         content = self.content_terms(coefficients)
         if coefficients.shape[:2] != context.eigenvalues.shape:
@@ -477,6 +618,8 @@ class ModalDynamics(nn.Module):
         A/B 起点固定，交互当前重算；不乘时长、更新 C 或重建上下文。
         分支相加溢出直接报错，不裁剪。
         """
+        if self.token_mode:
+            return self.token_forcing(coefficients, action, context)
         self._validate_context(context)
         free = self.free_rhs(coefficients, context.coefficients.a_blocks)
         linear = self.action_rhs(action, context.coefficients.b_matrix)
@@ -651,14 +794,7 @@ class ModalDynamics(nn.Module):
             if (next_time <= start).any():
                 raise ValueError("positive integration interval cannot be represented")
             action = action_at(clipped, time=schedule.time, active=schedule.active).index_select(0, model_indices)
-            fixed = context.coefficients
-            active_context = DynamicsContext(
-                context.eigenvalues.index_select(0, model_indices), context.basis.index_select(0, model_indices),
-                context.coords, context.pooled.index_select(0, model_indices),
-                ConditionedCoefficients(*(getattr(fixed, name).index_select(0, model_indices) for name in
-                    ("raw_gamma", "gamma", "omega", "a_blocks", "b_matrix"))),
-                context.spectral_bias.index_select(0, model_indices), context.spatial_bias.index_select(0, model_indices),
-            )
+            active_context = self.select_context(context, model_indices)
             before = current.index_select(0, model_indices)
             result = self.exponential_euler_step(before, action, active_context, delta=delta, config=config)
             current = current.index_copy(0, model_indices, result.coefficients)

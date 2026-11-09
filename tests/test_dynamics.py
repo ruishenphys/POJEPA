@@ -1742,9 +1742,12 @@ def test_config_exact_explicit_fields_and_frozen_state():
     """十字段均必填且冻结；诊断r不按尚未给定的K截断。"""
     cls = api().DynamicsConfig
     names = ("action_dim", "dynamic_dim", "condition_width", "query_dim", "top_r",
-             "spectral_bias_width", "spatial_bias_width", "action_hidden_width", "initial_damping", "head_weight_std")
+             "spectral_bias_width", "spatial_bias_width", "action_hidden_width", "initial_damping", "head_weight_std",
+             "forcing_space")
     assert tuple(f.name for f in fields(cls)) == names
-    assert all(f.default is MISSING and f.default_factory is MISSING for f in fields(cls))
+    # 原十字段必填；新增 forcing_space 默认 "modal"（v7 原式），不影响已有配置
+    assert all(f.default is MISSING and f.default_factory is MISSING for f in fields(cls)[:-1])
+    assert fields(cls)[-1].default == "modal"
     with pytest.raises(TypeError):
         cls()
     with pytest.raises(TypeError):
@@ -3437,7 +3440,9 @@ def test_complete_rhs_frozen_public_fields_and_no_forward_side_effects(device):
         value.requires_grad_()
         value.grad = torch.full_like(value, .3)
     context = dynamics.prepare_context(x, eigenvalues, basis, coords)
-    assert tuple(f.name for f in fields(context)) == ("eigenvalues", "basis", "coords", "pooled", "coefficients", "spectral_bias", "spatial_bias")
+    assert tuple(f.name for f in fields(context)) == ("eigenvalues", "basis", "coords", "pooled", "coefficients", "spectral_bias", "spatial_bias",
+                                                     "token_x", "b_field", "token_bias")
+    assert context.token_x is None and context.b_field is None and context.token_bias is None
     with pytest.raises(FrozenInstanceError):
         context.pooled = x.mean(1)
     values = [x, eigenvalues, basis, coords, c, action, context.coords, context.pooled,

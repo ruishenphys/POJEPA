@@ -488,7 +488,7 @@ def test_make_ac_checkpoint_refuses_existing_target(tmp_path):
 
 
 def test_reduced_spec_differs_from_small_and_loads_like_official(tmp_path):
-    """缩小规格能构造，参数量 282,048（≠ vjepa2_ac_small 的 215,552），按假权重的键格式能被 load_official 载入。"""
+    """缩小规格能构造，参数量 282,048（≠ vjepa2_ac_small 的 227,936），按假权重的键格式能被 load_official 载入。"""
     from po_jepa import ac_baseline
     spec = ac_baseline.ACSpec(**dual.REDUCED_OFFICIAL)
     official = ac_baseline.OFFICIAL
@@ -496,7 +496,7 @@ def test_reduced_spec_differs_from_small_and_loads_like_official(tmp_path):
         torch.manual_seed(0)
         model = ac_baseline.ACPredictor(spec)
         small = ac_baseline.ACPredictor(ac_baseline.SMALL)
-        assert ac_baseline.parameter_count(model) == 282_048 and ac_baseline.parameter_count(small) == 215_552
+        assert ac_baseline.parameter_count(model) == 282_048 and ac_baseline.parameter_count(small) == 227_936
         state = {k: v for k, v in model.core.state_dict().items() if not k.startswith("action_encoder.")}
         state.update({"action_encoder.weight": torch.zeros(64, 7), "action_encoder.bias": torch.zeros(64),
                       "state_encoder.weight": torch.zeros(64, 7), "state_encoder.bias": torch.ones(64),

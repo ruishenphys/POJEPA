@@ -2,7 +2,7 @@
 
 两个版本，结构都来自官方 VisionTransformerPredictorAC（third_party/vjepa2_ac.py 原样拷贝）：
 - vjepa2_ac：官方规模（24 层、宽 1024、16 头，约 3.05 亿参数），从官方权重 vjepa2-ac-vitg.pt 初始化后在本数据上微调。
-- vjepa2_ac_small：同一结构缩到与 PO-JEPA 参数量相差 ≤1%（1 层、宽 64、4 头、MLP 128），从头训练。
+- vjepa2_ac_small：同一结构缩到与 PO-JEPA 参数量相差 ≤1%（1 层、宽 64、4 头、MLP 224；token 写法 PO 为 227617 参数），从头训练。
 
 与官方相比的适配（都写在这里，不改官方代码）：
 - 动作维 7→2：action_encoder 换成新的 Linear(2, 宽)，随机初始化；
@@ -50,7 +50,7 @@ class ACSpec:
 
 
 OFFICIAL = ACSpec()
-SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=2.0)
+SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=3.5)   # 2026-11-08：MLP 224，对齐 token 写法 PO 参数 227617（原 2.0 对齐模态写法）
 
 
 def spec_for(condition: str) -> ACSpec:

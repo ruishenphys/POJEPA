@@ -37,10 +37,11 @@
       "target": "src/po_jepa/dynamics.py",
       "sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
       "operation": "comments_and_docstrings_only",
-      "candidate_sha256": "1d1f74a73153016715ad722aa417ee367d8d624f2f162bebc37026044a5d5143",
+      "candidate_sha256": "7e3d1b548477aaccce1532056bf03023d95a223a4e01eca82bb7094caf8f9ac4",
       "comment_cleanup_baseline_sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
-      "executable_ast_sha256": "c67ca06f4b417159f8002eedae32640cd83b84a69802162781f45d51bcdc4c9e",
-      "prior_operation": "identical_bytes"
+      "executable_ast_sha256": "886b94ab779809da072a5c6b6776b077ad36963bd936cf60e569ab9dec3e5fc5",
+      "prior_operation": "identical_bytes",
+      "v7_previous_candidate_sha256": "1d1f74a73153016715ad722aa417ee367d8d624f2f162bebc37026044a5d5143"
     },
     {
       "source": "first_round/src/po_jepa/geometry.py",
@@ -151,9 +152,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "c385b1ec47fcff2b2e693ed1e7506b1fc7c7657c6ddd1bd6b15ee31586ea7259",
+      "candidate_sha256": "6a0086a5a7cc2c5e33810a4ce83e54cdb51a269189de0a0d5d17aa50be6d96e7",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "94fe8b540a43302665a762142e48d949c18cc9ede7ad7560ec78a9117cc06b53",
+      "executable_ast_sha256": "26d3f030df7f037e481b9164d6cfa6e8fb81cf9d5324645172a047329991a06b",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -215,10 +216,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "4c21d330df16605cdfe8e2a5f03f0f993064eb2984b42f3d6bd9d690ee6515fb",
+      "candidate_sha256": "4bfe3449a4fe78a999e754b67ad09a9e96102c943d69a9dd15a342abdff37f10",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "e24aa91b766ef03861f346698d5bd5d6e452635d5b684bbf5601287b210ec0dd",
+      "executable_ast_sha256": "0edf0dec2cfba2acc812fece2be316cc421ab4872c30ee5e3cac19e1202b7227",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "v7_previous_candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b"
@@ -368,11 +369,12 @@
         "train_step"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71",
+      "candidate_sha256": "ca179786e67ea1a3aa61612caf4e19acb4f7865d7b9e705f4ab4d150edabc922",
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
-      "executable_ast_sha256": "7f7f0dae333e95a4010670040056c2c68c9c54d4a5d2e9f11bf2f9eb0aafd81f",
+      "executable_ast_sha256": "1b3f7b6ed7c5f2bd02a4d572bcf77cdcac3a386104851b9ab770e528320d7725",
       "prior_operation": "dependency_closure_and_resource_relocation",
-      "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
+      "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71",
+      "v7_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
     },
     {
       "source": "delivery/po-jepa/src/po_jepa/runtime/workflow.py",
@@ -483,6 +485,7 @@
   "v7_changes": {
     "files_changed_since_v6": [
       "src/po_jepa/baselines.py",
+      "src/po_jepa/dynamics.py",
       "src/po_jepa/runtime/cache.py",
       "src/po_jepa/runtime/checks.py",
       "src/po_jepa/runtime/cli.py",
@@ -491,6 +494,7 @@
       "src/po_jepa/runtime/evaluation.py",
       "src/po_jepa/runtime/learning.py",
       "src/po_jepa/runtime/resources.py",
+      "src/po_jepa/runtime/training.py",
       "src/po_jepa/runtime/workflow.py",
       "src/po_jepa/simulation.py"
     ]

@@ -1,6 +1,6 @@
 """开发机专用：双树对照冒烟（07 §5.2；S00 段说明 §3.4）。
 
-同一份假特征、同一组参数下，v7 树（仓库根目录，冻结在 911bc09）和 po-jepa-full 树各起一个子进程，
+同一份假特征、同一组参数下，v7 树（仓库根目录，冻结在 0ac45fe）和 po-jepa-full 树各起一个子进程，
 运行本树的 tools/smoke_v7_cpu.py --updates 20 --seed 1703 --jobs <6 个 v7 条件>，然后逐位比较
 标定、初始权重哈希、每步训练记录、验证逐窗口值和选点、最后一步的 model_state、全部测试评测行
 （含只评测重跑）和评测汇总。耗时、绝对路径和来源字段不比（源码 SHA 在 S08a 以后会合法地变化）。
@@ -30,7 +30,7 @@ import time
 
 import torch
 
-V7_COMMIT = "911bc09"
+V7_COMMIT = "0ac45fe"
 FROZEN_PATHS = ("src", "configs", "reference", "tests", "tools", "run.py", "pyproject.toml", "DATASET.md",
                 "MANIFEST.json", "SOURCE_MAP.json")
 REQUIRED_FILES = ("src/po_jepa/runtime/workflow.py", "tools/smoke_v7_cpu.py")

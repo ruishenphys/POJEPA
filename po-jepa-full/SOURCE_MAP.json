@@ -37,10 +37,11 @@
       "target": "src/po_jepa/dynamics.py",
       "sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
       "operation": "comments_and_docstrings_only",
-      "candidate_sha256": "1d1f74a73153016715ad722aa417ee367d8d624f2f162bebc37026044a5d5143",
+      "candidate_sha256": "7e3d1b548477aaccce1532056bf03023d95a223a4e01eca82bb7094caf8f9ac4",
       "comment_cleanup_baseline_sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
-      "executable_ast_sha256": "c67ca06f4b417159f8002eedae32640cd83b84a69802162781f45d51bcdc4c9e",
-      "prior_operation": "identical_bytes"
+      "executable_ast_sha256": "886b94ab779809da072a5c6b6776b077ad36963bd936cf60e569ab9dec3e5fc5",
+      "prior_operation": "identical_bytes",
+      "v7_previous_candidate_sha256": "1d1f74a73153016715ad722aa417ee367d8d624f2f162bebc37026044a5d5143"
     },
     {
       "source": "first_round/src/po_jepa/geometry.py",
@@ -152,9 +153,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "c385b1ec47fcff2b2e693ed1e7506b1fc7c7657c6ddd1bd6b15ee31586ea7259",
+      "candidate_sha256": "6a0086a5a7cc2c5e33810a4ce83e54cdb51a269189de0a0d5d17aa50be6d96e7",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "94fe8b540a43302665a762142e48d949c18cc9ede7ad7560ec78a9117cc06b53",
+      "executable_ast_sha256": "26d3f030df7f037e481b9164d6cfa6e8fb81cf9d5324645172a047329991a06b",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -216,10 +217,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "e20e7386fa4294c7baaa03d216ee8940e253fdeb773f84abe3094ee54d6a6dd0",
+      "candidate_sha256": "ab6d3dcbaac15f7c999897314f28119dc11d6dd793de149bf6d8a4e4e26b7e40",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "8f21da29be730b3a151f6ed39106dba3425078f21933bc567e2ccb8a462280d8",
+      "executable_ast_sha256": "0ef4cc62bc57106fc1168b3d4592718b85b649b8c2c04ff2b44b0e181169ea84",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "v7_previous_candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b"
@@ -369,9 +370,9 @@
         "train_step"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "b414f4fde5b04287f29915fa39cafd4863d36b78b5dcabaae50c6e60903f536e",
+      "candidate_sha256": "b74c3f343d1722bd3d1d1b09cb4b8caca7449c2b2be31fb046b969e149a41b77",
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
-      "executable_ast_sha256": "e8423c97dc9c3b4015931510bd7ed7dd93fa24d25d2ac2cd4c6e957e702c39f7",
+      "executable_ast_sha256": "2c63913560716ca3df0d8dce9a00a11ae8997713ece30c9e2b2e7f1047b8adff",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71",
       "v7_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
@@ -486,6 +487,7 @@
   "v7_changes": {
     "files_changed_since_v6": [
       "src/po_jepa/baselines.py",
+      "src/po_jepa/dynamics.py",
       "src/po_jepa/model.py",
       "src/po_jepa/runtime/cache.py",
       "src/po_jepa/runtime/checks.py",

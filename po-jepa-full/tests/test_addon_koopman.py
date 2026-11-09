@@ -52,16 +52,20 @@ def coarse(raw, size):
     return apply_spatial_transfer(raw, transfer), transfer.target
 
 
-def test_parameter_count_and_mode_rule():
-    assert parameter_count(KoopmanConfig(modes=76, action_dim=2)) == 215_744
-    assert parameter_count(KoopmanConfig(modes=72, action_dim=7)) == 236_992
+def test_parameter_count_and_mode_rule(monkeypatch):
+    assert parameter_count(KoopmanConfig(modes=103, action_dim=2)) == 227_840
+    assert parameter_count(KoopmanConfig(modes=87, action_dim=7)) == 248_512
     for k in (1, 16, 76, 200):
         for m in (1, 2, 7):
             assert parameter_count(KoopmanConfig(modes=k, action_dim=m)) == 181_696+k*(320+64*m)
     assert parameter_count(KoopmanConfig(modes=2, action_dim=2, encoder_dim=3)) == 2*3*64+64+3+2*(256+64+128)
-    po = comparison.parameter_counts(checks.build_full_model(checks.load_protocol(), CPU))["total"]
-    assert po == 215_778
-    assert choose_modes(po, action_dim=2) == 76 and choose_modes(236_898, action_dim=7) == 72
+    # S00t：v7 协议下 PO-JEPA 是 token 写法（0ac45fe），227,617 个参数；DROID 的 m = 7 下是 248,737
+    monkeypatch.setenv("PO_JEPA_PROTOCOL", "v7")
+    po_model = checks.build_full_model(checks.load_protocol(), CPU)
+    assert po_model.dynamics.config.forcing_space == "token"
+    po = comparison.parameter_counts(po_model)["total"]
+    assert po == 227_617
+    assert choose_modes(po, action_dim=2) == 103 and choose_modes(248_737, action_dim=7) == 87
     # 平局取较小的 K：m=2 时 K=10、11 的参数量是 186,176、186,624，中点 186,400
     assert choose_modes(186_400, action_dim=2) == 10 and choose_modes(186_401, action_dim=2) == 11
     assert choose_modes(1, action_dim=2) == 1
@@ -71,7 +75,7 @@ def test_parameter_count_and_mode_rule():
             choose_modes(bad, action_dim=2)
 
 
-@pytest.mark.parametrize("m, k, total", [(2, 76, 215_744), (7, 72, 236_992)])
+@pytest.mark.parametrize("m, k, total", [(2, 103, 227_840), (7, 87, 248_512)])
 def test_built_model_counts_and_layout(m, k, total):
     model = build_koopman(KoopmanConfig(modes=k, action_dim=m), 1703, CPU)
     counts = comparison.parameter_counts(model)
@@ -84,16 +88,16 @@ def test_built_model_counts_and_layout(m, k, total):
 
 def test_initialization():
     before = torch.get_rng_state().clone()
-    model = build_koopman(KoopmanConfig(modes=76, action_dim=2), 1703, CPU)
+    model = build_koopman(KoopmanConfig(modes=103, action_dim=2), 1703, CPU)
     assert torch.equal(before, torch.get_rng_state())
-    assert torch.equal(model.basis, dct_basis(16, 16, mode_order(76)).to(torch.float32))
+    assert torch.equal(model.basis, dct_basis(16, 16, mode_order(103)).to(torch.float32))
     basis = model.basis.detach().double()
-    assert torch.linalg.matrix_norm(basis.T@basis-torch.eye(76, dtype=torch.float64)).item() < 1e-5
+    assert torch.linalg.matrix_norm(basis.T@basis-torch.eye(103, dtype=torch.float64)).item() < 1e-5
     softplus_inverse = math.log(math.expm1(.1))
     assert softplus_inverse == pytest.approx(-2.252168, abs=1e-6)
-    assert torch.equal(model.raw_gamma, torch.full((76, 32), softplus_inverse, dtype=torch.float32))
+    assert torch.equal(model.raw_gamma, torch.full((103, 32), softplus_inverse, dtype=torch.float32))
     assert torch.nn.functional.softplus(model.raw_gamma.double()).sub(.1).abs().max().item() < 1e-8
-    assert torch.equal(model.omega, torch.zeros(76, 32))
+    assert torch.equal(model.omega, torch.zeros(103, 32))
     assert torch.equal(model.p_in.bias, torch.zeros(64)) and torch.equal(model.p_out.bias, torch.zeros(1408))
     bound = math.sqrt(6/(1408+64))
     assert model.p_in.weight.abs().max().item() <= bound and model.p_out.weight.abs().max().item() <= bound
@@ -103,10 +107,10 @@ def test_initialization():
                for k in ("p_in.weight", "p_out.weight", "action_gain")}
     assert digests == {"p_in.weight": "803c58285587507e831337f1406738159fe47c7ae96b1224140e44d333b96db4",
                        "p_out.weight": "7605ce43f405124a259072c91108404954dad998ad4cf9f7cfd4e38393f7996a",
-                       "action_gain": "240ba9c7a122cca6d44efb576839e70f5e7c6b8ed765d10c2acfc6579bc03bcf"}
-    again = build_koopman(KoopmanConfig(modes=76, action_dim=2), 1703, CPU)
+                       "action_gain": "5d376a0c5ddc9926af2653e89bcf0487ce19e488dd030a89e76d8674268ceb9a"}
+    again = build_koopman(KoopmanConfig(modes=103, action_dim=2), 1703, CPU)
     assert all(torch.equal(v, again.state_dict()[k]) for k, v in model.state_dict().items())
-    other = build_koopman(KoopmanConfig(modes=76, action_dim=2), 1704, CPU).state_dict()
+    other = build_koopman(KoopmanConfig(modes=103, action_dim=2), 1704, CPU).state_dict()
     assert {k for k, v in model.state_dict().items() if not torch.equal(v, other[k])} == {"p_in.weight", "p_out.weight", "action_gain"}
 
 

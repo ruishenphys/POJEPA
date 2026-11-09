@@ -47,7 +47,7 @@ def protocol_z(batch, height, width, seed):
 
 
 def v7_prepare_query(model, raw_z, grid):
-    """911bc09 的 POJEPA.prepare_query 原文（参照；输入合法，省掉开头的类型检查）。"""
+    """911bc09（0ac45fe 相同）的 POJEPA.prepare_query 原文（参照；输入合法，省掉开头的类型检查）。"""
     model._validate_components()
     x = model.project_in(raw_z)
     graph = model.spectrum.config
@@ -132,7 +132,7 @@ def test_spectrum_for_forwards_arguments_unchanged(monkeypatch):
 
 @pytest.mark.parametrize("case", ["protocol16", "protocol8", "protocol12", "projected"])
 def test_prepare_query_matches_v7_reference_and_delegates_once(monkeypatch, one_thread, case):
-    """prepare_query 与 911bc09 原文逐位相同，且恰好调用 spectrum_for、lowest_eigenpairs 各一次。"""
+    """prepare_query 与 911bc09（0ac45fe 相同）原文逐位相同，且恰好调用 spectrum_for、lowest_eigenpairs 各一次。"""
     if case == "projected":
         model, raw, *_ = e05_real_case()
         raw = raw.detach()

@@ -25,11 +25,15 @@ def test_tick_actions_time_average():
     assert torch.equal(a[0, 2], torch.zeros(2))           # 超出查询时长记 0
 
 
-def test_small_parameter_count_matches_po_jepa():
+def test_small_parameter_count_matches_po_jepa(monkeypatch):
+    # 2026-11-08：v7 主模型是 token 写法（227617 参数），AC small 的 MLP 跟着改成 224
+    monkeypatch.setenv("PO_JEPA_PROTOCOL", "v7")
     model = ac_baseline.ACPredictor(ac_baseline.SMALL)
-    assert ac_baseline.parameter_count(model) == 215_552
-    po = sum(p.numel() for p in checks.build_full_model(checks.load_protocol(), torch.device("cpu")).parameters())
-    assert abs(po-215_552) <= .01*po
+    assert ac_baseline.parameter_count(model) == 227_936
+    po_model = checks.build_full_model(checks.load_protocol(), torch.device("cpu"))
+    assert po_model.dynamics.config.forcing_space == "token"
+    po = sum(p.numel() for p in po_model.parameters())
+    assert po == 227_617 and abs(po-227_936) <= .01*po
 
 
 def test_forward_shapes_and_half_integer_average():

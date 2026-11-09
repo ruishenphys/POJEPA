@@ -6,7 +6,7 @@ import pytest
 from po_jepa.losses import LossConfig
 from po_jepa.runtime import checks, comparison
 
-GOLDEN = {  # 911bc09 树上实算（S08a 段说明 §7 A14 附复核命令）
+GOLDEN = {  # 911bc09（0ac45fe 相同）树上实算（S08a 段说明 §7 A14 附复核命令）
     "ok": '{"measurements": 3, "rho": 0.05, "threshold": 0.005, "median_share": {"time": 0.05, "space": 0.05}, "active": true}',
     "off": '{"measurements": 3, "rho": 0.05, "threshold": 0.005, "median_share": {"time": 1e-05, "space": 1e-05}, "active": false}',
     "empty": '{"measurements": 0, "rho": 0.05, "active": false, "median_share": null, "threshold": 0.005}',
@@ -46,7 +46,7 @@ def config(time, space):
 
 @pytest.mark.parametrize("weights", [(0., 0.), (.5, .25), (.5, 0.)])
 def test_full_output_matches_v7_bytes(protocol, tmp_path, weights):
-    """po_jepa_full 的汇总和 911bc09 上实算的逐字节相同（含键序），和权重无关。"""
+    """po_jepa_full 的汇总和 911bc09（0ac45fe 相同）上实算的逐字节相同（含键序），和权重无关。"""
     for name, shares in V7_SHARES.items():
         write(tmp_path/name, [None if share is None else (share, share) for share in shares])
         summary = comparison.consistency_monitor_summary(tmp_path/name, "po_jepa_full", config(*weights))
@@ -91,7 +91,7 @@ def test_new_conditions_check_only_positive_terms(protocol, tmp_path, condition)
 
 
 def test_early_check_full_file_matches_v7(protocol, tmp_path):
-    """po_jepa_full 写出的 early-check.json 和 911bc09 上实算的逐字节相同。"""
+    """po_jepa_full 写出的 early-check.json 和 911bc09（0ac45fe 相同）上实算的逐字节相同。"""
     write(tmp_path, [(.05, .05)]*4)
     comparison.early_check(tmp_path, "po_jepa_full", config(0., 0.), 4)
     assert (tmp_path/"early-check.json").read_text(encoding="utf-8") == GOLDEN_EARLY

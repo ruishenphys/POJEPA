@@ -125,7 +125,8 @@ def choose_architecture() -> dict:
     po = check.build_full_model(check.load_protocol(), torch.device("cpu"))
     po_counts = parameter_counts(po)
     rows = []
-    for width in config["feedforward_candidates"]:
+    token = po.dynamics.config.forcing_space == "token"
+    for width in config["feedforward_candidates_token" if token else "feedforward_candidates"]:
         spec = TransformerSpec(encoder_dim=config["encoder_dim"], action_dim=config["action_dim"],
             width=config["width"], heads=config["heads"], layers=config["layers"], feedforward=width,
             dropout=config["dropout"], layer_norm_epsilon=config["layer_norm_epsilon"], residual=check.is_v7())

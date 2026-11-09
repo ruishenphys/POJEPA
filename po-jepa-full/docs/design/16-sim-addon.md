@@ -23,12 +23,12 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 
 `tools/import_v7_calibration.py --v7-tree ../../po-jepa --stage full`：
 
-1. 要求 v7 目录的 git HEAD 是 `653e2d07477d809e933fdedddebfc77c655b71c5` 或 `911bc09e79e4e92b89a823e083aac7d95edaa029`，否则报错（v7 的代码不应有任何改动）。653e2d0 是 2026-11-08 给机哥的交接更新（试跑的 double_well-200 改读 v6 特征目录），只改了 README.md、交接说明.md 和 MANIFEST.json，代码和 911bc09 逐字节相同；正式运行用的是 653e2d0。`IMPORTED.json` 记下实际读到的 HEAD。两个提交写成常量 `V7_COMMITS`，653e2d0 在前。只核 HEAD，不核工作区是否干净：v7 的 calibrate 会在 `configs/calibration/` 下写未跟踪的文件，机器上 v7 的工作区本来就不干净；标定文件本身的值由第 2 步核，字节由 SHA 记下。
+1. 要求 v7 目录的 git HEAD 是 `0ac45fe03bf43b96bf861446b8aa2ada4f4a8987`，否则报错（v7 的代码不应有任何改动）。只接受 0ac45fe：机哥的正式结果是 0ac45fe 跑的；旧提交（653e2d0、911bc09）的模型是模态写法，不能混用。`IMPORTED.json` 记下实际读到的 HEAD。只核 HEAD，不核工作区是否干净：v7 的 calibrate 会在 `configs/calibration/` 下写未跟踪的文件，机器上 v7 的工作区本来就不干净；标定文件本身的值由第 2 步核，字节由 SHA 记下。
 2. 对每个场景，读 `<v7 目录>/configs/calibration/<tag>-u<步数>.yaml`（tag 如 `double_well-2000`、`landscape~shape=multi_well-2000`），要求 `sigma_z`、`time_weight`、`space_weight` 都不为空。
 3. 原字节复制到 po-jepa-full 的 `configs/calibration/` 下同名文件。目标已存在且字节相同就跳过，不同就报错。
 4. 写 `configs/calibration/IMPORTED.json`：每个文件的源路径、SHA、导入时间、v7 的 commit。
 
-第 3、4 步：`IMPORTED.json` 已有这个文件的记录时，`sha256` 相同、`v7_commit` 是这两个之一就算同一个文件，跳过（不要求等于这次的 HEAD）；`sha256` 不同或 `v7_commit` 不是这两个就报错。
+第 3、4 步：`IMPORTED.json` 已有这个文件的记录时，`sha256` 相同、`v7_commit` 是 0ac45fe 就算同一个文件，跳过；`sha256` 不同或 `v7_commit` 不是 0ac45fe 就报错。
 
 这样 po-jepa-full 的 `load_protocol()` 不用改，读到的 σ_z、λ 和 v7 正式运行逐位相同。`configs/calibration/` 不进 MANIFEST（v7 原来就排除了它）。
 

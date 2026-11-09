@@ -6,23 +6,25 @@
 
 | 条件 | 来源 | 模型 | λ_t | λ_s | 损失标签 | 每次更新的 Φ 次数 | 每次更新的 p_out 次数 | 参数量（m = 2） |
 |---|---|---|---|---|---|---|---|---|
-| po_jepa_full | v7 | POJEPA + GraphSpectrum | v7 标定 | v7 标定 | full | 5 | 10 | 215,778 |
-| po_jepa_no_consistency | v7 | 同上 | 0 | 0 | no_consistency | 5 | 10 | 215,778 |
+| po_jepa_full | v7 | POJEPA + GraphSpectrum | v7 标定 | v7 标定 | full | 5 | 10 | 227,617 |
+| po_jepa_no_consistency | v7 | 同上 | 0 | 0 | no_consistency | 5 | 10 | 227,617 |
 | matched_transformer | v7 | TokenTransformer（登记规格，残差读出） | 0 | 0 | no_consistency | 1 | 1 | v7 登记值（与 PO-JEPA 相差 < 1%） |
 | identity | v7 | IdentityPredictor | — | — | — | 不训练 | — | 0 |
 | vjepa2_ac | v7 | 官方规模 AC，从官方权重微调 | 官方损失 | — | — | — | — | 约 3 亿 |
 | vjepa2_ac_small | v7 | 同结构缩小，从头训练 | 官方损失 | — | — | — | — | v7 登记值（相差 < 1%） |
-| po_jepa_time_only | 补跑 | 与 full 完全相同 | v7 full 的 λ_t | 0 | time_only | 5 | 10 | 215,778 |
-| po_jepa_space_only | 补跑 | 与 full 完全相同 | 0 | v7 full 的 λ_s | space_only | 5 | 10 | 215,778 |
+| po_jepa_time_only | 补跑 | 与 full 完全相同 | v7 full 的 λ_t | 0 | time_only | 5 | 10 | 227,617 |
+| po_jepa_space_only | 补跑 | 与 full 完全相同 | 0 | v7 full 的 λ_s | space_only | 5 | 10 | 227,617 |
 | transformer_consistency | 补跑 | 与 matched_transformer 完全相同 | 补跑标定 | 补跑标定 | full | 6 | 6 | 同 matched_transformer |
-| fixed_fourier | 补跑 | POJEPA + FourierSpectrum | 补跑标定 | 补跑标定 | full | 5 | 10 | 215,778 |
-| koopman | 补跑 | KoopmanPredictor，K = 76 | 0 | 0 | no_consistency | 1 | 2 | 215,744 |
+| fixed_fourier | 补跑 | POJEPA + FourierSpectrum | 补跑标定 | 补跑标定 | full | 5 | 10 | 227,617 |
+| koopman | 补跑 | KoopmanPredictor，K = 103 | 0 | 0 | no_consistency | 1 | 2 | 227,840 |
+
+参数量是 v7 协议（`PO_JEPA_PROTOCOL=v7`，v7 提交 0ac45fe，`configs/train/v7.yaml` 设 `model.dynamics.forcing_space: token`）下用代码数的：PO-JEPA 是 token 写法，227,617（含 `p_out.bias` 的 1,408）；fixed_fourier 和它同结构，也是 227,617。v6 协议（不设 `PO_JEPA_PROTOCOL=v7`）下 PO-JEPA 仍是模态写法 215,778。
 
 “v7 标定”指 v7 的 calibrate 任务写出的 `configs/calibration/<场景>-<条数>-u<步数>.yaml`，补跑时原样导入（16 §3.1）；“补跑标定”见 16 §3.2。σ_z 所有 PO-JEPA 类条件都用导入的 v7 值（fixed_fourier 不建图，用不到 σ_z，但它的 buffer 里存的是同一个值，保证初始权重和 full 相同）。
 
 ### 1.2 DROID（第二期以后）
 
-8 个训练条件：po_jepa_full、po_jepa_no_consistency、fixed_fourier、koopman、matched_transformer、transformer_consistency、vjepa2_ac、vjepa2_ac_small；2 个不训练的对照：identity、vjepa2_ac_zeroshot。单项消融只在仿真上做。DROID 上 m = 7，Koopman 的 K = 72（§5.6）；PO-JEPA 的参数量按 7 维动作重新数（236,898）。
+8 个训练条件：po_jepa_full、po_jepa_no_consistency、fixed_fourier、koopman、matched_transformer、transformer_consistency、vjepa2_ac、vjepa2_ac_small；2 个不训练的对照：identity、vjepa2_ac_zeroshot。单项消融只在仿真上做。DROID 上 m = 7，Koopman 的 K = 87（§5.6）；PO-JEPA 的参数量按 7 维动作、token 写法重新数（248,737；DROID 配置还没进代码，是手算：v7 协议的 `model` 块只把 `dynamics.action_dim` 换成 7，用 `DynamicsConfig` 构造 POJEPA 数出来的。模态写法下是 236,898）。
 
 DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个构造函数要把模型配置块（projection/graph/dynamics/integrator，Koopman 另有 `KoopmanConfig`）和初始化种子作为显式参数：仿真调用时传 `load_protocol()["model"]` 和 `check.model_seed()`，结果和 §4.2、§5.2 写的完全相同；DROID 调用时传 09 §2.1 的配置块和运行种子。Transformer 和 AC 在 DROID 上的规格见 09 §2.2。
 
@@ -148,7 +150,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 
 1. **基底换到当前网格。** 16×16 上 W_h = W。其他网格用和 token 完全相同的重采样：`transfer = build_spatial_transfer(regular_grid(16,16), target_height=H, target_width=W)`，把 W 当成 [1, 256, K] 的“特征”做 `apply_spatial_transfer`，得到 W_h [N_h, K]（梯度传回 W）。要求 `transfer.target.coords` 和输入 grid 的坐标逐位相同，否则报错；16×16 也核（输入坐标和 `regular_grid(16,16)` 逐位相同），坐标顺序不同的 16×16 网格不能被静默接受。8×8 是 2×2 平均，12×12 是双线性，DROID 的 20×20 是双线性放大。
    - **DROID 原始分辨率（10 §8.5，S11 改）**：那里的网格是 `regular_grid(12,12)`、`regular_grid(20,20)`，不是重采样的目标。12×12 的双线性目标坐标和规则格点只差约 1e-16，20×20 放大时 R 在边缘按 edge 截断，目标坐标的边缘一圈和格点中心差 0.00625。基底仍是 W_h = R W（值不变，等于 W 在格点中心的双线性插值、边缘截断），只把坐标核对改成“输入坐标和 `regular_grid(H, W)` 的差 ≤ 1e-12”。仿真用到的三种网格两种规则都能过。
-2. **分析（面积加权内积）。** X = P_in(Z)，c_0 = (256 / N_h) · W_hᵀ X，形状 [B, K, 64]。16×16 上就是 Wᵀ X。粗网格上 W_h 的秩可能小于 K（8×8 只有 64 个 token，而 K = 76），这个做法不需要求逆。
+2. **分析（面积加权内积）。** X = P_in(Z)，c_0 = (256 / N_h) · W_hᵀ X，形状 [B, K, 64]。16×16 上就是 Wᵀ X。粗网格上 W_h 的秩可能小于 K（8×8 只有 64 个 token，而 K = 103），这个做法不需要求逆。
 3. **动力学。** 64 个通道按 (2i, 2i+1) 分成 32 对。第 k 个模态第 i 对写成复数 z = c[..., 2i] + i·c[..., 2i+1]，λ_ki = −γ_ki + i·ω_ki，γ = softplus(raw_gamma) > 0。动作项 f = B·u ∈ R^{K×64}，同样配对成复数 φ。
 4. **按段精确积分。** 先 `validate_action_segments(controls, query_duration=duration)`。对每个样本按时间顺序取有效段 j，段长 Δ_j = max(0, min(end_j, T) − max(start_j, 0))，段内动作 u_j 为常数：
    z ← e^{λΔ_j} z + Δ_j · φ1(λΔ_j) · φ_j，其中 φ1(w) = (e^w − 1)/w。
@@ -174,12 +176,14 @@ K = 使 |参数量(K) − PO-JEPA 参数量| 最小的正整数，相等时取�
 
 | 场景 | m | PO-JEPA | K | Koopman | 相差 |
 |---|---|---|---|---|---|
-| 仿真 | 2 | 215,778 | 76 | 215,744 | 34（0.016%） |
-| DROID | 7 | 236,898 | 72 | 236,992 | 94（0.040%） |
+| 仿真 | 2 | 227,617 | 103 | 227,840 | 223（0.098%） |
+| DROID | 7 | 248,737 | 87 | 248,512 | 225（0.090%） |
 
-代码里按规则算 K，写进检查点的 `model_config`；`validate_registration` 对 koopman 核 K 等于对登记的 PO-JEPA 参数量按规则取的值、实际参数量等于公式。v7 的 `preregister()` 不改，`check-addon` 的报告里另记 K。测试断言仿真得 76、DROID 得 72。
+PO-JEPA 是 token 写法（v7 提交 0ac45fe 的 v7 协议，§1.1）；DROID 一行是手算（§1.2）。0ac45fe 之前的模态写法是 215,778 → K = 76（215,744）、236,898 → K = 72（236,992）。
 
-参数量的口径和 v7 相同，含 `p_out.bias` 的 1,408 个参数。PO-JEPA 和 Koopman 都是残差读出 P_out(a) − P_out(b)，偏置精确相消、梯度恒为 0，所以这 1,408 个参数从不训练；matched_transformer 的读出是 Z + P_out(·)，偏置会训练。按可训练参数算，PO-JEPA 比 Transformer 少 1,408 个（约 0.65%），对基线有利。
+代码里按规则算 K，写进检查点的 `model_config`；`validate_registration` 对 koopman 核 K 等于对登记的 PO-JEPA 参数量按规则取的值、实际参数量等于公式。v7 的 `preregister()` 不改，`check-addon` 的报告里另记 K。测试断言仿真得 103、DROID 得 87。
+
+参数量的口径和 v7 相同，含 `p_out.bias` 的 1,408 个参数。PO-JEPA 和 Koopman 都是残差读出 P_out(a) − P_out(b)，偏置精确相消、梯度恒为 0，所以这 1,408 个参数从不训练；matched_transformer 的读出是 Z + P_out(·)，偏置会训练。按可训练参数算，PO-JEPA 比 Transformer 少 1,408 个（约 0.62%），对基线有利。
 
 ### 5.7 检查点
 
