@@ -33,6 +33,11 @@ ADDON = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "
 KOOPMAN_MODES = 5   # E=3 时参数量 451 + 448K
 
 
+def numpy_state_equal(a, b):
+    """整份比较 numpy 的 MT19937 状态（键数组只每 624 个字才变，单比 [1] 测不出少恢复一次；S10b 审核 B）。"""
+    return a[0] == b[0] and np.array_equal(a[1], b[1]) and tuple(a[2:]) == tuple(b[2:])
+
+
 @pytest.fixture
 def v7(monkeypatch, tmp_path):
     """和 test_v7_protocol 的夹具相同：v7 协议、van_der_pol:2000、标定文件写在临时目录。"""
@@ -136,6 +141,7 @@ def test_run_py_accepts_new_conditions(tmp_path, monkeypatch, condition):
 
 @pytest.mark.parametrize("protocol", ["v6", "v7"])
 def test_build_condition_weights_and_initial_hashes(monkeypatch, request, protocol):
+    monkeypatch.delenv(checks.PROTOCOL_ENV, raising=False)   # v6 一支不受外部环境变量影响
     if protocol == "v7":
         request.getfixturevalue("v7")
     monkeypatch.setattr(calibration, "load_addon_weights",
@@ -178,8 +184,9 @@ def test_fixed_fourier_uses_token_forcing_under_v7(monkeypatch, v7):
     assert [n for n, _ in fourier.named_parameters()] == [n for n, _ in full.named_parameters()]
 
 
-def test_choose_architecture_uses_token_candidates(request):
+def test_choose_architecture_uses_token_candidates(monkeypatch, request):
     """S00t 审核 B M5：v6 协议下选 FFN 128（215,680），v7 协议下按 token 写法的候选选 FFN 224（228,064）。"""
+    monkeypatch.delenv(checks.PROTOCOL_ENV, raising=False)
     for protocol, feedforward, total in (("v6", 128, 215_680), ("v7", 224, 228_064)):
         if protocol == "v7":
             request.getfixturevalue("v7")
@@ -290,13 +297,13 @@ def test_generic_gradient_norms_hand_values_and_no_side_effects(one_thread):
     state = copy.deepcopy(model.state_dict())
     grads = [p.grad.clone() for p in model.parameters()]
     moments = copy.deepcopy(optimizer.state_dict())
-    rng = (random.getstate(), np.random.get_state()[1].copy(), torch.get_rng_state().clone())
+    rng = (random.getstate(), np.random.get_state(), torch.get_rng_state().clone())
     norms = calibration.generic_gradient_norms(model, batch, loss_config=config)
     assert list(norms) == ["jepa", "time", "space", "grad_jepa", "grad_time", "grad_space"]
     assert tensors_equal(state, model.state_dict())
     assert all(torch.equal(x, p.grad) for x, p in zip(grads, model.parameters()))
     torch.testing.assert_close(moments, optimizer.state_dict(), rtol=0, atol=0)
-    assert random.getstate() == rng[0] and np.array_equal(np.random.get_state()[1], rng[1])
+    assert random.getstate() == rng[0] and numpy_state_equal(np.random.get_state(), rng[1])
     assert torch.equal(rng[2], torch.get_rng_state())
     # 手算：同样的前向，各项单独 backward，再算全部参数梯度的 2-范数
     from po_jepa.generic_consistency import spatial_predictions, temporal_predictions
@@ -479,7 +486,7 @@ def test_twenty_updates_resume_and_readback(one_thread, monkeypatch, tmp_path, c
     assert attempted == list(range(10, 20)) and report["completed_updates"] == 20
     assert tensors_equal(reference.state_dict(), resumed.state_dict())
     torch.testing.assert_close(reference_optimizer.state_dict(), optimizer.state_dict(), rtol=0, atol=0)
-    assert random.getstate() == reference_rng[0] and np.array_equal(np.random.get_state()[1], reference_rng[1][1])
+    assert random.getstate() == reference_rng[0] and numpy_state_equal(np.random.get_state(), reference_rng[1])
     assert torch.equal(torch.get_rng_state(), reference_rng[2])
     assert w.cache.file_sha(tmp_path/"interrupted/FAILED.json") == failure_sha
     for step_index in (10, 20):   # 文件字节含临时文件名，不比 SHA；比读出的模型和优化器状态
@@ -778,6 +785,7 @@ def test_addon_calibration_reads_and_validates(addon_files):
         (dict(fixed_fourier=entry | dict(space_weight=float("inf"))), "^add-on calibration fixed_fourier.space_weight must be a finite positive number$"),
         (dict(fixed_fourier=entry | dict(time_weight="0.25")), "^add-on calibration fixed_fourier.time_weight must be a finite positive number$"),
         (dict(fixed_fourier=entry | dict(rho=.5)), "^add-on calibration rho differs from the protocol calibration.rho$"),
+        (dict(fixed_fourier=entry | dict(rho=True)), "^add-on calibration rho differs from the protocol calibration.rho$"),
         (dict(sigma_z_used=1.), "^add-on calibration sigma_z_used differs from the protocol sigma_z$"),
         (dict(v7_calibration_sha256="0"*64), "^add-on calibration was made against a different v7 calibration file$"),
     ]
@@ -877,3 +885,17 @@ def test_consumer_sources_register_new_files(v7, monkeypatch):
     training._provenance(dict(e06_case()[1].provenance, source_files_sha256=sources))
     monkeypatch.delenv(checks.PROTOCOL_ENV)
     assert not set(added) & set(comparison.consumer_sources())   # v6 协议下来源登记和原来相同
+
+
+@pytest.mark.parametrize("condition", ["po_jepa_time_only", "transformer_consistency"])
+def test_consistency_share_applies_warmup_scale(monkeypatch, condition):
+    """S10b 审核 B M10：share = 权重 × warmup_scale × grad_k / grad_jepa，warmup_scale < 1 时也对。"""
+    norms = dict(jepa=1., time=2., space=3., grad_jepa=4., grad_time=2., grad_space=1.)
+    monkeypatch.setattr(training, "consistency_gradient_norms", lambda model, batch, loss_config: dict(norms))
+    monkeypatch.setattr(calibration, "generic_gradient_norms", lambda model, batch, loss_config: dict(norms))
+    monkeypatch.setattr(training, "consistency_warmup_scale", lambda loss_config, completed: .25)
+    interval = checks.load_protocol()["monitoring"]["consistency_interval"]
+    loss_config = Namespace(time_weight=.5, space_weight=8.)
+    result = conditions.consistency_share(condition, None, None, loss_config, interval)
+    assert result["warmup_scale"] == .25
+    assert result["share"] == dict(time=.5*.25*2./4., space=8.*.25*1./4.)

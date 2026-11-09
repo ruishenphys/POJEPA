@@ -56,9 +56,9 @@ def load_addon_weights(condition: str) -> dict:
             raise ValueError(f"add-on calibration {condition}.{name} must be a finite positive number")
         weights[name] = float(weight)
     protocol = check.load_protocol()
-    if entry["rho"] != protocol["calibration"]["rho"]:
+    if type(entry["rho"]) is bool or entry["rho"] != protocol["calibration"]["rho"]:
         raise ValueError("add-on calibration rho differs from the protocol calibration.rho")
-    if value["sigma_z_used"] != protocol["model"]["graph"]["sigma_z"]:
+    if type(value["sigma_z_used"]) is bool or value["sigma_z_used"] != protocol["model"]["graph"]["sigma_z"]:
         raise ValueError("add-on calibration sigma_z_used differs from the protocol sigma_z")
     v7 = check.v7_calibration_path()
     if not v7.exists() or value["v7_calibration_sha256"] != data.cache.file_sha(v7):
