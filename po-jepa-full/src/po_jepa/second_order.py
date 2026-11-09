@@ -1,28 +1,30 @@
 """v8 二阶场景（S23a，第 4 阶段前一段）：pendulum、bouncing_balls、wave、cart_pole、spring_chain。纯函数：物理真值 + 渲染。
 
-规划见项目文件夹 po-jepa-v8-plan §1.3、§1.4；说明和验收单 docs/segments/S23a.md。已有 .py 一个字节都没动，没有已有模块
-导入本文件；登记（datasets.SYSTEMS、variants.PARAMS、systems.REGISTRY、调节项接线）是 S23b 的事，照 S20b 的做法。
+规划见项目文件夹 po-jepa-v8-plan §1.3、§1.4；说明和验收单 docs/segments/S23a.md。S23b 登记（docs/segments/S23b.md）：
+datasets.SYSTEMS 末尾追加五个名字，物理参数并入 variants.PARAMS，systems.SecondOrderSystem 接调节项、下达动作和执行动作；
+systems 在方法里才导入本文件（本文件导入 systems）。
 
 共同约定：
-- 控制周期 0.25 s，32 个控制 tick；输入 u 是“执行”动作 [32,2] float64（已含增益、延迟、执行噪声；S23b 接 applied_ticks）。
+- 控制周期 0.25 s，32 个控制 tick；输入 u 是“执行”动作 [32,2] float64（已含增益、延迟、执行噪声、饱和；由 systems.applied_ticks 给出）。
 - 两帧输入（v8 规划 §1.4、S22 探针）：二阶系统一帧看不到速度，所以每条轨迹多仿真、多画一帧 t = −1，共 34 帧，
   下标 f 对应 tick f − 1。初值在 t = −1 抽（随机流 0），t = −1 → 0 是零动作的“预跑”一个 tick（和 delay 调节项在 t = 0 之前
   补零的约定一致），之后第 t 个 tick 执行 u[t]。数据集的 33 帧是下标 1…33，和一阶场景一样；第 0 帧只给 pair 编码当前一帧。
   t = −1 和 t = 0 两帧（及之后任意相邻两帧）合起来决定未来（位置在画面上，速度由两帧之差给出）。
 - 画面 256×256×3 uint8，世界坐标 y 向上，中心列 = 128 + SCALE·x，中心行 = 128 − SCALE·y。
-- 随机流：熵 [1703, 1000+SYSTEM_INDEX[name], 轨迹编号, 流号]。SYSTEM_INDEX 是 S23b 把五个名字按这里的顺序追加到
-  datasets.SYSTEMS 末尾（gray_scott 5、push 6 之后）后的位置 7…11，登记后 simulation.seed_entropy 给出同一个熵。
+- 随机流：熵 [1703, 1000+SYSTEM_INDEX[name], 轨迹编号, 流号]。SYSTEM_INDEX 是五个名字按这里的顺序追加到
+  datasets.SYSTEMS 末尾（gray_scott 5、push 6 之后）的位置 7…11（S23b 已登记），simulation.seed_entropy 给出同一个熵。
   流 0 = 初值，3 = 静止干扰光点，4 = 像素噪声，7 = 遮挡块，8 = 会动的干扰光点（与 systems.compose 一致）。
   像素噪声一次抽 34 帧（[34,256,256,3]），第 f 帧用第 f 份；只画部分帧时按 tick 取同一份（续算、规划用）。
 - 续算：advance(q, u, params, start, ticks) 从 tick=start 的状态推进；trajectory() = 初值 + 预跑 + advance(0, 32)，
   所以从整条轨迹的第 start 个 tick 续算与整条轨迹逐位相同（反事实探针、规划用）。
-- 物理参数：名字 → (默认值, 允许范围)，S23b 并入 variants.PARAMS（之后这里改成从那里取，和 new_systems 一样）。
+- 物理参数：名字 → (默认值, 允许范围)，唯一来源是 variants.PARAMS（S23b 并入，和 new_systems 一样）。
 """
 import math
 
 import numpy as np
 from scipy.linalg import expm
 
+from . import variants
 from .systems import COLORS, DISTRACTOR_COLOR, SIZE, _texture, blend_spots, mover_centers, occlude
 
 TICKS = 32
@@ -30,13 +32,8 @@ PERIOD = .25
 FRAMES = TICKS+2                   # 帧 0…33 = tick −1…32
 SYSTEM_INDEX = {"pendulum": 7, "bouncing_balls": 8, "wave": 9, "cart_pole": 10, "spring_chain": 11}
 
-PARAMS = {
-    "pendulum": {"g_over_l": (9.81, (4., 16.)), "damping": (.2, (0., 1.))},
-    "bouncing_balls": {"n": (3, (1, 5)), "restitution": (.9, (.5, 1.)), "drag": (.2, (0., 1.))},
-    "wave": {"speed": (.15, (.08, .3)), "damping": (.1, (0., .5)), "load": (.25, (0., .4))},
-    "cart_pole": {"length": (1., (.6, 1.4)), "mass_ratio": (.3, (.1, 1.)), "friction": (.5, (0., 1.))},
-    "spring_chain": {"n": (4, (2, 6)), "stiffness": (16., (9., 25.)), "damping": (.1, (0., .5))},
-}
+# S23b：物理参数的唯一来源是 variants.PARAMS（同一个对象，数值与 S23a 相同）
+PARAMS = {name: variants.PARAMS[name] for name in SYSTEM_INDEX}
 # 光点类场景的其他光点颜色（第 0 个受控物体用调节项颜色）：青、品红、黄、绿、紫
 OTHER_COLORS = np.array([[60., 190., 220.], [210., 80., 180.], [240., 220., 60.], [120., 220., 120.], [160., 120., 240.]])
 ROD_COLOR = np.array([110., 112., 120.])           # 摆杆、弹簧、轨道（与 S22 探针的摆杆同色）

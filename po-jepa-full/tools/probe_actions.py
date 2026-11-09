@@ -110,11 +110,14 @@ def main():
     import numpy as np
     import torch
     from torch.nn import functional as F
-    from po_jepa import datasets, simulation, systems
+    from po_jepa import datasets, simulation, systems, variants
     from po_jepa.runtime import cache
     import encode_v7
 
     spec = datasets.active(); system = systems.get(); device = torch.device(a.device)
+    if spec.system in variants.SECOND_ORDER:
+        # S23b 只登记了数据生成；二阶场景的 *_px 距离、两帧编码怎么接要等 S22 探针结果和第 6 阶段，不静默按粒子类处理
+        raise SystemExit(f"{spec.system} 是二阶场景，动作探针还没接（S23b 只登记数据生成）")
     if a.fake_encoder:
         encoder = encode_v7._fake_encoder(torch)
     else:

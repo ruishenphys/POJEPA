@@ -58,7 +58,10 @@ def test_where_each_new_knob_applies():
     cov = variants.coverage()
     every = datasets.SYSTEMS
     assert cov["saturation"] == every and cov["occluders"] == every
-    assert cov["movers"] == ("double_well", "van_der_pol", "multi_particle", "landscape", "push") == cov["distractors"]
+    # S23b 的二阶场景：光点类（pendulum、bouncing_balls、cart_pole、spring_chain）接受干扰光点，wave 是场；policy、
+    # process_noise 都不接受（tests/test_s23b_register.py 核原因）
+    assert cov["movers"] == ("double_well", "van_der_pol", "multi_particle", "landscape", "push",
+                             "pendulum", "bouncing_balls", "cart_pole", "spring_chain") == cov["distractors"]
     assert cov["policy"] == ("double_well", "van_der_pol", "multi_particle", "landscape", "push")
     assert cov["process_noise"] == ("double_well", "van_der_pol", "multi_particle", "landscape")
     for system, knob in (("advection_diffusion", "movers=1"), ("gray_scott", "movers=1"), ("gray_scott", "policy=goal"),
@@ -77,7 +80,7 @@ def test_dataset_md_coverage_table_is_generated_from_code():
     tool = importlib.util.module_from_spec(spec); spec.loader.exec_module(tool)
     text = (ROOT/"DATASET.md").read_text(encoding="utf-8")
     assert tool.render(text) == text, "运行 python tools/knob_coverage.py --write"
-    assert "| 观察 | `movers` | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | 5 |" in text
+    assert "| 观察 | `movers` | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | 9 |" in text
 
 
 # —— saturation ——

@@ -18,6 +18,7 @@
 
 模型看到的始终是“下达的”动作；执行噪声、延迟和饱和只作用在物理里（模型看不到），用来测鲁棒性。
 除 occluders（被遮住时状态看不到，有意做成部分可观测）外，所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
+S23b 的五个二阶场景（SECOND_ORDER）本身不是一阶：画面只给位置，速度要由相邻两帧给出；调节项不改变这一点。
 随机流：调节项不改变初始状态和动作抽样的随机种子（除非调节项本身改的是动作抽样：axes、segments、zero、policy），
 因此同一编号的轨迹在不同调节项下可以配对比较。流号：0 初值、1 动作、2 预处理、3 静止干扰光点、4 像素噪声、
 5 执行噪声；S21a 新增 6 过程噪声、7 遮挡块、8 会动的干扰光点、9 采集策略（目标点、探索噪声、mixed 的选择）。
@@ -35,6 +36,12 @@ PARAMS = {
     # S20b：v8 新场景（物理与渲染在 po_jepa.new_systems，那里的 PARAMS 就是这两项；范围的依据见 docs/segments/S20a.md §2）
     "gray_scott": {"feed": (.04, (.035, .05)), "kill": (.06, (.0595, .063)), "inject": (.05, (0., .2))},
     "push": {"mu_s": (.3, (0., 1.)), "slope": (0., (0., .6)), "slope_dir": (0., (-180., 180.)), "size": (.8, (.4, 1.2))},
+    # S23b：二阶场景（物理与渲染在 po_jepa.second_order，那里的 PARAMS 就是这五项；范围的依据见 docs/segments/S23a.md §3）
+    "pendulum": {"g_over_l": (9.81, (4., 16.)), "damping": (.2, (0., 1.))},
+    "bouncing_balls": {"n": (3, (1, 5)), "restitution": (.9, (.5, 1.)), "drag": (.2, (0., 1.))},
+    "wave": {"speed": (.15, (.08, .3)), "damping": (.1, (0., .5)), "load": (.25, (0., .4))},
+    "cart_pole": {"length": (1., (.6, 1.4)), "mass_ratio": (.3, (.1, 1.)), "friction": (.5, (0., 1.))},
+    "spring_chain": {"n": (4, (2, 6)), "stiffness": (16., (9., 25.)), "damping": (.1, (0., .5))},
 }
 SHAPES = ("multi_well", "ring", "periodic", "obstacles")
 COLORS = {"orange": (230., 150., 50.), "white": (235., 235., 235.), "green": (80., 200., 90.), "blue": (70., 120., 235.)}
@@ -42,8 +49,11 @@ BACKGROUNDS = ("grid", "plain", "checker", "noise")
 SEGMENT_SETS = {"148": (1, 4, 8), "1": (1,), "2": (2,), "4": (4,), "8": (8,)}
 POLICIES = ("random", "goal", "mixed")
 # S21a：只对 ODE 粒子类场景（状态是 RK4 积分的向量、受控点是状态前两维）成立的调节项不适用的场景
-FIELD_SYSTEMS = ("advection_diffusion", "gray_scott")           # 场方程：没有光点
-NOT_ODE = FIELD_SYSTEMS+("push",)                               # 不走 System.variant_trajectory 的 RK4（过程噪声）
+FIELD_SYSTEMS = ("advection_diffusion", "gray_scott", "wave")   # 场方程：没有光点（wave 是 S23b 加的）
+# S23b：二阶场景（一帧看不到速度；数据集仍是 33 帧，34 帧见 systems.SecondOrderSystem.frames_with_prev）
+SECOND_ORDER = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
+NOT_ODE = ("advection_diffusion", "gray_scott", "push")+SECOND_ORDER   # 不走 System.variant_trajectory 的 RK4（过程噪声）
+NO_SIGMA = ("bouncing_balls",)                                  # S23b：有光点但不是高斯光点（有物理半径的圆盘），sigma 不适用
 
 
 @dataclass(frozen=True)
@@ -164,6 +174,14 @@ def validate(system: str, v: Variant) -> None:
         raise ValueError(f"{system} 的动作是整场的流速或注入点速度，没有要推向目标的受控点：policy 只能是 random")
     if system in NOT_ODE and v.process_noise:
         raise ValueError(f"{system} 不是 RK4 积分的粒子类 ODE：process_noise 不适用")
+    if system in NO_SIGMA and v.sigma is not None:
+        raise ValueError(f"{system} 的球是有物理半径的圆盘，不是高斯光点：sigma 不适用")
+    if system in SECOND_ORDER and v.policy != "random":
+        # S21a 的 goal 策略按“下达动作 ∝ 受控点速度”做开环推算（System.policy_anchor 的 K）；二阶场景的动作是力，
+        # 这个推算不成立（wave 的激振源是速度控制，但它和 gray_scott 的注入点一样没有要推到目标的受控点）
+        raise ValueError(f"{system} 是二阶场景，动作是力：S21a 的开环朝目标推算不适用，policy 只能是 random")
+    if system == "cart_pole" and v.axes == "y":
+        raise ValueError("cart_pole 只受水平推力（u_y 不起作用）：axes=y 等于没有控制")
 
 
 # S21a 覆盖表：每个通用调节项取一个非默认的代表值，按 validate 判定在哪些场景可用（DATASET.md 的覆盖表由它生成）

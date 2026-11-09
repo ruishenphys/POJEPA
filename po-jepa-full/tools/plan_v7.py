@@ -126,6 +126,9 @@ def main():
     device = torch.device(a.device)
     condition = job["condition"]
     base = datasets.active()
+    if base.system in variants.SECOND_ORDER:
+        # S23b 只登记了数据生成；二阶场景的规划摘要、目标和两帧编码要等 S22 探针结果和第 6 阶段，不静默按粒子类处理
+        raise SystemExit(f"{base.system} 是二阶场景，规划还没接（S23b 只登记数据生成）")
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":

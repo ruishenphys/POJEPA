@@ -76,8 +76,9 @@ PROTOCOLS = (
 
 
 def _combined(system, level):
-    """P13 组合：P1 + P4 + P8 的同一档叠在一起（物理 × 执行 × 观察）。"""
-    parts = [p.levels[system].get(level) for p in PROTOCOLS if p.id in ("P1", "P4", "P8")]
+    """P13 组合：P1 + P4 + P8 的同一档叠在一起（物理 × 执行 × 观察）。P1 没有给档位的场景（S23b 的二阶场景，还不在
+    SCENES 里）没有 P13。"""
+    parts = [p.levels.get(system, {}).get(level) for p in PROTOCOLS if p.id in ("P1", "P4", "P8")]
     return None if None in parts else ",".join(parts)
 
 

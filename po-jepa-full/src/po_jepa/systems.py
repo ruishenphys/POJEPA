@@ -10,6 +10,9 @@
 - advection_diffusion：周期域上的染料浓度场，动作是均匀流速；按傅里叶模精确求解（分段常数控制下无积分误差）。
 - landscape：势能地形族（只有可调实现）。
 - gray_scott、push（S20b 登记，v8 新场景）：反应扩散、准静态推方块，物理与渲染在 po_jepa.new_systems。
+- pendulum、bouncing_balls、wave、cart_pole、spring_chain（S23b 登记，v8 二阶场景）：物理与渲染在 po_jepa.second_order。
+  它们不是一阶系统（一帧看不到速度）：frames() 仍给数据集的 33 帧（tick 0…32），frames_with_prev() 多给 t = −1 一帧，
+  留给两帧（pair）编码，见 SecondOrderSystem。
 
 隐藏状态只用于生成画面和诊断，不进入模型。
 """
@@ -600,10 +603,14 @@ class NewSystem(System):
             raise ValueError(f"{self.name} 需要当前数据集是 {self.name}，现在是 {spec.system}")
         if v is not None and v != spec.knobs:
             raise ValueError(f"{self.name}：传入的调节项与当前数据集 {spec.tag} 的不一致")
-        from . import new_systems
         v = spec.knobs
         c = commanded_controls(trajectory_id) if controls is None else controls
-        return new_systems.SYSTEMS[self.name], applied_ticks(trajectory_id, v, c), v
+        return self._module().SYSTEMS[self.name], applied_ticks(trajectory_id, v, c), v
+
+    def _module(self):
+        """物理与渲染所在的模块（S23b：SecondOrderSystem 换成 second_order）。"""
+        from . import new_systems
+        return new_systems
 
     def frames(self, trajectory_id):
         impl, u, v = self._impl(trajectory_id)
@@ -696,6 +703,72 @@ class PushSystem(NewSystem):
         return c0.copy(), b0+self.PUSH_THROUGH*d/np.linalg.norm(d), impl.SPEED
 
 
+class SecondOrderSystem(NewSystem):
+    """S23b：二阶场景的登记（物理与渲染在 po_jepa.second_order，S23a）。接线与 NewSystem 相同（_impl：当前数据集的
+    调节项、下达动作 commanded_controls、执行动作 applied_ticks），区别在帧数：
+
+    second_order 每条轨迹仿真、画 34 帧，下标 f = tick f−1（t = −1 抽初值、零动作预跑一个 tick 到 t = 0）。
+    - frames()：数据集的 33 帧 = 下标 1…33（tick 0…32），与一阶场景同一约定，encode_v7、缓存、训练照旧；
+    - frames_with_prev()：全部 34 帧，给两帧（pair）编码用（tick 0 那一帧的前一帧是下标 0）。编码怎么用它等 S22 探针结果。
+    续算接口与 GrayScottSystem 相同：variant_trajectory 返回可续算的完整状态（wave 是整场），hidden() 换成 frames() 的
+    隐藏状态，draw() 按 tick（0…32；−1 也可以）画，与整条轨迹的那一帧逐位相同。
+    """
+
+    def _module(self):
+        from . import second_order
+        return second_order
+
+    def frames_with_prev(self, trajectory_id):
+        """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1。"""
+        impl, u, v = self._impl(trajectory_id)
+        return impl.frames(trajectory_id, u, dict(v.params), v)
+
+    def frames(self, trajectory_id):
+        """→ (隐藏状态 [33, d], 画面 [33,256,256,3] uint8)，tick 0…32（= frames_with_prev 的下标 1…33）。"""
+        states, frames = self.frames_with_prev(trajectory_id)
+        return states[1:], frames[1:]
+
+    def reference_trajectory(self, trajectory_id, *, steps_per_tick=None):
+        """隐藏状态 [33, d]（tick 0…32）。steps_per_tick：每个 tick 的子步数，None = 生产值（pendulum 50、cart_pole 100、
+        bouncing_balls 32、wave 16，预跑的那个 tick 也用它）；spring_chain 用矩阵指数精确推进、没有子步，给了就报错。"""
+        impl, u, v = self._impl(trajectory_id)
+        kw = {}
+        if steps_per_tick is not None:
+            if self.name == "spring_chain":
+                raise ValueError("spring_chain 按矩阵指数精确推进，没有子步：steps_per_tick 不适用")
+            if type(steps_per_tick) is not int or steps_per_tick < 1:
+                raise ValueError("steps_per_tick 必须是正整数")
+            kw["substeps"] = steps_per_tick
+        params = dict(v.params)
+        return impl.hidden(impl.trajectory(trajectory_id, u, params, **kw)[1:], params)
+
+    def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
+        impl, u, v = self._impl(trajectory_id, v, controls)
+        ticks = self._window(start, state, ticks); params = dict(v.params)
+        if state is None:
+            state = impl.start(trajectory_id, params)[1]      # tick 0：初值 + 零动作预跑，与 trajectory() 相同
+            impl.check(state, params)
+        return impl.advance(state, u, params, start, ticks)
+
+    def hidden(self, states):
+        impl = self._module().SYSTEMS[self.name]
+        return impl.hidden(states, dict(datasets.active().knobs.params))
+
+    def draw(self, states, trajectory_id, v, ticks=None):
+        """ticks：每帧的 tick。不给时 states 必须是整条 33 帧（tick 0…32）；second_order 的约定是不给 ticks 就当 34 帧
+        （tick −1…32），所以这里必须显式换成 0…32，否则 33 帧会被当成错位一帧。"""
+        if v != datasets.active().knobs:
+            raise ValueError(f"{self.name}：传入的调节项与当前数据集 {datasets.active().tag} 的不一致")
+        if ticks is None:
+            if len(states) != TICKS+1:
+                raise ValueError("只画部分帧时要传 ticks")
+            ticks = np.arange(TICKS+1)
+        return self._module().SYSTEMS[self.name].draw(states, trajectory_id, dict(v.params), v, ticks)
+
+    def policy_anchor(self, trajectory_id, v, g):
+        raise ValueError(f"{self.name} 是二阶场景：policy 只能是 random（见 variants.validate）")
+
+
 REGISTRY = {
     "double_well": DoubleWell("double_well", 2, "v6 过阻尼双势阱"),
     "van_der_pol": VanDerPol("van_der_pol", 2, "Van der Pol 极限环（相平面）"),
@@ -704,6 +777,12 @@ REGISTRY = {
     "landscape": Landscape("landscape", 2, "势能地形族（多势阱、环形槽、周期势、障碍物）"),
     "gray_scott": GrayScottSystem("gray_scott", 514, "Gray–Scott 反应扩散，动作移动注入点"),
     "push": PushSystem("push", 5, "准静态推方块（静摩擦阈值、坡面）"),
+    # S23b：二阶场景；state_dim 是默认参数下的（bouncing_balls、spring_chain 随 n 变，与 multi_particle 相同）
+    "pendulum": SecondOrderSystem("pendulum", 2, "阻尼单摆，二维力取切向分量"),
+    "bouncing_balls": SecondOrderSystem("bouncing_balls", 12, "方盒弹球（碰撞、恢复系数、阻力）"),
+    "wave": SecondOrderSystem("wave", 514, "周期域阻尼波动方程，动作移动压膜激振源"),
+    "cart_pole": SecondOrderSystem("cart_pole", 4, "小车倒立摆（只推水平方向，欠驱动）"),
+    "spring_chain": SecondOrderSystem("spring_chain", 16, "两端固定的线性弹簧链，动作推第 0 个质点"),
 }
 assert set(REGISTRY) == set(datasets.SYSTEMS)
 

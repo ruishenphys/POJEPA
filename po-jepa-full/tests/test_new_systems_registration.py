@@ -39,7 +39,7 @@ def ticks(controls):
 # —— 登记顺序、随机流 ——
 
 def test_new_systems_are_appended_after_the_v7_systems(use):
-    assert datasets.SYSTEMS == V7_SYSTEMS+("gray_scott", "push")
+    assert datasets.SYSTEMS[:7] == V7_SYSTEMS+("gray_scott", "push")     # S23b 在后面追加了二阶场景
     assert set(systems.REGISTRY) == set(datasets.SYSTEMS) == set(variants.PARAMS)
     for name, index in new_systems.SYSTEM_INDEX.items():
         assert datasets.SYSTEMS.index(name) == index

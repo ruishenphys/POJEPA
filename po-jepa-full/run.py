@@ -19,7 +19,7 @@ def main(argv=None):
     parser.add_argument('--training-run',type=Path)
     parser.add_argument('--resume-from',type=Path)
     parser.add_argument('--seed',type=int,choices=(1703,1704,1705),default=1703,help='预登记种子；calibrate 只用 1703')
-    parser.add_argument('--system',required=True,choices=('double_well','van_der_pol','multi_particle','advection_diffusion','landscape','gray_scott','push'),
+    parser.add_argument('--system',required=True,choices=('double_well','van_der_pol','multi_particle','advection_diffusion','landscape','gray_scott','push','pendulum','bouncing_balls','wave','cart_pole','spring_chain'),
                         help='v7：物理系统')
     parser.add_argument('--variant',default='',help='v7 可调数据集的调节项，例如 gain=2,axes=x；须与编码时相同（见 src/po_jepa/variants.py）')
     parser.add_argument('--trajectories',type=int,required=True,choices=(200,500,2000),help='v7：轨迹总条数（划分 80/10/10）')
