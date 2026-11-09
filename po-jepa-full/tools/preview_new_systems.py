@@ -23,7 +23,7 @@ def controls(seed):
 
 
 ROWS = {
-    "gray_scott": [(0, {}), (1, {"feed": .03, "kill": .06}), (2, {"feed": .05, "kill": .063})],
+    "gray_scott": [(0, {}), (1, {"feed": .035, "kill": .06}), (2, {"feed": .05, "kill": .063})],
     "push": [(0, {}), (3, {"mu_s": .1}), (5, {"slope": .5, "slope_dir": 45.})],
 }
 

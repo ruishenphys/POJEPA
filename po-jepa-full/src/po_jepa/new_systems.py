@@ -24,7 +24,7 @@ SYSTEM_INDEX = {"gray_scott": 5, "push": 6}
 
 # 场景物理参数：名字 → (默认值, 允许范围)，格式同 variants.PARAMS（S20b 并进去）
 PARAMS = {
-    "gray_scott": {"feed": (.04, (.03, .05)), "kill": (.06, (.0595, .063)), "inject": (.05, (0., .2))},
+    "gray_scott": {"feed": (.04, (.035, .05)), "kill": (.06, (.0595, .063)), "inject": (.05, (0., .2))},
     "push": {"mu_s": (.3, (0., 1.)), "slope": (0., (0., .6)), "slope_dir": (0., (-180., 180.)), "size": (.8, (.4, 1.2))},
 }
 
@@ -69,8 +69,9 @@ class GrayScott:
     初值：U=1、V=0，4 个 10×10 格的方块 U=0.5、V=0.25，加 ±0.01 均匀噪声（流 0）；注入点 p0 均匀；
     然后注入点不动烧入 BURN_IN=1000 个时间单位，让斑图成形，烧入后的状态是第 0 帧。
     时间推进：Strang 分裂，扩散半步（傅里叶精确）→ 反应 RK4 一整步（注入点取步中点位置）→ 扩散半步，DT=0.5。
-    画面：V 用调节项颜色（权重 clip(V/0.4)），1−U 用固定青色（权重 0.5·clip((1−U)/0.7)），
-    注入点画成品红色细圆环（半径 5 像素），这样 U、V、p 都在画面里。
+    画面：像素 = 背景 + 0.6·V·(调节项颜色 − 背景) + 0.4·(1−U)·(青色 − 背景)，线性不饱和，(U, V) 可从 RGB 解回；
+    注入点画成品红色细圆环（半径 5 像素），这样 U、V、p 都在画面里（圆环下约 60 个像素被盖住）。
+    谱方法有约 1e−5 的负浓度下冲（不 clamp 物理场，只在画面上 clip）。
     隐藏状态（只供诊断）：U、V 各 8×8 平均池化成 16×16，展平后接 p，共 514 维。
     """
     name = "gray_scott"
@@ -85,6 +86,7 @@ class GrayScott:
     SEEDS = 4
     COLOR_U = np.array([70., 200., 190.])
     COLOR_MARK = np.array([230., 70., 200.])
+    MIX_V, MIX_U = .6, .4
 
     def initial(self, trajectory_id):
         g = rng(self.name, trajectory_id, 0)
@@ -150,9 +152,11 @@ class GrayScott:
     def draw(self, U, V, p, trajectory_id, v):
         rep = SIZE//self.N
         up = lambda X: np.repeat(np.repeat(X, rep, axis=1), rep, axis=2)
-        wv = np.clip(up(V)/.4, 0., 1.)[..., None]; wu = .5*np.clip((1.-up(U))/.7, 0., 1.)[..., None]
+        # 线性、不饱和：V 和 1−U 在物理域 [0,1] 内各占一个不平行的颜色方向，叠加后最大约 221 < 255，
+        # 所以 (U, V) 能从 RGB 解回（只差 8 位量化）。clip 只挡谱方法约 1e−5 的数值下冲。
+        wv = np.clip(up(V), 0., 1.)[..., None]; wu = np.clip(1.-up(U), 0., 1.)[..., None]
         bg = _texture(v.background)[None]
-        image = bg+(np.array(COLORS[v.color])-bg)*wv+(self.COLOR_U-bg)*wu
+        image = bg+self.MIX_V*(np.array(COLORS[v.color])-bg)*wv+self.MIX_U*(self.COLOR_U-bg)*wu
         x = np.arange(SIZE)+.5
         dc = (x[None, :]-SIZE*p[:, 0, None]+SIZE/2) % SIZE-SIZE/2            # [L,256]
         dr = (x[None, :]-SIZE*(1.-p[:, 1, None])+SIZE/2) % SIZE-SIZE/2
@@ -172,7 +176,8 @@ class GrayScott:
 # ———————————————————————————— push ————————————————————————————
 
 class Push:
-    """准静态平面推方块（一阶，刚体接触 + 库仑静摩擦阈值），“停手即停”。
+    """准静态平面推方块（一阶，刚体接触 + 库仑静摩擦阈值）。无惯性：净外力落入静摩擦阈值内方块就静止；
+    停止推动后接触力按 1/(STIFF·迁移率) ≈ 3 ms 的时间常数松弛，方块在这段内还会滑约 1e−3，之后静止（坡面自滑除外）。
 
     状态 q = (c_x, c_y, b_x, b_y, θ)：推杆中心 c、方块中心 b 与朝向 θ（不回绕）。全部过阻尼：
     - 推杆：dc/dt = SPEED·u − f/ETA_P + 墙；推杆是半径 RP 的圆盘，被方块顶住时会停（推力有限）。

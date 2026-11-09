@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from po_jepa import datasets, new_systems
+from po_jepa.systems import COLORS, _texture
 from po_jepa.variants import Variant
 
 GS = new_systems.SYSTEMS["gray_scott"]
@@ -20,9 +21,15 @@ def controls(seed):
 
 
 @pytest.fixture(scope="module")
-def gs_run():
+def gs_fields():
     u = controls(0)
-    return u, GS.frames(3, u, {}, Variant())
+    return u, GS.fields(3, u, {})
+
+
+@pytest.fixture(scope="module")
+def gs_run(gs_fields):
+    u, (U, V, p) = gs_fields
+    return u, (GS.states(U, V, p), GS.draw(U, V, p, 3, Variant()))
 
 
 # —— 随机流与参数 ——
@@ -38,7 +45,7 @@ def test_random_streams_follow_the_v7_scheme_after_registration():
 
 def test_params_defaults_and_ranges():
     assert new_systems.param("push", {}, "mu_s") == .3
-    for system, name, bad in (("gray_scott", "feed", .02), ("gray_scott", "kill", .07), ("push", "slope", .7),
+    for system, name, bad in (("gray_scott", "feed", .03), ("gray_scott", "kill", .07), ("push", "slope", .7),
                               ("push", "size", float("nan"))):
         with pytest.raises(ValueError):
             new_systems.param(system, {name: bad}, name)
@@ -92,10 +99,53 @@ def test_gray_scott_injection_point_follows_controls(gs_run):
     assert np.abs(pix-GS.COLOR_MARK).max() < 60
 
 
-def test_gray_scott_fields_stay_physical(gs_run):
-    _, (s, _) = gs_run
-    U, V = s[:, :256], s[:, 256:512]
-    assert U.min() > -1e-6 and U.max() < 1+1e-6 and V.min() > -1e-6 and V.max() < 1.
+def test_gray_scott_fields_stay_physical(gs_fields):
+    _, (U, V, _) = gs_fields                                           # 原始场，不池化
+    assert np.isfinite(U).all() and np.isfinite(V).all()
+    assert U.min() > -1e-4 and U.max() < 1+1e-4 and V.min() > -1e-4 and V.max() < 1+1e-4   # 谱法下冲约 1e−5
+    assert V.max() > .4 and U.min() < .3                               # 高 V、低 U 确实出现（渲染测试要覆盖到）
+
+
+def test_gray_scott_diffusion_matches_fourier_decay():
+    """无反应（F=k=a=0）时 U−1 与 V 的余弦模按 exp(−D·(2πm/N)²·t) 衰减，D 用说明里的数值 0.16、0.08（不读类常量）。"""
+    N = GS.N; x = np.arange(N); t = 20.
+    for m, axis in ((3, 0), (7, 1)):
+        mode = np.cos(2*np.pi*m*x/N); mode = mode[:, None]*np.ones(N) if axis == 0 else np.ones(N)[:, None]*mode
+        U0 = 1.+.1*mode
+        U, V, _ = GS._run(U0, np.zeros((N, N)), np.array([.5, .5]), np.zeros(2), t, .5, 0., 0., 0.)
+        assert np.abs(U-1.-.1*mode*np.exp(-.16*(2*np.pi*m/N)**2*t)).max() < 1e-12
+        U, V, _ = GS._run(np.zeros((N, N)), .1*(1+mode), np.array([.5, .5]), np.zeros(2), t, .5, 0., 0., 0.)
+        assert np.abs(V-.1*(1+mode*np.exp(-.08*(2*np.pi*m/N)**2*t))).max() < 1e-12
+
+
+def test_gray_scott_render_is_invertible_and_unsaturated(gs_fields):
+    """线性渲染：(U, V) 能从 RGB 解回；大幅改变 V 或 U 一定改变画面；任何颜色/背景都不触到 255。"""
+    _, (U, V, p) = gs_fields
+    t = 0
+    f = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, Variant(background="plain")).astype(float)[0]
+    bg = _texture("plain")
+    A = np.stack((GS.MIX_V*(np.array(COLORS["orange"])-bg[0, 0]), GS.MIX_U*(GS.COLOR_U-bg[0, 0])), 1)   # [3,2]
+    w, *_ = np.linalg.lstsq(A, (f-bg).reshape(-1, 3).T, rcond=None)
+    rep = 256//GS.N; up = lambda X: np.repeat(np.repeat(X, rep, 0), rep, 1).ravel()
+    ring = GS.draw(np.ones((1, GS.N, GS.N)), np.zeros((1, GS.N, GS.N)), p[t:t+1], 3, Variant(background="plain"))[0]
+    free = (np.abs(ring.astype(float)-bg).max(-1) < 1).ravel()        # 去掉注入点圆环盖住的像素
+    assert np.abs(w[0]-up(V[t]))[free].max() < .02 and np.abs(w[1]-(1-up(U[t])))[free].max() < .02
+    V2 = V[t].copy(); r, c = np.unravel_index(np.argmax(V2), V2.shape); V2[r, c] += .1
+    U2 = U[t].copy(); r2, c2 = np.unravel_index(np.argmin(U2), U2.shape); U2[r2, c2] -= .1
+    for color in COLORS:
+        for background in ("grid", "plain", "checker", "noise"):
+            v = Variant(color=color, background=background)
+            f0 = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, v)
+            assert f0.max() < 255
+            assert not np.array_equal(f0, GS.draw(U[t:t+1], V2[None], p[t:t+1], 3, v))
+            assert not np.array_equal(f0, GS.draw(U2[None], V[t:t+1], p[t:t+1], 3, v))
+
+
+@pytest.mark.parametrize("params", [{"feed": .035, "kill": .063, "inject": 0.}, {"feed": .05, "kill": .0595, "inject": 0.}])
+def test_gray_scott_range_corners_keep_patterns(params):
+    """允许范围的两个危险角（低 F 高 k 会熄灭、高 F 低 k 会变均匀），无注入时斑图仍在且在变。"""
+    U, V, _ = GS.fields(11, controls(11), params)
+    assert V[0].std() > .03 and V[-1].std() > .03 and np.abs(V[-1]-V[16]).mean() > 1e-3
 
 
 def test_gray_scott_observation_knobs_keep_states_and_reject_spots(gs_run):
@@ -138,6 +188,26 @@ def test_push_slope_slides_without_action():
     assert abs(v[0]) < 1e-12 and abs(v[1]-(.5-.3*math.sqrt(1-.25))) < 1e-9
     s = PU.trajectory(0, np.zeros((32, 2)), {"slope": .2}, state=far)   # 0.2 < μ_s·√(1−0.04)：不动
     assert np.abs(s[:, 2:]).max() < 1e-12
+
+
+@pytest.mark.parametrize("size", [.5, 1.])
+def test_push_offcenter_field_matches_hand_computation(size):
+    """非中心接触：推杆从左面 y0 处压入 δ0，θ=0、方块在原点。手算 F、τ、ρ、s 后核平移和角速度幅值。"""
+    d0, y0 = .004, .3*size
+    q = np.array([-size/2-PU.RP+d0, y0, 0., 0., 0.])
+    f = PU.STIFF*d0                                                  # 0.6
+    tau = -y0*f                                                      # r=(−size/2, y0) × (f, 0)
+    rho = .383*size
+    s = 1-.3/math.sqrt(f**2+(tau/rho)**2)
+    dq = PU.field(q, np.zeros(2), {"size": size})
+    assert np.allclose(dq, [-f, 0., s*f, 0., s*tau/rho**2], rtol=0, atol=1e-12)
+
+
+def test_push_release_relaxes_then_stops():
+    """无惯性：稳态正推后动作归零，方块第一个 tick 只滑 <1e−3，之后完全静止。"""
+    u = np.zeros((32, 2)); u[:6] = [.4, 0.]
+    s = PU.trajectory(0, u, {}, state=_facing())
+    assert 0. < s[7, 2]-s[6, 2] < 1e-3 and np.abs(s[8:, 2:]-s[8, 2:]).max() == 0.
 
 
 def test_push_offcenter_push_rotates_clockwise():
