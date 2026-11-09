@@ -10,14 +10,14 @@ GrayScottSystem、PushSystem 只是把 datasets.active() 的调节项、systems.
 - 一阶系统：画面包含决定未来的全部状态（模型只看当前一帧）。
 - 随机流：熵 [1703, 1000+SYSTEM_INDEX[name], 轨迹编号, 流号]。SYSTEM_INDEX 取 S20b 把两个名字追加到
   datasets.SYSTEMS 末尾后的位置（5、6），所以登记后 simulation.seed_entropy 给出同一个熵，v7 的 5 个场景不变。
-  流 0 = 初值，流 3 = 干扰光点位置，流 4 = 像素噪声（与 systems.compose 一致）。
+  流 0 = 初值，流 3 = 干扰光点位置，流 4 = 像素噪声，S21a 加流 7 = 遮挡块、流 8 = 会动的干扰光点（与 systems.compose 一致）。
 """
 import math
 
 import numpy as np
 
 from . import variants
-from .systems import COLORS, SIZE, _texture
+from .systems import COLORS, DISTRACTOR_COLOR, SIZE, _texture, blend_spots, frame_ticks, mover_centers, occlude
 
 TICKS = 32
 PERIOD = .25
@@ -48,6 +48,8 @@ def _check_controls(u):
 
 
 def _finish(image, trajectory_id, system, v):
+    if v.occluders:          # S21a：遮挡块画在场景之上、像素噪声之前（与 systems.compose 同一顺序、同一随机流）
+        image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if v.pixel_noise:
         image = image+rng(system, trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
@@ -165,8 +167,8 @@ class GrayScott:
 
     def frames(self, trajectory_id, u, params, v):
         """→ (隐藏状态 [33,514], 画面 [33,256,256,3] uint8)。"""
-        if v.sigma is not None or v.distractors:
-            raise ValueError("gray_scott 没有光点：sigma/distractors 不适用")
+        if v.sigma is not None or v.distractors or v.movers:
+            raise ValueError("gray_scott 没有光点：sigma/distractors/movers 不适用")
         U, V, p = self.fields(trajectory_id, u, params)
         return self.states(U, V, p), self.draw(U, V, p, trajectory_id, v)
 
@@ -259,7 +261,8 @@ class Push:
             out.append(q.copy())
         return np.stack(out)
 
-    def draw(self, states, trajectory_id, params, v):
+    def draw(self, states, trajectory_id, params, v, ticks=None):
+        """ticks：每帧的 tick，只在有会动的干扰光点（S21a movers）时用到；画整条 33 帧时可不给。"""
         size = param(self.name, params, "size")
         sigma = v.sigma or 6.
         x = (np.arange(SIZE)+.5-128)/self.SCALE
@@ -270,14 +273,17 @@ class Push:
             for r, c in rng(self.name, trajectory_id, 3).uniform(24., SIZE-24., (v.distractors, 2)):
                 w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
                 base = base+(np.array([150., 150., 150.])-base)*w
+        if v.movers:     # S21a：会动的干扰光点画在背景之上、方块和推杆之下（与 systems.compose 同一顺序）
+            movers = mover_centers(rng(self.name, trajectory_id, 8), v.movers, frame_ticks(len(states), ticks))
         frames = []
-        for cx, cy, bx, by, th in states:
+        for i, (cx, cy, bx, by, th) in enumerate(states):
             co, si = math.cos(th), math.sin(th)
             dx, dy = X-bx, Y-by
             ex = np.abs(co*dx+si*dy)-size/2; ey = np.abs(-si*dx+co*dy)-size/2
             sd = np.hypot(np.maximum(ex, 0.), np.maximum(ey, 0.))+np.minimum(np.maximum(ex, ey), 0.)
             a = np.clip(.5-sd*self.SCALE, 0., 1.)[..., None]
-            image = base+(self.BLOCK-base)*a
+            back = blend_spots(base[None], movers[i:i+1], DISTRACTOR_COLOR, sigma)[0] if v.movers else base
+            image = back+(self.BLOCK-back)*a
             mx, my = bx+.25*size*co, by+.25*size*si
             wm = np.exp(-((X-mx)**2+(Y-my)**2)*self.SCALE**2/(2*(.06*size*self.SCALE)**2))[..., None]
             image = image+(self.MARK-image)*wm

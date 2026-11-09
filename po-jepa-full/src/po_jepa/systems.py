@@ -45,18 +45,38 @@ def _spots(centers_rc: np.ndarray, colors: np.ndarray, sigma: float) -> np.ndarr
     return np.rint(image).astype(np.uint8)
 
 
+POLICY_HORIZON = 1.      # 秒：goal 策略按“1 秒内走到目标”给速度，u = (目标 − 估计位置)/(K·1 s)
+POLICY_EXPLORE = .1      # goal 策略的探索噪声标准差（动作单位，随机流 9）
+
+
 def commanded_controls(trajectory_id: int) -> simulation.TrajectoryControls:
-    """模型看到的（下达的）动作。基础场景 = v6 的 sample_controls；调节项改动作抽样时用同一随机流按新规则抽。"""
+    """模型看到的（下达的）动作。基础场景 = v6 的 sample_controls；调节项改动作抽样时用同一随机流按新规则抽。
+
+    S21a 采集策略 policy：段长、零动作段和随机值照旧从流 1 抽（三种策略消耗流 1 的方式完全相同，所以段的边界和
+    零动作段与 random 一一对应）；goal 把非零段的值换成“朝目标”的值，mixed 每个非零段按流 9 掷硬币二选一。
+    “朝目标”是开环的：不跑仿真，用初值的受控点位置 p̂ 做航位推算 p̂ ← p̂ + K·u·段长，K 是下达动作到受控点速度的
+    名义倍数（System.policy_anchor）。所以缓存核对动作（cache.py）时不用重跑仿真；执行时的增益、延迟、噪声、饱和
+    和场景本身的动力学策略都不知道。
+    """
     v = datasets.active().knobs
     if not v.changes_controls():
         return simulation.sample_controls(trajectory_id)
     g = simulation._rng(trajectory_id, 1); lengths = variants.SEGMENT_SETS[v.segments]
+    if v.policy != "random":
+        g9 = simulation._rng(trajectory_id, 9)
+        estimate, target, kin = get().policy_anchor(trajectory_id, v, g9)
     starts, ends, values, tick = [], [], [], 0
     while tick < TICKS:
         length = int(g.choice(lengths)) if len(lengths) > 1 else lengths[0]
         value = np.zeros(2) if g.random() < v.zero else g.uniform(-.5, .5, 2)
+        if v.policy != "random" and value.any():
+            coin, explore = g9.random(), g9.normal(0., POLICY_EXPLORE, 2)
+            if v.policy == "goal" or coin < .5:
+                value = np.clip((target-estimate)/(kin*POLICY_HORIZON)+explore, -.5, .5)
         if v.axes == "x": value[1] = 0.
         if v.axes == "y": value[0] = 0.
+        if v.policy != "random":
+            estimate = estimate+kin*value*(min(tick+length, TICKS)-tick)*PERIOD
         starts.append(tick); tick = min(tick+length, TICKS); ends.append(tick); values.append(value)
     return simulation.TrajectoryControls(trajectory_id, np.array(starts, dtype=np.int64), np.array(ends, dtype=np.int64),
                                          np.array(values, dtype=np.float64))
@@ -72,6 +92,8 @@ def applied_ticks(trajectory_id, v, controls) -> np.ndarray:
     u = v.gain*u
     if v.noise:
         u = u+simulation._rng(trajectory_id, 5).normal(0., v.noise, u.shape)
+    if v.saturation is not None:      # S21a：执行器饱和，按分量截断（在增益和执行噪声之后）
+        u = np.clip(u, -v.saturation, v.saturation)
     return u
 
 
@@ -89,8 +111,55 @@ def _texture(kind: str) -> np.ndarray:
     return BACKGROUND+np.kron(coarse, np.ones((8, 8, 3)))[:SIZE, :SIZE]
 
 
-def compose(rc, colors, sigma, v, trajectory_id, backdrop=None):
-    """可调渲染：背景 → （场景底图）→ 静止干扰光点 → 场景光点 → 像素噪声。rc:[L,P,2]（行、列）。"""
+# —— S21a 观察调节项：遮挡块、会动的干扰光点（new_systems 也用这两个函数，随机流由调用方给）——
+OCCLUDER_SIZE = 48                          # 像素（= 1 个世界单位）
+OCCLUDER_COLOR = np.array([110., 112., 120.])
+DISTRACTOR_COLOR = np.array([150., 150., 150.])
+MOVER_OMEGA = .6                            # rad/s，逆时针（y 向上）；所有干扰光点同一个角速度
+MOVER_RADIUS = (40., 110.)                  # 像素，绕画面中心
+
+
+def frame_ticks(L, ticks):
+    """每帧对应的 tick：整条轨迹（33 帧）默认 0…32；单帧或几帧（反事实、规划）必须给出 ticks。"""
+    if ticks is None:
+        if L != TICKS+1:
+            raise ValueError("会动的干扰光点需要知道每帧的 tick：只画部分帧时要传 ticks")
+        return np.arange(TICKS+1)
+    ticks = np.asarray(ticks)
+    if ticks.shape != (L,) or ticks.min() < 0 or ticks.max() > TICKS:
+        raise ValueError("ticks 必须是 [L] 个 0…32 的整数")
+    return ticks
+
+
+def mover_centers(g, count, ticks) -> np.ndarray:
+    """会动的干扰光点中心 [L,count,2]（行、列）：半径 r∈[40,110] 像素、初相 φ0 均匀（随机流 8），
+    角度 φ0 + 0.6·t（t = tick·0.25 s）。位置只由当前角度决定、转速固定，所以只看一帧就能推出下一帧（仍是一阶）。"""
+    r = g.uniform(*MOVER_RADIUS, count); phi0 = g.uniform(0., 2*np.pi, count)
+    a = phi0[None, :]+MOVER_OMEGA*np.asarray(ticks, dtype=np.float64)[:, None]*PERIOD
+    return np.stack((SIZE/2-r*np.sin(a), SIZE/2+r*np.cos(a)), -1)
+
+
+def blend_spots(image, centers, color, sigma):
+    """image [L,256,256,3] float；centers [L,K,2]（行、列）；按顺序叠加同一颜色的高斯亮斑。"""
+    row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+    for k in range(centers.shape[1]):
+        r = centers[:, k, 0, None, None]; c = centers[:, k, 1, None, None]
+        w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
+        image = image+(color-image)*w
+    return image
+
+
+def occlude(image, g, count):
+    """不透明遮挡块：左上角在 [16, 256−16−48] 均匀取整（随机流 7），整条轨迹静止；画在场景之上、像素噪声之前。"""
+    image = image.copy()
+    for r, c in g.integers(16, SIZE-16-OCCLUDER_SIZE+1, (count, 2)):
+        image[:, r:r+OCCLUDER_SIZE, c:c+OCCLUDER_SIZE] = OCCLUDER_COLOR
+    return image
+
+
+def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
+    """可调渲染：背景 → （场景底图）→ 静止干扰光点 → 会动的干扰光点 → 场景光点 → 遮挡块 → 像素噪声。
+    rc:[L,P,2]（行、列）。ticks：每帧的 tick，只在有会动的干扰光点时用到（见 frame_ticks）。"""
     L = rc.shape[0]
     base = _texture(v.background).astype(np.float64)
     if backdrop is not None:
@@ -104,10 +173,15 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None):
             base = base+(np.array([150., 150., 150.])-base)*w
     row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
     image = np.broadcast_to(base, (L, SIZE, SIZE, 3)).copy()
+    if v.movers:
+        centers = mover_centers(simulation._rng(trajectory_id, 8), v.movers, frame_ticks(L, ticks))
+        image = blend_spots(image, centers, DISTRACTOR_COLOR, sigma)
     for p in range(rc.shape[1]):
         r = rc[:, p, 0, None, None]; c = rc[:, p, 1, None, None]
         w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
         image = image+(colors[p]-image)*w
+    if v.occluders:
+        image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
     if v.pixel_noise:
         image = image+simulation._rng(trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
@@ -148,16 +222,26 @@ class System:
 
     # —— 可调实现（v7 可调数据集）——
     def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
-        """分段常数“执行”动作下的 RK4（每 tick 128 步）；可从任意 tick 的给定状态出发（反事实探针用）。"""
+        """分段常数“执行”动作下的 RK4（每 tick 128 步）；可从任意 tick 的给定状态出发（反事实探针用）。
+
+        S21a 过程噪声：dq = f(q,u) dt + σ dW。漂移每个子步用 RK4，噪声在子步末尾加 σ·√h·ξ（加性噪声的
+        Euler–Maruyama）。ξ 是随机流 6 一次抽好的 [32,128,D] 标准正态，按绝对 tick 取，所以从任意 tick 出发的
+        反事实仿真用的是同一份噪声（同一起点、同一噪声、只换动作）。
+        """
         u = applied_ticks(trajectory_id, v, commanded_controls(trajectory_id) if controls is None else controls)
         q = (self.vinitial(trajectory_id, v) if state is None else np.asarray(state, dtype=np.float64)).copy()
         out = [q.copy()]; h = PERIOD/128
         f = lambda x, ut: self.vfield(x, ut, v)+self.wall(x)
+        if v.process_noise:
+            xi = simulation._rng(trajectory_id, 6).standard_normal((TICKS, 128, q.shape[0]))
+            scale = v.process_noise*math.sqrt(h)
         for tick in range(start, TICKS if ticks is None else start+ticks):
-            for _ in range(128):
+            for sub in range(128):
                 k1 = f(q, u[tick]); k2 = f(q+h*k1/2, u[tick])
                 k3 = f(q+h*k2/2, u[tick]); k4 = f(q+h*k3, u[tick])
                 q = q+h*(k1+2*k2+2*k3+k4)/6
+                if v.process_noise:
+                    q = q+scale*xi[tick, sub]
             if not np.isfinite(q).all() or np.abs(q).max() > self.BOUND:
                 raise ValueError(f"{self.name} state left the rendered domain (trajectory {trajectory_id})")
             out.append(q.copy())
@@ -171,12 +255,18 @@ class System:
             return 0.
         return -20.*np.sign(q)*np.maximum(np.abs(q)-self.WALL, 0.)
 
-    def draw(self, states, trajectory_id, v):
+    def draw(self, states, trajectory_id, v, ticks=None):
         rc, colors, sigma = self.spots(states, v)
-        return compose(rc, colors, v.sigma or sigma, v, trajectory_id, self.backdrop(v))
+        return compose(rc, colors, v.sigma or sigma, v, trajectory_id, self.backdrop(v), ticks)
 
     def backdrop(self, v):
         return None
+
+    def policy_anchor(self, trajectory_id, v, g):
+        """S21a 采集策略的开环推算起点：(受控点初值 p̂0 [2], 目标 [2], 下达动作到受控点速度的倍数 K)。
+        粒子类场景：受控点是状态前两维（多粒子是第 0 个粒子，Van der Pol 是相平面点），dq/dt 里动作的系数是 1；
+        目标在 [−1.5,1.5]² 均匀（随机流 9 的前两个数）。"""
+        return self.vinitial(trajectory_id, v)[:2].copy(), g.uniform(-1.5, 1.5, 2), 1.
 
 
 class DoubleWell(System):
@@ -410,6 +500,8 @@ class AdvectionDiffusion(System):
         w = np.clip(fields, 0., 1.)[..., None]
         bg = _texture(v.background)[None]
         image = bg+(np.array(COLORS[v.color])-bg)*w
+        if v.occluders:
+            image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
         if v.pixel_noise:
             image = image+simulation._rng(trajectory_id, 4).normal(0., v.pixel_noise, image.shape)
         return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
@@ -520,6 +612,18 @@ class PushSystem(NewSystem):
     def reference_trajectory(self, trajectory_id, *, steps_per_tick=256):
         impl, u, v = self._impl(trajectory_id)
         return impl.trajectory(trajectory_id, u, dict(v.params), steps_per_tick=steps_per_tick)
+
+    PUSH_THROUGH = .6       # goal 策略：推杆的目标点在方块中心再往前 0.6（沿推杆→方块方向），让推杆穿过方块中心把它推走
+
+    def policy_anchor(self, trajectory_id, v, g):
+        """S21a：push 的“朝目标”是朝方块推：受控点是推杆，目标 = b0 + 0.6·(b0 − c0)/|b0 − c0|，K = Push.SPEED。
+        只用初值（不跑仿真），不消耗随机流 9 的目标数。"""
+        from . import new_systems
+        impl = new_systems.SYSTEMS[self.name]
+        q0 = impl.initial(trajectory_id, dict(v.params))
+        c0, b0 = q0[:2], q0[2:4]
+        d = b0-c0
+        return c0.copy(), b0+self.PUSH_THROUGH*d/np.linalg.norm(d), impl.SPEED
 
 
 REGISTRY = {
