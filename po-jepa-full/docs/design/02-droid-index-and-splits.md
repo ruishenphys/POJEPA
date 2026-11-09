@@ -70,8 +70,8 @@ GET {data.list_api}?prefix={data.prefix}&matchGlob=**/metadata_*.json&maxResults
 3. **同分布测试**：前 `id_test_scenes`（100）个场景，每个场景的入选回合按 `h("episode", uuid)` 排序取前 5 条，共 500 条。列表顺序是“场景顺序，场景内按哈希”。
 4. **验证**：接下来的 `val_scenes`（60）个场景，同样每个取 5 条，共 300 条。
 5. **留出实验室测试**：按 `ood_labs` 的顺序，每个实验室的入选回合按 `h("ood", uuid)` 排序取前 `ood_quota` 条（PennPAL 167、REAL 167、RPL 166），共 500 条。
-6. **训练顺序**：同分布实验室的入选回合，去掉第 3、4 步选中的 160 个场景里的全部回合（不只是被抽中的 5 条，共去掉 3,546 条），剩下 23,745 条按 `h("train", uuid)` 排序。`use_failures: false` 时在这一步之后再去掉失败回合（保持其余回合的相对顺序）。
-7. 训练集是训练顺序的前 `train_episodes` 条中通过准备检查的那些（04 §5）。
+6. **训练顺序**：同分布实验室的入选回合，去掉第 3、4 步选中的 160 个场景里的全部回合（不只是被抽中的 5 条，共去掉 3,546 条），剩下 23,745 条按 `h("train", uuid)` 排序，这是**完整训练顺序**。`use_failures: false` 时在这一步之后再去掉失败回合（保持其余回合的相对顺序）；这一步不写进 `splits.json`（它的 `train_order` 始终是完整训练顺序，04 §6、09 §3.1 的回合池要用），失败回合的 uuid 记在 `train_failures`，由 `splits.train_order(splits, data)` 按开关去掉（S03 定，见 `docs/segments/S03.md` §4）。
+7. 训练集是本配置训练顺序（`splits.train_order(splits, data)`）的前 `train_episodes` 条中通过准备检查的那些（04 §5）。
 
 性质（S03 测试逐条核）：同一场景不跨训练、验证、同分布测试；任何 N 的训练集是更大 N 的前缀；划分不依赖 N，改 N 时验证集和两个测试集不变；同样输入两次输出逐字节相同。
 
@@ -93,7 +93,7 @@ GET {data.list_api}?prefix={data.prefix}&matchGlob=**/metadata_*.json&maxResults
 
 ## 6. 片
 
-- 训练片 `train-000`、`train-001`……：训练顺序里第 1000k 到 1000k+999 条是第 k 片。一个配置用到前 ⌈N/1000⌉ 片；最后一片只取到第 N 条（试跑 N = 500 时 `train-000` 只有 500 条）。
+- 训练片 `train-000`、`train-001`……：完整训练顺序里第 1000k 到 1000k+999 条是第 k 片。一个配置用到前 ⌈N/1000⌉ 片；最后一片只取到第 N 条（试跑 N = 500 时 `train-000` 只有 500 条）。`use_failures: false` 的配置片的范围不变，每片只列它用到的回合（本配置训练顺序的前 N 条落在这片里的），用到的片因此多几片；本配置训练顺序不到 N 条就报错（`splits.shard_plan`）。
 - `val`、`id_test`、`ood_test` 各自一片，内容就是划分列表。
 - 片名只由训练顺序决定，和 N 无关；片在某个配置下的回合列表写进该配置的片完成记录（03 §3、04 §5、05 §3），所以试跑和正式运行可以共用一个数据根。
 
@@ -107,7 +107,7 @@ GET {data.list_api}?prefix={data.prefix}&matchGlob=**/metadata_*.json&maxResults
   "salt": "po-jepa-droid-1.0.1-split-v1",
   "episodes_sha256": "<index/episodes.jsonl 的 SHA>",
   "config_keys": {"min_steps": 242, "ood_labs": [...], "ood_quota": [...], "id_test_scenes": 100,
-                  "val_scenes": 60, "episodes_per_scene": 5, "use_failures": true},
+                  "val_scenes": 60, "episodes_per_scene": 5},
   "excluded_scene_ids": [4465064685, 4823049285],
   "id_test_scenes": [["IPRL", 5445595898], ...],
   "val_scenes": [[...], ...],
@@ -115,11 +115,13 @@ GET {data.list_api}?prefix={data.prefix}&matchGlob=**/metadata_*.json&maxResults
   "val": [...],
   "ood_test": [...],
   "train_order": [...],
-  "counts": {"selected": 32585, "id_test": 500, "val": 300, "ood_test": 500, "train_order": 23745}
+  "train_failures": [...],
+  "counts": {"selected": 32585, "candidate_scenes": 1050, "id_test": 500, "val": 300, "ood_test": 500,
+             "train_order": 23745, "train_failures": 4196}
 }
 ```
 
-`config_keys` 只放影响划分的键（不放 N），所以试跑和正式运行的划分文件逐字节相同。`index/MANIFEST.json` 记四个文件的 SHA、条数、代码提交和列表时间。
+文件用 `cache._json_bytes` 写（键排序、缩进 2）。`config_keys` 只放影响划分的键（不放 N 和 `use_failures`），所以同一数据根下的所有配置（试跑、正式运行、开关副本）的划分文件逐字节相同；`splits.load_splits` 读时核 schema、salt、`config_keys` 和本配置一致、`episodes_sha256` 和清单一致。`index/MANIFEST.json` 记四个文件的 SHA、条数、代码提交和列表时间。
 
 ## 8. 真实存储桶核对
 

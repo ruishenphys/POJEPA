@@ -6,7 +6,7 @@
 
 ## 1. 训练集
 
-`train_episodes(splits, prepared, config) -> list[str]`：取 `splits["train_order"]`（`use_failures: false` 时已去掉失败回合，02 §5）的前 `train_episodes` 条，再去掉 `passed_<source>` 为假的回合，保持原顺序。结果的条数、uuid 列表的 SHA 写进训练登记。正式运行的条数会略少于 20,000（去掉的条数在 `prepared/STATS.json` 里）。
+`train_episodes(splits, prepared, config) -> list[str]`：取 `splits.train_order(splits, config.data)`（完整训练顺序；`use_failures: false` 时去掉失败回合，02 §5）的前 `train_episodes` 条，再去掉 `passed_<source>` 为假的回合，保持原顺序。结果的条数、uuid 列表的 SHA 写进训练登记。正式运行的条数会略少于 20,000（去掉的条数在 `prepared/STATS.json` 里）。
 
 每条回合的可用行数 F 取自准备文件 JSON 的 `rows`。
 

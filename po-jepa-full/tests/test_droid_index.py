@@ -18,11 +18,13 @@ import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
 
 from po_jepa.droid import index as ix
+from po_jepa.droid import config as config_module
 from po_jepa.droid.config import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,13 +127,19 @@ def bucket(monkeypatch):
     server.server_close()
 
 
+# 几条合成回合也能划分（S03 的 run_index 在写清单前写 splits.json；划分本身在 test_droid_splits.py 里测）。
+# 留出实验室测试集正式是 500 条（config.OOD_TEST_EPISODES），构造这份配置时临时改成 1。
+SMALL_SPLITS = dict(id_test_scenes=1, val_scenes=1, episodes_per_scene=1, ood_quota=(1, 0, 0))
+
+
 def _config(bucket: FakeBucket, count: int | None = None, **data):
     cfg = load_config(CONFIGS/"pilot.yaml")
     base = f"http://127.0.0.1:{bucket.port}"
     fields = dict(list_api=base + LIST_PATH, object_base=base + OBJECT_PATH.rstrip("/"),
-                  expected_metadata_files=len(bucket.objects) if count is None else count)
+                  expected_metadata_files=len(bucket.objects) if count is None else count, **SMALL_SPLITS)
     fields.update(data)
-    return dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, **fields))
+    with mock.patch.object(config_module, "OOD_TEST_EPISODES", sum(fields["ood_quota"])):
+        return dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, **fields))
 
 
 # ---------------------------------------------------------------- 合成元数据（字段和真实 1.0.1 一样）
@@ -173,7 +181,7 @@ def _fill(bucket, specs):
 
 SEVEN = [dict(stamp=f"2023-07-07-09h-4{i}m-39s") for i in range(5)] + [
     dict(lab="PennPAL", stamp="2023-07-15-17h-18m-49s", scene_id=-1),
-    dict(lab="TRI", meta_lab="tri", outcome="failure", stamp="2023-08-07-17h-12m-42s", left="ext2"),
+    dict(lab="TRI", meta_lab="tri", outcome="failure", stamp="2023-08-07-17h-12m-42s", left="ext2", scene_id=4242),
 ]
 
 
@@ -482,9 +490,10 @@ def test_manifest_contents(bucket, tmp_path):
     assert on_disk == manifest
     assert (directory/"MANIFEST.json").read_bytes() == ix.cache._json_bytes(manifest)
     assert manifest["schema"] == "droid_index_v1" and manifest["listed_at"] == "2026-11-09T12:00:00+00:00"
-    assert sorted(manifest["files"]) == ["episodes.jsonl", "listing.jsonl", "metadata.jsonl"]
+    assert sorted(manifest["files"]) == ["episodes.jsonl", "listing.jsonl", "metadata.jsonl", "splits.json"]
     for name, entry in manifest["files"].items():
-        assert entry == {"sha256": hashlib.sha256((directory/name).read_bytes()).hexdigest(), "lines": 7}
+        lines = len((directory/name).read_bytes().splitlines()) if name == "splits.json" else 7
+        assert entry == {"sha256": hashlib.sha256((directory/name).read_bytes()).hexdigest(), "lines": lines}
     assert manifest["config_keys"] == {"list_api": cfg.data.list_api, "prefix": PREFIX, "camera": "left_mp4_path",
                                        "expected_metadata_files": 7, "min_steps": 242,
                                        "ood_labs": ["PennPAL", "REAL", "RPL"]}
@@ -509,7 +518,8 @@ def test_manifest_from_other_code_is_refused(bucket, tmp_path):
     path = tmp_path/"index"/"MANIFEST.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     for edit, message in ((lambda m: m["files"].pop("episodes.jsonl"), "this code writes"),
-                          (lambda m: m["files"].update({"splits.json": {}}), "this code writes"),
+                          (lambda m: m["files"].pop("splits.json"), "this code writes"),   # S02 写的三文件清单
+                          (lambda m: m["files"].update({"windows.json": {}}), "this code writes"),
                           (lambda m: m.update(schema="droid_index_v0"), "schema")):
         changed = copy.deepcopy(manifest)
         edit(changed)
@@ -602,14 +612,17 @@ def test_main_runs_index_and_verify(bucket, tmp_path, capsys):
     _fill(bucket, SEVEN)
     base = yaml.safe_load((CONFIGS/"base.yaml").read_text(encoding="utf-8"))
     host = f"http://127.0.0.1:{bucket.port}"
-    base["data"].update(list_api=host + LIST_PATH, object_base=host + OBJECT_PATH, expected_metadata_files=7)
+    base["data"].update(list_api=host + LIST_PATH, object_base=host + OBJECT_PATH, expected_metadata_files=7,
+                        **dict(SMALL_SPLITS, ood_quota=list(SMALL_SPLITS["ood_quota"])))
     configs = tmp_path/"configs"
     configs.mkdir()
     (configs/"base.yaml").write_text(yaml.safe_dump(base, sort_keys=False), encoding="utf-8")
     (configs/"pilot.yaml").write_bytes((CONFIGS/"pilot.yaml").read_bytes())
-    assert ix.main(["--config", str(configs/"pilot.yaml"), "--data-root", str(tmp_path/"data"), "--verify-sample", "2"]) == 0
+    with mock.patch.object(config_module, "OOD_TEST_EPISODES", 1):
+        assert ix.main(["--config", str(configs/"pilot.yaml"), "--data-root", str(tmp_path/"data"),
+                        "--verify-sample", "2"]) == 0
     out = capsys.readouterr().out
-    assert '"selected": 7' in out and '"checked": 2' in out
+    assert '"selected": 7' in out and '"checked": 2' in out and '"ood_test": 1' in out and '"splits"' in out
     assert (tmp_path/"data"/"index"/"MANIFEST.json").exists()
 
 

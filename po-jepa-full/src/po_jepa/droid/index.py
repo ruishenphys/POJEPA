@@ -1,8 +1,8 @@
 """DROID 1.0.1 索引（docs/design/02-droid-index-and-splits.md §1–§4、§7、§8）。
 
 阶段 1 的前半：用 GCS JSON API 列出全部 `metadata_*.json`（§1），逐个下载并核对 MD5（§2），统一字段（§3），
-判定入选（§4），写 `index/listing.jsonl`、`index/metadata.jsonl`、`index/episodes.jsonl` 和 `index/MANIFEST.json`
-（§7；划分文件 `splits.json` 由 S03 加进同一份清单）。§8 的抽样核对是 `verify_sample`。
+判定入选（§4），写 `index/listing.jsonl`、`index/metadata.jsonl`、`index/episodes.jsonl`；后半（§5–§7，S03）由
+`splits.py` 算划分、写 `index/splits.json`；最后写记这四个文件的 `index/MANIFEST.json`（§7）。§8 的抽样核对是 `verify_sample`。
 
 网络只走两个地址前缀：`data.list_api`（列表）和 `data.object_base`（对象内容），都从配置读，测试时换成本地假服务器。
 每次请求失败（连接、HTTP 状态、JSON、MD5/大小不对）都按 `RETRY_DELAYS` 重试，重试用尽就报错退出，不跳过任何对象。
@@ -34,7 +34,8 @@ LISTING_FILE = "listing.jsonl"
 METADATA_FILE = "metadata.jsonl"
 EPISODES_FILE = "episodes.jsonl"
 MANIFEST_FILE = "MANIFEST.json"
-INDEX_FILES = (LISTING_FILE, METADATA_FILE, EPISODES_FILE)   # S03 在这里加上 splits.json
+SPLITS_FILE = "splits.json"          # 内容由 splits.py 写（02 §5–§7）
+INDEX_FILES = (LISTING_FILE, METADATA_FILE, EPISODES_FILE, SPLITS_FILE)
 MANIFEST_SCHEMA = "droid_index_v1"
 
 METADATA_GLOB = "**/metadata_*.json"
@@ -382,7 +383,8 @@ def check_files(directory: Path, manifest: dict) -> None:
 def run_index(config: DroidConfig, data_root: Path | str, *, get: Getter = http_get,
               sleep: Callable[[float], None] = time.sleep, threads: int = METADATA_THREADS,
               clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict:
-    """阶段 1（S02 部分）。`index/MANIFEST.json` 已存在就什么都不做（只核它是本代码写的），返回它。"""
+    """阶段 1。`index/MANIFEST.json` 已存在就什么都不做（只核它是本代码写的），返回它。"""
+    from po_jepa.droid import splits as sp   # splits 依赖本模块，放在函数里避免循环导入
     directory = index_dir(data_root)
     if (directory/MANIFEST_FILE).exists():
         return read_manifest(directory)
@@ -398,6 +400,8 @@ def run_index(config: DroidConfig, data_root: Path | str, *, get: Getter = http_
         _write_lines(directory/METADATA_FILE, (_line(row, sort_keys=False) for row in rows))
     episodes = build_episodes(rows, data)
     _write_lines(directory/EPISODES_FILE, (_line(e, sort_keys=True) for e in episodes))
+    splits = sp.compute_splits(episodes, data, cache.file_sha(directory/EPISODES_FILE))
+    sp.write_splits(directory, splits)
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "data_version": data.version,
@@ -439,7 +443,7 @@ def verify_sample(config: DroidConfig, data_root: Path | str, count: int, *, get
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="DROID 1.0.1 index (docs/design/02 §1–§4, §7, §8)")
+    parser = argparse.ArgumentParser(description="DROID 1.0.1 index and splits (docs/design/02)")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--verify-sample", type=int, default=0, metavar="N",
@@ -448,6 +452,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     manifest = run_index(config, args.data_root)
     print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2))
+    splits = _loads((index_dir(args.data_root)/SPLITS_FILE).read_bytes(), SPLITS_FILE)
+    print(json.dumps({"splits": splits["counts"]}, ensure_ascii=False, indent=2))
     if args.verify_sample:
         print(json.dumps(verify_sample(config, args.data_root, args.verify_sample), ensure_ascii=False, indent=2))
     return 0
