@@ -6,15 +6,21 @@
     van_der_pol~mu=1.5,color=white:200  物理参数留出 + 外观留出
 空调节项就是基础场景，与 v6/v7 试跑逐位一致。
 
-调节项分四类：
+调节项分五类：
 - 物理参数（每个场景自己的，见 PARAMS）：如双势阱耦合与倾斜、Van der Pol 的 μ、粒子数、扩散系数；
+  S21a 加通用的 process_noise 过程噪声（随机微分方程，只用于粒子类 ODE 场景）；
 - 小球控制：gain 增益、axes 可推方向、segments 控制切换长度、zero 零动作比例、noise 执行噪声、delay 执行延迟；
+  S21a 加 saturation 执行动作饱和；
 - 观察：sigma 光点大小、color 颜色、background 背景、distractors 干扰物个数、pixel_noise 画面噪声；
+  S21a 加 occluders 遮挡块、movers 会动的干扰光点；
+- 数据采集（S21a）：policy 采集策略 random / goal / mixed；
 - 场景族本身（landscape 的 shape）。
 
-模型看到的始终是“下达的”动作；执行噪声与延迟只作用在物理里（模型看不到），用来测鲁棒性。
-所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
-随机流：调节项不改变初始状态和动作抽样的随机种子（除非调节项本身改的是动作抽样），因此同一编号的轨迹在不同调节项下可以配对比较。
+模型看到的始终是“下达的”动作；执行噪声、延迟和饱和只作用在物理里（模型看不到），用来测鲁棒性。
+除 occluders（被遮住时状态看不到，有意做成部分可观测）外，所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
+随机流：调节项不改变初始状态和动作抽样的随机种子（除非调节项本身改的是动作抽样：axes、segments、zero、policy），
+因此同一编号的轨迹在不同调节项下可以配对比较。流号：0 初值、1 动作、2 预处理、3 静止干扰光点、4 像素噪声、
+5 执行噪声；S21a 新增 6 过程噪声、7 遮挡块、8 会动的干扰光点、9 采集策略（目标点、探索噪声、mixed 的选择）。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -34,6 +40,10 @@ SHAPES = ("multi_well", "ring", "periodic", "obstacles")
 COLORS = {"orange": (230., 150., 50.), "white": (235., 235., 235.), "green": (80., 200., 90.), "blue": (70., 120., 235.)}
 BACKGROUNDS = ("grid", "plain", "checker", "noise")
 SEGMENT_SETS = {"148": (1, 4, 8), "1": (1,), "2": (2,), "4": (4,), "8": (8,)}
+POLICIES = ("random", "goal", "mixed")
+# S21a：只对 ODE 粒子类场景（状态是 RK4 积分的向量、受控点是状态前两维）成立的调节项不适用的场景
+FIELD_SYSTEMS = ("advection_diffusion", "gray_scott")           # 场方程：没有光点
+NOT_ODE = FIELD_SYSTEMS+("push",)                               # 不走 System.variant_trajectory 的 RK4（过程噪声）
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,12 @@ class Variant:
     background: str = "grid"
     distractors: int = 0              # 静止干扰光点个数（灰色，不受控制）
     pixel_noise: float = 0.           # 每帧独立高斯像素噪声标准差（0–255 刻度）
+    # S21a 通用调节项（默认值 = 不起作用，基础场景和已有调节项逐位不变）
+    process_noise: float = 0.         # 过程噪声 σ（状态单位/√秒）：dq = f dt + σ dW，随机流 6，只用于 ODE 粒子类场景
+    saturation: float | None = None   # 执行动作按分量截断到 [−s, s]（在增益、执行噪声之后；模型看不到），None = 不截断
+    occluders: int = 0                # 静止不透明遮挡块个数（48×48 像素，每条轨迹位置不同，随机流 7）
+    movers: int = 0                   # 会动的干扰光点个数（绕画面中心匀速转，随机流 8；只看一帧就能推出下一步）
+    policy: str = "random"            # 采集策略：random = v6 随机；goal = 朝目标（开环推算）；mixed = 每段各半
 
     def param(self, system: str, name: str):
         default = PARAMS[system][name][0]
@@ -64,13 +80,14 @@ class Variant:
         return self == Variant()
 
     def changes_controls(self) -> bool:
-        return (self.axes, self.segments, self.zero) != ("xy", "148", .2)
+        return (self.axes, self.segments, self.zero, self.policy) != ("xy", "148", .2, "random")
 
     def changes_execution(self) -> bool:
-        return self.gain != 1. or self.noise != 0. or self.delay != 0
+        return self.gain != 1. or self.noise != 0. or self.delay != 0 or self.saturation is not None
 
     def changes_observation(self) -> bool:
-        return (self.sigma, self.color, self.background, self.distractors, self.pixel_noise) != (None, "orange", "grid", 0, 0.)
+        return ((self.sigma, self.color, self.background, self.distractors, self.pixel_noise, self.occluders, self.movers)
+                != (None, "orange", "grid", 0, 0., 0, 0))
 
 
 _ALIASES = {f.name for f in fields(Variant)} - {"params"}
@@ -109,9 +126,9 @@ def parse(system: str, text: str) -> Variant:
 def _convert(kw):
     out = {}
     for name, value in kw.items():
-        if name in ("gain", "zero", "noise", "sigma", "pixel_noise"):
+        if name in ("gain", "zero", "noise", "sigma", "pixel_noise", "process_noise", "saturation"):
             out[name] = float(value)
-        elif name in ("delay", "distractors"):
+        elif name in ("delay", "distractors", "occluders", "movers"):
             out[name] = int(value)
         else:
             out[name] = value
@@ -129,15 +146,50 @@ def validate(system: str, v: Variant) -> None:
               (0. <= v.noise <= .5, "noise ∈ [0,0.5]"), (0 <= v.delay <= 4, "delay ∈ 0–4 tick"),
               (v.sigma is None or 3. <= v.sigma <= 16., "sigma ∈ [3,16] 像素"), (v.color in COLORS, f"color ∈ {list(COLORS)}"),
               (v.background in BACKGROUNDS, f"background ∈ {BACKGROUNDS}"), (0 <= v.distractors <= 6, "distractors ∈ 0–6"),
-              (0. <= v.pixel_noise <= 40., "pixel_noise ∈ [0,40]")]
+              (0. <= v.pixel_noise <= 40., "pixel_noise ∈ [0,40]"),
+              (0. <= v.process_noise <= .3, "process_noise ∈ [0,0.3]"),
+              (v.saturation is None or .05 <= v.saturation <= 2., "saturation ∈ [0.05,2]"),
+              (0 <= v.occluders <= 3, "occluders ∈ 0–3"), (0 <= v.movers <= 4, "movers ∈ 0–4"),
+              (v.policy in POLICIES, f"policy ∈ {POLICIES}")]
     for ok, message in checks:
         if not ok:
             raise ValueError("调节项越界：" + message)
-    for x in (v.gain, v.zero, v.noise, v.pixel_noise) + ((v.sigma,) if v.sigma is not None else ()):
+    for x in ((v.gain, v.zero, v.noise, v.pixel_noise, v.process_noise) + ((v.sigma,) if v.sigma is not None else ())
+              + ((v.saturation,) if v.saturation is not None else ())):
         if not math.isfinite(x):
             raise ValueError("调节项必须是有限数")
-    if system in ("advection_diffusion", "gray_scott") and (v.sigma is not None or v.distractors):
-        raise ValueError(f"{system} 没有光点：sigma/distractors 不适用")
+    if system in FIELD_SYSTEMS and (v.sigma is not None or v.distractors or v.movers):
+        raise ValueError(f"{system} 没有光点：sigma/distractors/movers 不适用")
+    if system in FIELD_SYSTEMS and v.policy != "random":
+        raise ValueError(f"{system} 的动作是整场的流速或注入点速度，没有要推向目标的受控点：policy 只能是 random")
+    if system in NOT_ODE and v.process_noise:
+        raise ValueError(f"{system} 不是 RK4 积分的粒子类 ODE：process_noise 不适用")
+
+
+# S21a 覆盖表：每个通用调节项取一个非默认的代表值，按 validate 判定在哪些场景可用（DATASET.md 的覆盖表由它生成）
+GENERAL_SAMPLES = {"gain": "2", "axes": "x", "segments": "2", "zero": "0.5", "noise": "0.1", "delay": "1",
+                   "saturation": "0.3", "policy": "goal", "process_noise": "0.1", "sigma": "4", "color": "white",
+                   "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10"}
+KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", "saturation"), "数据采集": ("policy",),
+               "物理": ("process_noise",),
+               "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise")}
+
+
+def coverage() -> dict:
+    """{通用调节项: 可用场景元组}，按 datasets.SYSTEMS 的顺序；landscape 加上 shape 再判。"""
+    from . import datasets
+    out = {}
+    for name, value in GENERAL_SAMPLES.items():
+        ok = []
+        for system in datasets.SYSTEMS:
+            text = (f"shape={SHAPES[0]}," if system == "landscape" else "") + f"{name}={value}"
+            try:
+                parse(system, text)
+            except ValueError:
+                continue
+            ok.append(system)
+        out[name] = tuple(ok)
+    return out
 
 
 def format(system: str, v: Variant) -> str:

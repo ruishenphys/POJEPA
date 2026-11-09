@@ -55,7 +55,7 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
             return pool(fields[start+duration]), pool(field), system.draw_fields(field[None], tid, v)[0]
         states = system.variant_trajectory(tid, v)
         q = system.variant_trajectory(tid, v, controls=controls, start=start, state=states[start], ticks=duration)[-1]
-        return states[start+duration], q, system.draw(q[None], tid, v)[0]
+        return states[start+duration], q, system.draw(q[None], tid, v, ticks=[start+duration])[0]   # S21a：movers 要知道 tick
     controls = simulation.sample_controls(donor)
     if system.name == "advection_diffusion":
         fields = system.fields(tid)

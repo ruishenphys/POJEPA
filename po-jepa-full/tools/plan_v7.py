@@ -123,15 +123,15 @@ def main():
         c = simulation.TrajectoryControls(tid, starts, starts+1, vals)
         if field_scene:
             f = system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)[-1]
-            return f, picture(f, tid)
+            return f, picture(f, tid, start+k)
         q = system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)[-1]
-        return q, picture(q, tid)
+        return q, picture(q, tid, start+k)
 
-    def picture(state, tid):
-        """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。"""
+    def picture(state, tid, tick):
+        """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。tick：这一帧的时刻（S21a 会动的干扰光点要用）。"""
         if field_scene:
             return (system.render_fields(state[None]) if v.is_default else system.draw_fields(state[None], tid, v))[0]
-        return (system.render(state[None]) if v.is_default else system.draw(state[None], tid, v))[0]
+        return (system.render(state[None]) if v.is_default else system.draw(state[None], tid, v, ticks=[tick]))[0]
 
     def summary_state(state):
         if field_scene:
@@ -202,7 +202,7 @@ def main():
                 state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)))[0]
             else:
                 left = a.horizon
-                frame_z = encode(picture(s0, tid), tid) if planner == "model" else None
+                frame_z = encode(picture(s0, tid, start), tid) if planner == "model" else None
                 while left > 0:
                     if planner == "model":
                         plan = cem(lambda u: model_cost(frame_z, z_goal, torch.from_numpy(u)), left, rng, a.samples)
