@@ -413,7 +413,10 @@ def test_reference_rows_reads_v7_layout(tmp_path):
             seed=("another condition/seed", dict(mutate=lambda rows: [(n, dict(r, seed=seed+1) if n == 3 else r) for n, r in rows])),
             condition=("another condition/seed", dict(mutate=lambda rows: [(n, dict(r, condition="identity") if n == 3 else r) for n, r in rows])),
             status=("another condition/seed", dict(mutate=lambda rows: [(n, dict(r, status="failed") if n == 3 else r) for n, r in rows])),
-            duplicate=("another condition/seed", dict(mutate=lambda rows: rows+[(99999, rows[0][1])])))
+            duplicate=("another condition/seed", dict(mutate=lambda rows: rows+[(99999, rows[0][1])])),
+            missing=("1 missing, 0 unregistered", dict(mutate=lambda rows: [(n, r) for n, r in rows if n != i])),
+            unregistered=("0 missing, 1 unregistered", dict(mutate=lambda rows: rows+[(99999, dict(rows[0][1], query=dict(
+                rows[0][1]["query"], start_tick=rows[0][1]["query"]["start_tick"]+10**6)))])))
         for name, (message, change) in cases.items():
             _write_reference(tmp_path/name/"evaluation"/"po_jepa_full", change.get("queries", queries), seed,
                              change.get("mutate", lambda rows: rows))

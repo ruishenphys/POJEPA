@@ -310,6 +310,11 @@ def reference_rows(job_dir, condition):
         if row["condition"] != condition or row["seed"] != checks.model_seed() or row["status"] != "ok" or key in found:
             raise ValueError(f"reference row {path.name} has another condition/seed, failed or is duplicated")
         found[key] = row["values"]
+    expected = {(q["kind"], q["trajectory_id"], q["start_tick"], float(q["duration_cycles"]), q["grid_size"])
+                for q in registration["queries"]}
+    if set(found) != expected:   # 10 §4.3：登记的每个查询恰好一行，缺行、多行都失败（Codex 评审 2026-11-09）
+        raise ValueError(f"reference evaluation {folder} rows do not cover the registered queries: "
+                         f"{len(expected - set(found))} missing, {len(set(found) - expected)} unregistered")
     return found
 
 
