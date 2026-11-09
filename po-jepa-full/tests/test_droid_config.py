@@ -284,14 +284,54 @@ def test_loss_config_ignores_and_restores_process_environment(monkeypatch):
         checks.load_protocol()
 
 
-def test_loss_config_reads_the_protocol_in_v7_mode(monkeypatch):
-    """v7 下和 v6 下这五项目前相同；用一个按环境给不同值的替身确认读的是 v7 那一份。"""
-    real = checks.load_protocol
-    def fake():
-        loss = dict(real()["loss"])
-        loss["time_epsilon"] = 2e-8 if os.environ.get(checks.PROTOCOL_ENV) == "v7" else 3e-8
-        return dict(loss=loss)
-    monkeypatch.setattr(checks, "load_protocol", fake)
+def test_v7_loss_protocol_matches_load_protocol_in_v7_mode(monkeypatch):
+    """五项等于 v7 环境下 `checks.load_protocol()` 的值（v6 下目前也相同）；本函数自己不读环境（Codex S01 #2）。"""
+    got = dc.v7_loss_protocol()
+    assert list(got) == list(dc.V7_LOSS_ITEMS)
+    for protocol in ("v7", "v6"):
+        monkeypatch.setenv(checks.PROTOCOL_ENV, protocol)
+        monkeypatch.delenv(checks.SEED_ENV, raising=False)
+        monkeypatch.delenv(checks.UPDATES_ENV, raising=False)
+        loss = checks.load_protocol()["loss"]
+        assert got == {k: loss[k] for k in dc.V7_LOSS_ITEMS}
+    monkeypatch.undo()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("v7_loss_protocol must not go through the environment-driven protocol loader")
+
+    for name in ("load_protocol", "is_v7", "v7_updates", "_apply_seed"):
+        monkeypatch.setattr(checks, name, boom)
+    monkeypatch.setenv(checks.SEED_ENV, "999999")
     monkeypatch.setenv(checks.PROTOCOL_ENV, "v6")
-    got = dc.load_config(CONFIGS/"pilot.yaml").loss_config(time_weight=0.1, space_weight=0.2)
-    assert got.time_epsilon == 2e-8 and os.environ[checks.PROTOCOL_ENV] == "v6"
+    before = dict(os.environ)
+    assert dc.v7_loss_protocol() == got and dict(os.environ) == before
+
+
+def test_v7_loss_protocol_refuses_v7_overrides_of_the_five_items(monkeypatch):
+    real = dc._read_mapping
+
+    def edited(path):
+        value = real(path)
+        if path.name == "v7.yaml":
+            value = copy.deepcopy(value)
+            next(iter(value["schedules"].values()))["loss"]["time_epsilon"] = 2e-8
+        return value
+
+    monkeypatch.setattr(dc, "_read_mapping", edited)
+    with pytest.raises(ValueError, match=r"overrides loss items \['time_epsilon'\]"):
+        dc.v7_loss_protocol()
+
+
+def test_loss_config_takes_clip_and_lr_min_from_config(tmp_path):
+    def edit(raw):
+        raw["training"].update(grad_clip=0.25, lr_min=2.0e-4)
+    got = _load(tmp_path, base_edit=edit).loss_config(time_weight=0.1, space_weight=0.2)
+    assert (got.grad_clip_norm, got.lr_min) == (0.25, 2.0e-4)
+
+
+def test_computed_sha_key_in_config_files_is_rejected(tmp_path):
+    """config_sha256 是算出来的；写在 base.yaml 里要按多键报错，不能被悄悄覆盖（Codex S01 #1）。"""
+    with pytest.raises(ValueError, match="unknown keys: config_sha256"):
+        _load(tmp_path, base_edit=lambda raw: raw.update(config_sha256="ignored"))
+    with pytest.raises(ValueError, match="'config_sha256' is not in base.yaml"):
+        _load(tmp_path, overlay=dict(PILOT, config_sha256="x"))

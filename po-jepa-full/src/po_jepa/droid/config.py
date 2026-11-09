@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import re
 import typing
 from dataclasses import dataclass, fields
 from pathlib import Path
-from unittest.mock import patch
 
 import yaml
 
@@ -24,6 +22,7 @@ from po_jepa.runtime import cache, checks
 SCHEMA = "droid_config_v1"
 BASE_FILE = "base.yaml"
 BASE_NAME = "base"
+DERIVED_KEY = "config_sha256"   # DroidConfig 里唯一不来自配置文件的字段
 # 01 §2：overlay 能改的键（点号路径）；resources 下的任何键都能改。
 OVERLAY_KEYS = frozenset({"name", "data.train_episodes", "training.updates", "training.seeds",
                           "model.spectral_backend"})
@@ -240,12 +239,23 @@ class DroidConfig:
 
 
 def v7_loss_protocol() -> dict:
-    """`checks.load_protocol()` 在 v7 下的 `loss` 块；只在这次调用里设 v7 环境，不受本进程的种子/步数环境影响。"""
-    with patch.dict(os.environ):
-        os.environ[checks.PROTOCOL_ENV] = "v7"
-        os.environ.pop(checks.UPDATES_ENV, None)
-        os.environ.pop(checks.SEED_ENV, None)
-        return dict(checks.load_protocol()["loss"])
+    """`checks.load_protocol()` 在 v7 下 `loss` 块里 `loss_config` 要的五项（V7_LOSS_ITEMS）。
+
+    不读、不改进程环境变量（Codex S01 #2：原来临时改 os.environ，别的线程会看到）。照 `load_protocol` 的前两步
+    合并 default.yaml 和 v4.yaml；v7 在其上合并的 schedules、calibration、model 不碰这五项，这里逐个核对，
+    以后谁在 v7.yaml 里改了这五项就报错，不会悄悄读到旧值。和 `load_protocol()` 的一致性由测试核。
+    """
+    cache.verify_fixed_protocol()
+    root = checks.ROOT/"configs"/"train"
+    base = _read_mapping(root/"default.yaml")
+    overlay = _read_mapping(root/"v4.yaml")
+    merged = checks._merge_v4(base, {k: v for k, v in overlay.items() if k not in ("schema_version", "protocol_id")})
+    v7 = _read_mapping(root/"v7.yaml")
+    later = [*v7["schedules"].values(), {"calibration": v7["calibration"]}, {"model": v7.get("model", {})}]
+    touched = sorted({k for block in later for k in (block.get("loss") or {}) if k in V7_LOSS_ITEMS})
+    if touched:
+        raise ValueError(f"configs/train/v7.yaml overrides loss items {touched}; v7_loss_protocol must read them too")
+    return {k: merged["loss"][k] for k in V7_LOSS_ITEMS}
 
 
 def load_config(path: Path | str) -> DroidConfig:
@@ -256,6 +266,8 @@ def load_config(path: Path | str) -> DroidConfig:
     overlay = {} if path.resolve() == base_path.resolve() else _read_mapping(path)
     _check_overlay(base, overlay, "")
     merged = checks._merge_v4(base, overlay)
+    if DERIVED_KEY in merged:   # 由本函数算出的字段不能出现在配置文件里，否则会被覆盖而不报多键（Codex S01 #1）
+        raise ValueError(f"config has unknown keys: {DERIVED_KEY} (it is computed, not read from the files)")
     _build(DroidConfig, dict(merged, config_sha256="pending"), "")   # 先按类型和 §3 校验，报错比 JSON 编码的报错更清楚
     sha = hashlib.sha256(cache._json_bytes(merged)).hexdigest()
     return _build(DroidConfig, dict(merged, config_sha256=sha), "")

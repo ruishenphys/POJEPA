@@ -129,6 +129,12 @@ def _bad(edit):
     (_bad(lambda s: s["realized"].update(gripper=float("nan"))), "realized", r"realized\.gripper must be"),
     (_bad(lambda s: s["realized"].update(gripper=1)), "realized", r"realized\.gripper must be"),
     (_bad(lambda s: s["realized"].update(gripper=True)), "realized", r"realized\.gripper must be"),
+    # 没被选中的那个动作源也要合格（Codex S01 #3）
+    (_bad(lambda s: s.pop("commanded")), "realized", "must contain a 'commanded' mapping"),
+    (_bad(lambda s: s["commanded"].pop("gripper")), "realized", "'commanded' must give exactly"),
+    (_bad(lambda s: s["commanded"].update(position=-1.0)), "realized", r"commanded\.position must be a positive finite"),
+    (_bad(lambda s: s["commanded"].update(rotation=float("nan"))), "realized", r"commanded\.rotation must be"),
+    (_bad(lambda s: s["realized"].update(gripper=0.0)), "commanded", r"realized\.gripper must be"),
 ])
 def test_control_spec_rejects_bad_scale(scale, source, message):
     config = dc.load_config(ROOT/"configs"/"droid"/"pilot.yaml")

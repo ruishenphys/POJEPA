@@ -41,17 +41,18 @@ def droid_control_spec(scale: dict, *, source: str, config: DroidConfig) -> Cont
     """01 §5.3。`scale` 是 `prepared/action_scale.json` 的内容，`scale[source]` 给三组尺度；界取自 `config.action`。"""
     if source not in ACTION_SOURCES:
         raise ValueError(f"source must be one of {ACTION_SOURCES}")
-    if not isinstance(scale, dict) or not isinstance(scale.get(source), dict):
-        raise ValueError(f"action scale must contain a {source!r} mapping")
-    groups = scale[source]
-    if set(groups) != set(SCALE_GROUPS):
-        raise ValueError(f"action scale {source!r} must give exactly {SCALE_GROUPS}")
-    values = []
-    for group in SCALE_GROUPS:
-        value = groups[group]
-        if type(value) is not float or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"action scale {source}.{group} must be a positive finite float")
-        values.append(value)
+    # 两个动作源都按 01 §5.3 / 04 §6 的格式核（不只核这次用的那个），再取 `source`（Codex S01 #3）
+    for name in ACTION_SOURCES:
+        if not isinstance(scale, dict) or not isinstance(scale.get(name), dict):
+            raise ValueError(f"action scale must contain a {name!r} mapping")
+        groups = scale[name]
+        if set(groups) != set(SCALE_GROUPS):
+            raise ValueError(f"action scale {name!r} must give exactly {SCALE_GROUPS}")
+        for group in SCALE_GROUPS:
+            value = groups[group]
+            if type(value) is not float or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"action scale {name}.{group} must be a positive finite float")
+    values = [scale[source][group] for group in SCALE_GROUPS]
     a = config.action
     bounds = (a.position_bound_m, a.rotation_bound_rad, a.gripper_bound)
     sha = hashlib.sha256(cache._json_bytes(scale)).hexdigest()   # 等于 _write_json 写出的 action_scale.json 文件的 SHA
