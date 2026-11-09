@@ -11,7 +11,7 @@
 | `landscape~shape=ring:2000` | 势能地形族里的环形槽 |
 | `van_der_pol~background=checker,color=white,mu=1:2000` | 换物理参数和外观 |
 
-调节项的完整定义和取值范围见 `src/po_jepa/variants.py`。仿真与渲染见 `src/po_jepa/systems.py`。
+调节项的完整定义和取值范围见 `src/po_jepa/variants.py`。仿真与渲染见 `src/po_jepa/systems.py`；v8 新加的 `gray_scott`、`push` 的物理与渲染在 `src/po_jepa/new_systems.py`（公式和参数范围的依据见 `docs/segments/S20a.md` §2）。
 
 ## 场景
 
@@ -24,6 +24,8 @@
 | `multi_particle` | n 个过阻尼粒子，两两软排斥加简谐外势，动作只推第 0 个（n = 3） | n 个彩色光点 | 2n |
 | `advection_diffusion` | ∂c/∂t = D∇²c − w·∇c，w = flow·u（周期域，傅里叶精确解） | 浓度热图 | 256（16×16 池化） |
 | `landscape` | dq/dt = −depth·∇V(q) + u，V 可选 4 种地形 | 光点和地形底图 | 2 |
+| `gray_scott` | Gray–Scott 反应扩散 ∂U/∂t = D_u∇²U − UV² + F(1−U)，∂V/∂t = D_v∇²V + UV² − (F+k)V + a·G(x−p)(1−V)，注入点 dp/dt = 0.4·u（周期域） | U、V 两色叠加的浓度图和注入点圆环 | 514（U、V 各 16×16 池化，加注入点） |
+| `push` | 准静态推方块：推杆 dc/dt = 2u − f，方块按椭圆极限面和库仑静摩擦阈值滑动、转动，可加坡面 | 方块（带朝向标记）和推杆光点 | 5 |
 
 `landscape` 的 4 种地形：
 
@@ -41,16 +43,18 @@
 | 物理 | `n`、`repulsion`、`trap` | 3、1.5、0.5 | 1–5、[0, 3]、[0.2, 1] | 粒子数、排斥强度、外势强度 |
 | 物理 | `diffusion`、`flow`、`blobs` | 2e-4、0.4、3 | [0, 2e-3]、[0.1, 1]、1–5 | 扩散系数、流速比例、初始染料团数 |
 | 物理 | `shape`、`depth` | —、1 | 4 种、[0.25, 3] | 地形形状、地形深度 |
+| 物理 | `feed`、`kill`、`inject` | 0.04、0.06、0.05 | [0.035, 0.05]、[0.0595, 0.063]、[0, 0.2] | Gray–Scott 补给率、消耗率、注入强度 |
+| 物理 | `mu_s`、`slope`、`slope_dir`、`size` | 0.3、0、0、0.8 | [0, 1]、[0, 0.6]、[−180, 180] 度、[0.4, 1.2] | 推方块的静摩擦系数、坡度、坡向、方块边长 |
 | 控制 | `gain` | 1 | [0.25, 4] | 动作强度（作用在物理上的倍数） |
 | 控制 | `axes` | xy | xy / x / y | 只能推一个方向（欠驱动） |
 | 控制 | `segments` | 148 | 148 / 1 / 2 / 4 / 8 | 动作切换长度：v6 的 1/4/8 随机，或固定周期 |
 | 控制 | `zero` | 0.2 | [0, 0.8] | 零动作段比例 |
 | 控制 | `noise` | 0 | [0, 0.5] | 执行噪声（模型看不到） |
 | 控制 | `delay` | 0 | 0–4 tick | 执行延迟（模型看不到） |
-| 观察 | `sigma` | 场景默认 | [3, 16] 像素 | 光点大小 |
+| 观察 | `sigma` | 场景默认 | [3, 16] 像素 | 光点大小（`advection_diffusion`、`gray_scott` 没有光点，不适用） |
 | 观察 | `color` | orange | orange / white / green / blue | 受控光点颜色 |
 | 观察 | `background` | grid | grid / plain / checker / noise | 背景 |
-| 观察 | `distractors` | 0 | 0–6 | 静止干扰光点 |
+| 观察 | `distractors` | 0 | 0–6 | 静止干扰光点（`advection_diffusion`、`gray_scott` 不适用） |
 | 观察 | `pixel_noise` | 0 | [0, 40] | 每帧像素噪声 |
 
 规则：
@@ -58,6 +62,7 @@
 - **配对**：调节项不改变初始状态和动作的随机种子；只有改动作抽样的 `axes`、`segments`、`zero` 例外。所以同一编号的轨迹在不同调节项下可以逐条配对比较。
 - **基础场景不变**：调节项为空时走原实现，与 v6 和 v7 试跑逐位一致，有单元测试保证。只改观察的调节项，隐藏状态也和基础场景逐位相同。
 - **软墙**：可调版本在画面边缘有一圈软墙，增益或参数调大时小球也不会跑出画面。基础场景不加软墙。
+- **新场景**：`gray_scott`、`push` 没有 v6 原实现要保持，基础场景和有调节项时走同一套代码。它们的随机流序号是 5、6（追加在 `datasets.SYSTEMS` 末尾），v7 的 5 个场景的随机流不变。
 
 ## 任务
 
@@ -80,5 +85,7 @@
 ## 已知局限
 
 - 只有一阶系统，模型只看单帧。
+- `gray_scott`、`push` 还没接反事实动作探针（`tools/probe_actions.py`）和规划（`tools/plan_v7.py`），也还不在 `tools/make_v7_jobs.py` 的任务表里。
+- `push` 在 v6 的随机动作下，大约三分之一的轨迹真正推动了方块，动作的作用偏弱。
 - 动作统一是二维，范围 [−0.5, 0.5]²。
 - 画面是合成的简单图形，和真实视频有差距。真实数据（DROID）放在下一阶段。

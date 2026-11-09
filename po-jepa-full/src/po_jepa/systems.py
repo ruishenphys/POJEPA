@@ -8,6 +8,8 @@
 - van_der_pol：Van der Pol 振子的相平面 (x, v)，光点位置就是全状态；有稳定极限环。
 - multi_particle：3 个不同颜色的过阻尼粒子，两两软排斥 + 简谐外势；动作只推第 0 个粒子。
 - advection_diffusion：周期域上的染料浓度场，动作是均匀流速；按傅里叶模精确求解（分段常数控制下无积分误差）。
+- landscape：势能地形族（只有可调实现）。
+- gray_scott、push（S20b 登记，v8 新场景）：反应扩散、准静态推方块，物理与渲染在 po_jepa.new_systems。
 
 隐藏状态只用于生成画面和诊断，不进入模型。
 """
@@ -476,12 +478,58 @@ class Landscape(System):
         return 1.-(V-V.min())/(V.max()-V.min()+1e-12)
 
 
+class NewSystem(System):
+    """S20b：v8 新场景的登记。物理与渲染在 po_jepa.new_systems（S20a），这里只接三样东西：
+    当前数据集的调节项（物理参数 dict(v.params) + 观察项 v）、下达动作 commanded_controls、执行动作 applied_ticks
+    （增益、延迟、执行噪声）。新场景没有 v6 原实现要保持逐位不变，基础场景和有调节项时走同一条路径。
+    new_systems 在方法里才导入：它自己导入本模块，而且 v7 的 5 个场景不需要加载它。
+    """
+
+    def _impl(self, trajectory_id):
+        spec = datasets.active()
+        if spec.system != self.name:
+            # 动作、随机流和调节项都按当前数据集取，系统不一致会静默拿到别的场景的随机流和参数
+            raise ValueError(f"{self.name} 需要当前数据集是 {self.name}，现在是 {spec.system}")
+        from . import new_systems
+        v = spec.knobs
+        return new_systems.SYSTEMS[self.name], applied_ticks(trajectory_id, v, commanded_controls(trajectory_id)), v
+
+    def frames(self, trajectory_id):
+        impl, u, v = self._impl(trajectory_id)
+        return impl.frames(trajectory_id, u, dict(v.params), v)
+
+    def render(self, states):
+        raise ValueError(f"{self.name} 的画面要用 frames() 生成")
+
+    def variant_trajectory(self, *args, **kwargs):
+        # 反事实探针（tools/probe_actions.py）和规划（tools/plan_v7.py）要从任意 tick 出发，第 2 阶段再接
+        raise NotImplementedError(f"{self.name} 还没接反事实探针和规划")
+
+
+class GrayScottSystem(NewSystem):
+    """Gray–Scott 反应扩散，动作移动注入点（new_systems.GrayScott）。隐藏状态 514 维：U、V 各 16×16 池化 + 注入点。"""
+
+    def reference_trajectory(self, trajectory_id, *, steps_per_tick=128):
+        impl, u, v = self._impl(trajectory_id)
+        return impl.states(*impl.fields(trajectory_id, u, dict(v.params)))
+
+
+class PushSystem(NewSystem):
+    """准静态推方块（new_systems.Push）。隐藏状态 (c_x, c_y, b_x, b_y, θ)。"""
+
+    def reference_trajectory(self, trajectory_id, *, steps_per_tick=256):
+        impl, u, v = self._impl(trajectory_id)
+        return impl.trajectory(trajectory_id, u, dict(v.params), steps_per_tick=steps_per_tick)
+
+
 REGISTRY = {
     "double_well": DoubleWell("double_well", 2, "v6 过阻尼双势阱"),
     "van_der_pol": VanDerPol("van_der_pol", 2, "Van der Pol 极限环（相平面）"),
     "multi_particle": MultiParticle("multi_particle", 6, "3 粒子过阻尼软排斥"),
     "advection_diffusion": AdvectionDiffusion("advection_diffusion", 256, "平流–扩散浓度场"),
     "landscape": Landscape("landscape", 2, "势能地形族（多势阱、环形槽、周期势、障碍物）"),
+    "gray_scott": GrayScottSystem("gray_scott", 514, "Gray–Scott 反应扩散，动作移动注入点"),
+    "push": PushSystem("push", 5, "准静态推方块（静摩擦阈值、坡面）"),
 }
 assert set(REGISTRY) == set(datasets.SYSTEMS)
 

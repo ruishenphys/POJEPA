@@ -26,6 +26,9 @@ PARAMS = {
     "multi_particle": {"n": (3, (1, 5)), "repulsion": (1.5, (0., 3.)), "trap": (.5, (.2, 1.))},
     "advection_diffusion": {"diffusion": (2e-4, (0., 2e-3)), "flow": (.4, (.1, 1.)), "blobs": (3, (1, 5))},
     "landscape": {"depth": (1., (.25, 3.))},
+    # S20b：v8 新场景（物理与渲染在 po_jepa.new_systems，那里的 PARAMS 就是这两项；范围的依据见 docs/segments/S20a.md §2）
+    "gray_scott": {"feed": (.04, (.035, .05)), "kill": (.06, (.0595, .063)), "inject": (.05, (0., .2))},
+    "push": {"mu_s": (.3, (0., 1.)), "slope": (0., (0., .6)), "slope_dir": (0., (-180., 180.)), "size": (.8, (.4, 1.2))},
 }
 SHAPES = ("multi_well", "ring", "periodic", "obstacles")
 COLORS = {"orange": (230., 150., 50.), "white": (235., 235., 235.), "green": (80., 200., 90.), "blue": (70., 120., 235.)}
@@ -133,8 +136,8 @@ def validate(system: str, v: Variant) -> None:
     for x in (v.gain, v.zero, v.noise, v.pixel_noise) + ((v.sigma,) if v.sigma is not None else ()):
         if not math.isfinite(x):
             raise ValueError("调节项必须是有限数")
-    if system == "advection_diffusion" and (v.sigma is not None or v.distractors):
-        raise ValueError("advection_diffusion 没有光点：sigma/distractors 不适用")
+    if system in ("advection_diffusion", "gray_scott") and (v.sigma is not None or v.distractors):
+        raise ValueError(f"{system} 没有光点：sigma/distractors 不适用")
 
 
 def format(system: str, v: Variant) -> str:

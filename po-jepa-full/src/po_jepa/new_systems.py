@@ -1,8 +1,8 @@
 """新增场景（S20a）：gray_scott 反应扩散、push 准静态推方块。纯函数：物理真值 + 渲染。
 
-本文件不被任何已有模块导入，v7 条件执行的代码一个字节都不变。登记（datasets.SYSTEMS、variants.PARAMS、
-systems.REGISTRY）在 S20b 做；那时 System 子类只是把 datasets.active() 的调节项、systems.commanded_controls
-和 applied_ticks 接到这里的函数上。
+S20b 登记：datasets.SYSTEMS 末尾追加两个名字，物理参数并入 variants.PARAMS，systems.REGISTRY 的
+GrayScottSystem、PushSystem 只是把 datasets.active() 的调节项、systems.commanded_controls 和 applied_ticks
+接到这里的函数上（在方法里才导入本文件，v7 的 5 个场景不经过这里）。
 
 共同约定（与 v7 相同）：
 - 控制周期 0.25 s，32 个 tick、33 帧；输入 u 是“执行”动作 [32,2] float64（已含增益、延迟、执行噪声）。
@@ -16,17 +16,15 @@ import math
 
 import numpy as np
 
+from . import variants
 from .systems import COLORS, SIZE, _texture
 
 TICKS = 32
 PERIOD = .25
 SYSTEM_INDEX = {"gray_scott": 5, "push": 6}
 
-# 场景物理参数：名字 → (默认值, 允许范围)，格式同 variants.PARAMS（S20b 并进去）
-PARAMS = {
-    "gray_scott": {"feed": (.04, (.035, .05)), "kill": (.06, (.0595, .063)), "inject": (.05, (0., .2))},
-    "push": {"mu_s": (.3, (0., 1.)), "slope": (0., (0., .6)), "slope_dir": (0., (-180., 180.)), "size": (.8, (.4, 1.2))},
-}
+# 场景物理参数：名字 → (默认值, 允许范围)。S20b 起唯一来源是 variants.PARAMS（调节项解析用同一份），这里只取这两个场景
+PARAMS = {name: variants.PARAMS[name] for name in SYSTEM_INDEX}
 
 
 def rng(system: str, trajectory_id: int, stream: int) -> np.random.Generator:

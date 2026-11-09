@@ -12,8 +12,10 @@ import os
 ENV = "PO_JEPA_DATASET"
 DEFAULT_SYSTEM = "double_well"
 DEFAULT_COUNT = 200
-# v7 登记的系统名；仿真与渲染见 po_jepa.systems。
-SYSTEMS = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape")
+# 登记的系统名；仿真与渲染见 po_jepa.systems。前 5 个是 v7 的场景；v8 新场景只能追加在末尾：
+# 位置就是随机流里的系统序号（simulation.seed_entropy），插到中间会改掉 v7 场景的随机流。
+SYSTEMS = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape",
+           "gray_scott", "push")     # S20b：物理与渲染在 po_jepa.new_systems
 # 允许的轨迹条数；划分固定为 80% / 10% / 10% 的完整轨迹，按编号顺序切。
 COUNTS = (40, 200, 500, 2000)
 

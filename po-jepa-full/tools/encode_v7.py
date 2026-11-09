@@ -92,7 +92,7 @@ def main():
         role = "real_frozen_encoder"
 
     generator_sources = {name: cache.file_sha(ROOT/name) for name in
-                         ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
+                         ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/new_systems.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
                           "src/po_jepa/datasets.py", "tools/encode_v7.py")}
     environment = dict(python=sys.version.split()[0], torch=torch.__version__, cuda_runtime=torch.version.cuda,
                        numpy=np.__version__, platform=platform.platform(), encoder_device=str(device),
