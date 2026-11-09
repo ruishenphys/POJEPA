@@ -184,7 +184,7 @@ def test_mover_motion_is_a_fixed_rotation_about_the_center():
     g = np.random.default_rng(0)
     c = systems.mover_centers(g, 3, np.arange(33))
     z = (c[..., 1]-128)+1j*(128-c[..., 0])                       # 复平面，y 向上
-    assert np.allclose(z[1:]/z[:-1], np.exp(1j*systems.MOVER_OMEGA*.25))
+    assert np.allclose(z[1:]/z[:-1], np.exp(1j*.6*.25))            # 协议值 0.6 rad/s、0.25 s 一帧（不用被测常量）
     r = np.abs(z)
     assert np.allclose(r, r[:1]) and (r >= 40).all() and (r <= 110).all()
 

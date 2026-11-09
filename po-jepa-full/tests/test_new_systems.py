@@ -204,10 +204,10 @@ def test_push_offcenter_field_matches_hand_computation(size):
 
 
 def test_push_release_relaxes_then_stops():
-    """无惯性：稳态正推后动作归零，方块第一个 tick 只滑 <1e−3，之后完全静止。"""
+    """无惯性：稳态正推后动作归零，方块第一个 tick 只滑 <1e−3（这个默认案例的结果，不是普遍界），之后完全静止。"""
     u = np.zeros((32, 2)); u[:6] = [.4, 0.]
     s = PU.trajectory(0, u, {}, state=_facing())
-    assert 0. < s[7, 2]-s[6, 2] < 1e-3 and np.abs(s[8:, 2:]-s[8, 2:]).max() == 0.
+    assert 0. < s[7, 2]-s[6, 2] < 1e-3 and np.abs(s[7:, 2:]-s[7, 2:]).max() == 0.     # 第二个释放 tick 起完全静止（S20b 审核）
 
 
 def test_push_offcenter_push_rotates_clockwise():

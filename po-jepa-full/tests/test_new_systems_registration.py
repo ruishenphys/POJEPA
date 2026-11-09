@@ -188,3 +188,13 @@ def test_guards(use):
         systems.get().render(np.zeros((33, 5)))
     with pytest.raises(ValueError):          # S21b 接上了续算接口；调节项与当前数据集不一致时报错
         systems.get().variant_trajectory(0, Variant(gain=2.))
+
+
+def test_gray_scott_reference_trajectory_honours_steps_per_tick(use):
+    """S20b 审核 P2：steps_per_tick 以前被静默忽略。默认（None）和 40 步（dt = 0.5）就是生产步长，与 frames() 逐位相同；
+    80 步（dt = 0.25）是另一个离散，结果不同但接近（Strang 分裂二阶）。"""
+    use("gray_scott"); S = systems.get()
+    states = S.frames(1)[0]
+    assert np.array_equal(S.reference_trajectory(1), states) and np.array_equal(S.reference_trajectory(1, steps_per_tick=40), states)
+    fine = S.reference_trajectory(1, steps_per_tick=80)
+    assert not np.array_equal(fine, states) and np.abs(fine-states).max() < .05

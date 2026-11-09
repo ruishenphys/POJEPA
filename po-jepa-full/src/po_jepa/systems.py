@@ -638,9 +638,12 @@ class GrayScottSystem(NewSystem):
     S21b：池化后的隐藏状态不能续算，所以 variant_trajectory 返回的是完整状态（GrayScott.pack：U、V 各 128×128 展平，
     再接注入点 p，共 32770 维）；hidden() 把它池化成 frames() 的 514 维隐藏状态，draw() 从它画画面。"""
 
-    def reference_trajectory(self, trajectory_id, *, steps_per_tick=128):
+    def reference_trajectory(self, trajectory_id, *, steps_per_tick=None):
+        """steps_per_tick：每个 tick 的分裂步数，None = 生产步长 DT=0.5（每 tick 40 步）。S20b 审核：以前静默忽略这个参数，
+        现在按 dt = UNITS_PER_TICK/steps_per_tick 传下去（烧入用同一个 dt；必须整除，否则 _run 报错）。"""
         impl, u, v = self._impl(trajectory_id)
-        return impl.states(*impl.fields(trajectory_id, u, dict(v.params)))
+        dt = None if steps_per_tick is None else impl.UNITS_PER_TICK/steps_per_tick
+        return impl.states(*impl.fields(trajectory_id, u, dict(v.params), dt=dt))
 
     def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
         impl, u, v = self._impl(trajectory_id, v, controls)
