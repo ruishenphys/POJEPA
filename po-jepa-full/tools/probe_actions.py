@@ -118,6 +118,9 @@ def main():
     if spec.system in variants.SECOND_ORDER:
         # S23b 只登记了数据生成；二阶场景的 *_px 距离、两帧编码怎么接要等 S22 探针结果和第 6 阶段，不静默按粒子类处理
         raise SystemExit(f"{spec.system} 是二阶场景，动作探针还没接（S23b 只登记数据生成）")
+    if spec.knobs.horizon != systems.TICKS:
+        # S24a：探针按 33 帧取起点和时长（start+tau ≤ 32）；长时程的探针在第 6 阶段接
+        raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：动作探针还没接（S24a 只做数据生成）")
     if a.fake_encoder:
         encoder = encode_v7._fake_encoder(torch)
     else:

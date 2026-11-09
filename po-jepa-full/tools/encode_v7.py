@@ -56,6 +56,9 @@ def main():
     from po_jepa.runtime import cache
 
     spec = datasets.active()
+    if spec.knobs.horizon != systems.TICKS:
+        # S24a：长时程（horizon > 32）只登记了数据生成；缓存格式、清单（33 帧）和评测窗口怎么接在第 6 阶段定，不静默截断
+        raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：编码和缓存还没接（S24a 只做数据生成，第 6 阶段接入）")
     out = args.output.resolve()
 
     if args.mode == "finalize":

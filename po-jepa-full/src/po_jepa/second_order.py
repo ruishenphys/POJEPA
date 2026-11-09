@@ -18,6 +18,8 @@ systems 在方法里才导入本文件（本文件导入 systems）。
 - 续算：advance(q, u, params, start, ticks) 从 tick=start 的状态推进；trajectory() = 初值 + 预跑 + advance(0, 32)，
   所以从整条轨迹的第 start 个 tick 续算与整条轨迹逐位相同（反事实探针、规划用）。
 - 物理参数：名字 → (默认值, 允许范围)，唯一来源是 variants.PARAMS（S23b 并入，和 new_systems 一样）。
+- S24a 长时程：u 是 [horizon,2]（horizon = 64、128），trajectory() 给 horizon+2 帧（tick −1…horizon），像素噪声一次抽
+  horizon+2 帧；都按 tick 顺序接着抽，前 34 帧与 horizon=32 逐位相同。
 """
 import math
 
@@ -59,21 +61,22 @@ def param(system: str, params: dict, name: str):
 
 
 def _check_controls(u):
+    """执行动作 [horizon,2]：默认 32 个 tick；S24a 长时程是 variants.HORIZONS 里的 64、128。"""
     u = np.asarray(u, dtype=np.float64)
-    if u.shape != (TICKS, 2) or not np.isfinite(u).all():
-        raise ValueError("执行动作必须是有限 float64[32,2]")
+    if u.ndim != 2 or u.shape[0] not in variants.HORIZONS or u.shape[1] != 2 or not np.isfinite(u).all():
+        raise ValueError(f"执行动作必须是有限 float64[horizon,2]，horizon ∈ {variants.HORIZONS}")
     return u
 
 
-def frame_ticks(L, ticks):
-    """每帧对应的 tick：整条轨迹（34 帧）默认 −1…32；只画部分帧时必须给出 ticks（−1…32 的整数）。"""
+def frame_ticks(L, ticks, horizon=TICKS):
+    """每帧对应的 tick：整条轨迹（horizon+2 帧，默认 34）默认 −1…horizon；只画部分帧时必须给出 ticks（−1…horizon 的整数）。"""
     if ticks is None:
-        if L != FRAMES:
+        if L != horizon+2:
             raise ValueError("只画部分帧时要传 ticks（会动的干扰光点、像素噪声要知道每帧的 tick）")
-        return np.arange(-1, TICKS+1)
+        return np.arange(-1, horizon+1)
     ticks = np.asarray(ticks)
-    if ticks.shape != (L,) or not np.issubdtype(ticks.dtype, np.integer) or ticks.min() < -1 or ticks.max() > TICKS:
-        raise ValueError("ticks 必须是 [L] 个 −1…32 的整数")
+    if ticks.shape != (L,) or not np.issubdtype(ticks.dtype, np.integer) or ticks.min() < -1 or ticks.max() > horizon:
+        raise ValueError(f"ticks 必须是 [L] 个 −1…{horizon} 的整数")
     return ticks
 
 
@@ -87,18 +90,18 @@ def _layers(system, trajectory_id, v, L, ticks, sigma):
             base = base+(DISTRACTOR_COLOR-base)*w
     image = np.broadcast_to(base, (L, SIZE, SIZE, 3)).copy()
     if v.movers:
-        image = blend_spots(image, mover_centers(rng(system, trajectory_id, 8), v.movers, frame_ticks(L, ticks)),
+        image = blend_spots(image, mover_centers(rng(system, trajectory_id, 8), v.movers, frame_ticks(L, ticks, v.horizon)),
                             DISTRACTOR_COLOR, sigma)
     return image
 
 
 def _finish(image, system, trajectory_id, v, ticks):
-    """遮挡块（流 7）→ 像素噪声（流 4，一次抽 34 帧，第 f 帧用 tick f−1 那份）→ uint8。"""
+    """遮挡块（流 7）→ 像素噪声（流 4，一次抽 horizon+2 帧（默认 34），第 f 帧用 tick f−1 那份）→ uint8。"""
     if v.occluders:
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if v.pixel_noise:
-        noise = rng(system, trajectory_id, 4).normal(0., v.pixel_noise, (FRAMES,)+image.shape[1:])
-        image = image+noise[frame_ticks(image.shape[0], ticks)+1]
+        noise = rng(system, trajectory_id, 4).normal(0., v.pixel_noise, (v.horizon+2,)+image.shape[1:])
+        image = image+noise[frame_ticks(image.shape[0], ticks, v.horizon)+1]
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -168,8 +171,8 @@ class SecondOrder:
     def advance(self, q, u, params, start, ticks, **kw):
         """从 tick=start 的状态 q 推进 ticks 个 tick（执行动作取 u[start:start+ticks]）→ [ticks+1, D]。"""
         u = _check_controls(u)
-        if type(start) is not int or type(ticks) is not int or not 0 <= start <= start+ticks <= TICKS:
-            raise ValueError("续算区间必须是整数 0 ≤ start ≤ start+ticks ≤ 32")
+        if type(start) is not int or type(ticks) is not int or not 0 <= start <= start+ticks <= len(u):
+            raise ValueError(f"续算区间必须是整数 0 ≤ start ≤ start+ticks ≤ {len(u)}")
         q = np.asarray(q, dtype=np.float64).copy(); out = [q]
         for t in range(start, start+ticks):
             q = self.tick(q, u[t], params, **kw)
@@ -178,11 +181,11 @@ class SecondOrder:
         return np.stack(out)
 
     def trajectory(self, trajectory_id, u, params, **kw):
-        """→ 状态 [34, D]，下标 f 对应 tick f−1。"""
+        """→ 状态 [34, D]，下标 f 对应 tick f−1（S24a 长时程 [horizon+2, D]）。"""
         u = _check_controls(u)
         q_prev, q0 = self.start(trajectory_id, params, **kw)
         self.check(q0, params)
-        return np.concatenate((q_prev[None], self.advance(q0, u, params, 0, TICKS, **kw)))
+        return np.concatenate((q_prev[None], self.advance(q0, u, params, 0, len(u), **kw)))
 
     def check(self, q, params):
         if not np.isfinite(q).all():

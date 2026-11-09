@@ -6,6 +6,7 @@ GrayScottSystem、PushSystem 只是把 datasets.active() 的调节项、systems.
 
 共同约定（与 v7 相同）：
 - 控制周期 0.25 s，32 个 tick、33 帧；输入 u 是“执行”动作 [32,2] float64（已含增益、延迟、执行噪声）。
+  S24a 长时程：u 是 [horizon,2]（horizon = 64、128），推进 horizon 个 tick、horizon+1 帧；前 32 个 tick 与 32 逐位相同。
 - 画面 256×256×3 uint8；世界坐标中心列 = 128 + 48x，中心行 = 128 − 48y（y 向上）。
 - 一阶系统：画面包含决定未来的全部状态（模型只看当前一帧）。
 - 随机流：熵 [1703, 1000+SYSTEM_INDEX[name], 轨迹编号, 流号]。SYSTEM_INDEX 取 S20b 把两个名字追加到
@@ -41,9 +42,10 @@ def param(system: str, params: dict, name: str) -> float:
 
 
 def _check_controls(u):
+    """执行动作 [horizon,2]：默认 32 个 tick；S24a 长时程是 variants.HORIZONS 里的 64、128。"""
     u = np.asarray(u, dtype=np.float64)
-    if u.shape != (TICKS, 2) or not np.isfinite(u).all():
-        raise ValueError("执行动作必须是有限 float64[32,2]")
+    if u.ndim != 2 or u.shape[0] not in variants.HORIZONS or u.shape[1] != 2 or not np.isfinite(u).all():
+        raise ValueError(f"执行动作必须是有限 float64[horizon,2]，horizon ∈ {variants.HORIZONS}")
     return u
 
 
@@ -52,7 +54,7 @@ def _finish(image, trajectory_id, system, v, ticks=None):
     if v.occluders:          # S21a：遮挡块画在场景之上、像素噪声之前（与 systems.compose 同一顺序、同一随机流）
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if v.pixel_noise:
-        image = image+pixel_noise(rng(system, trajectory_id, 4), v.pixel_noise, image.shape, ticks)
+        image = image+pixel_noise(rng(system, trajectory_id, 4), v.pixel_noise, image.shape, ticks, v.horizon)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -134,10 +136,10 @@ class GrayScott:
         return U, V, p
 
     def fields(self, trajectory_id, u, params, *, dt=None, burn_in=None):
-        """→ (U [33,N,N], V [33,N,N], p [33,2])。u 是执行动作 [32,2]。"""
+        """→ (U [33,N,N], V [33,N,N], p [33,2])。u 是执行动作 [32,2]（S24a 长时程 [horizon,2] → horizon+1 帧）。"""
         u = _check_controls(u)
         U, V, p = self.start_state(trajectory_id, params, dt=dt, burn_in=burn_in)
-        return self.advance(U, V, p, u, params, 0, TICKS, dt=dt)
+        return self.advance(U, V, p, u, params, 0, len(u), dt=dt)
 
     def start_state(self, trajectory_id, params, *, dt=None, burn_in=None):
         """第 0 帧的完整状态 (U, V, p)：初值（流 0）+ 注入点不动烧入 BURN_IN 个时间单位。"""
@@ -150,8 +152,8 @@ class GrayScott:
         """S21b：从 tick=start 的完整状态推进 ticks 个 tick（执行动作取 u[start:start+ticks]）→ (U, V, p) 各 [ticks+1,…]。
         fields() 就是 start_state + advance(0, 32)，所以从整条轨迹的第 start 帧续算与整条轨迹逐位相同（反事实、规划用）。"""
         u = _check_controls(u); dt = self.DT if dt is None else dt
-        if not 0 <= start <= start+ticks <= TICKS:
-            raise ValueError("续算区间必须满足 0 ≤ start ≤ start+ticks ≤ 32")
+        if not 0 <= start <= start+ticks <= len(u):
+            raise ValueError(f"续算区间必须满足 0 ≤ start ≤ start+ticks ≤ {len(u)}")
         F, k, a = (param(self.name, params, n) for n in ("feed", "kill", "inject"))
         Us, Vs, ps = [U], [V], [p]
         for tick in range(start, start+ticks):
@@ -277,9 +279,9 @@ class Push:
         """→ 隐藏状态 [ticks+1,5]（默认整条 33 帧）。S21b：start、ticks 从 tick=start 的状态 state 续算 ticks 个 tick
         （执行动作取 u[start:start+ticks]），反事实探针和规划用；默认值时与原来逐位相同。"""
         u = _check_controls(u); n = self.STEPS_PER_TICK if steps_per_tick is None else steps_per_tick
-        stop = TICKS if ticks is None else start+ticks
-        if not 0 <= start <= stop <= TICKS:
-            raise ValueError("续算区间必须满足 0 ≤ start ≤ start+ticks ≤ 32")
+        stop = len(u) if ticks is None else start+ticks
+        if not 0 <= start <= stop <= len(u):
+            raise ValueError(f"续算区间必须满足 0 ≤ start ≤ start+ticks ≤ {len(u)}")
         q = (self.initial(trajectory_id, params) if state is None else np.asarray(state, dtype=np.float64)).copy()
         out = [q.copy()]; h = PERIOD/n
         for tick in range(start, stop):
@@ -305,7 +307,7 @@ class Push:
                 w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
                 base = base+(np.array([150., 150., 150.])-base)*w
         if v.movers:     # S21a：会动的干扰光点画在背景之上、方块和推杆之下（与 systems.compose 同一顺序）
-            movers = mover_centers(rng(self.name, trajectory_id, 8), v.movers, frame_ticks(len(states), ticks))
+            movers = mover_centers(rng(self.name, trajectory_id, 8), v.movers, frame_ticks(len(states), ticks, v.horizon))
         frames = []
         for i, (cx, cy, bx, by, th) in enumerate(states):
             co, si = math.cos(th), math.sin(th)

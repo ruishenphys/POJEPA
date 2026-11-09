@@ -14,7 +14,8 @@
 - 观察：sigma 光点大小、color 颜色、background 背景、distractors 干扰物个数、pixel_noise 画面噪声；
   S21a 加 occluders 遮挡块、movers 会动的干扰光点；
 - 数据采集（S21a）：policy 采集策略 random / goal / mixed；
-- 场景族本身（landscape 的 shape）。
+- 场景族本身（landscape 的 shape）；
+- 时间（S24a）：horizon 轨迹长度（控制 tick 数），32 = 原来的 33 帧，64、128 是长时程（65、129 帧）。
 
 模型看到的始终是“下达的”动作；执行噪声、延迟和饱和只作用在物理里（模型看不到），用来测鲁棒性。
 除 occluders（被遮住时状态看不到，有意做成部分可观测）外，所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
@@ -22,6 +23,8 @@ S23b 的五个二阶场景（SECOND_ORDER）本身不是一阶：画面只给位
 随机流：调节项不改变初始状态和动作抽样的随机种子（除非调节项本身改的是动作抽样：axes、segments、zero、policy），
 因此同一编号的轨迹在不同调节项下可以配对比较。流号：0 初值、1 动作、2 预处理、3 静止干扰光点、4 像素噪声、
 5 执行噪声；S21a 新增 6 过程噪声、7 遮挡块、8 会动的干扰光点、9 采集策略（目标点、探索噪声、mixed 的选择）。
+S24a horizon 不用新的随机流：每个流按 tick 顺序抽，长轨迹只是接着抽下去，所以前 32 个 tick 的动作、噪声和画面
+与 horizon=32（其余调节项相同）逐位相同（前缀一致，见 docs/segments/S24a.md §2）。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -48,6 +51,7 @@ COLORS = {"orange": (230., 150., 50.), "white": (235., 235., 235.), "green": (80
 BACKGROUNDS = ("grid", "plain", "checker", "noise")
 SEGMENT_SETS = {"148": (1, 4, 8), "1": (1,), "2": (2,), "4": (4,), "8": (8,)}
 POLICIES = ("random", "goal", "mixed")
+HORIZONS = (32, 64, 128)       # S24a：轨迹的控制 tick 数（帧数 = horizon+1；二阶场景另多 t = −1 一帧）
 # S21a：只对 ODE 粒子类场景（状态是 RK4 积分的向量、受控点是状态前两维）成立的调节项不适用的场景
 FIELD_SYSTEMS = ("advection_diffusion", "gray_scott", "wave")   # 场方程：没有光点（wave 是 S23b 加的）
 # S23b：二阶场景（一帧看不到速度；数据集仍是 33 帧，34 帧见 systems.SecondOrderSystem.frames_with_prev）
@@ -80,6 +84,8 @@ class Variant:
     occluders: int = 0                # 静止不透明遮挡块个数（48×48 像素，每条轨迹位置不同，随机流 7）
     movers: int = 0                   # 会动的干扰光点个数（绕画面中心匀速转，随机流 8；只看一帧就能推出下一步）
     policy: str = "random"            # 采集策略：random = v6 随机；goal = 朝目标（开环推算）；mixed = 每段各半
+    # S24a 时间：轨迹长度（控制 tick 数）。32 = 原来的 33 帧；64、128 是长时程，前 33 帧与 32 逐位相同
+    horizon: int = 32
 
     def param(self, system: str, name: str):
         default = PARAMS[system][name][0]
@@ -138,7 +144,7 @@ def _convert(kw):
     for name, value in kw.items():
         if name in ("gain", "zero", "noise", "sigma", "pixel_noise", "process_noise", "saturation"):
             out[name] = float(value)
-        elif name in ("delay", "distractors", "occluders", "movers"):
+        elif name in ("delay", "distractors", "occluders", "movers", "horizon"):
             out[name] = int(value)
         else:
             out[name] = value
@@ -160,7 +166,8 @@ def validate(system: str, v: Variant) -> None:
               (0. <= v.process_noise <= .3, "process_noise ∈ [0,0.3]"),
               (v.saturation is None or .05 <= v.saturation <= 2., "saturation ∈ [0.05,2]"),
               (0 <= v.occluders <= 3, "occluders ∈ 0–3"), (0 <= v.movers <= 4, "movers ∈ 0–4"),
-              (v.policy in POLICIES, f"policy ∈ {POLICIES}")]
+              (v.policy in POLICIES, f"policy ∈ {POLICIES}"),
+              (type(v.horizon) is int and v.horizon in HORIZONS, f"horizon ∈ {HORIZONS}")]
     for ok, message in checks:
         if not ok:
             raise ValueError("调节项越界：" + message)
@@ -187,10 +194,12 @@ def validate(system: str, v: Variant) -> None:
 # S21a 覆盖表：每个通用调节项取一个非默认的代表值，按 validate 判定在哪些场景可用（DATASET.md 的覆盖表由它生成）
 GENERAL_SAMPLES = {"gain": "2", "axes": "x", "segments": "2", "zero": "0.5", "noise": "0.1", "delay": "1",
                    "saturation": "0.3", "policy": "goal", "process_noise": "0.1", "sigma": "4", "color": "white",
-                   "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10"}
+                   "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10",
+                   "horizon": "128"}
 KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", "saturation"), "数据采集": ("policy",),
                "物理": ("process_noise",),
-               "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise")}
+               "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise"),
+               "时间": ("horizon",)}
 
 
 def coverage() -> dict:

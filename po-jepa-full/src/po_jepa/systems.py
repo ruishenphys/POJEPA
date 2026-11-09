@@ -14,6 +14,11 @@
   它们不是一阶系统（一帧看不到速度）：frames() 仍给数据集的 33 帧（tick 0…32），frames_with_prev() 多给 t = −1 一帧，
   留给两帧（pair）编码，见 SecondOrderSystem。
 
+S24a 长时程（调节项 horizon ∈ {32, 64, 128}）：轨迹有 horizon 个控制 tick、horizon+1 帧（二阶场景另多 t = −1 一帧）。
+下达动作、执行噪声、过程噪声、像素噪声、会动的干扰光点都按 tick 顺序从各自的随机流接着抽，所以前 32 个 tick（前 33 帧）
+与 horizon=32、其余调节项相同的数据集逐位相同；horizon > 32 的下达动作是 LongControls（不是 v7 的 TrajectoryControls，
+v7 的缓存和模型接口只收 32 tick，长时程接入正式流程在第 6 阶段）。
+
 隐藏状态只用于生成画面和诊断，不进入模型。
 """
 from dataclasses import dataclass
@@ -48,6 +53,48 @@ def _spots(centers_rc: np.ndarray, colors: np.ndarray, sigma: float) -> np.ndarr
     return np.rint(image).astype(np.uint8)
 
 
+@dataclass(frozen=True)
+class LongControls:
+    """S24a：horizon > 32 的下达动作。字段和检查与 simulation.TrajectoryControls 相同，只是半开段覆盖 [0, horizon)。
+
+    有意不做 TrajectoryControls 的子类：v7 的缓存、窗口和模型接口（cache.py、actions.py）按 isinstance 收 32 tick 的动作，
+    长时程不能被它们静默当成 32 tick 用。horizon = ends_ticks[-1]，必须是 variants.HORIZONS 里大于 32 的值。
+    """
+    trajectory_id: int
+    starts_ticks: np.ndarray
+    ends_ticks: np.ndarray
+    values: np.ndarray
+
+    def __post_init__(self) -> None:
+        datasets.active().check_id(self.trajectory_id)
+        for value in (self.starts_ticks, self.ends_ticks):
+            if not isinstance(value, np.ndarray) or value.dtype != np.int64 or value.ndim != 1 or not value.size:
+                raise ValueError("control ticks must be nonempty int64[S]")
+        n = self.starts_ticks.size
+        if (self.ends_ticks.shape != (n,) or not isinstance(self.values, np.ndarray) or self.values.dtype != np.float64
+                or self.values.shape != (n, 2) or not np.isfinite(self.values).all() or np.any(np.abs(self.values) > .5)):
+            raise ValueError("commands must be finite float64[S,2] in physical bounds")
+        durations = self.ends_ticks-self.starts_ticks
+        if (self.starts_ticks[0] != 0 or int(self.ends_ticks[-1]) not in variants.HORIZONS or self.ends_ticks[-1] <= TICKS
+                or not np.array_equal(self.ends_ticks[:-1], self.starts_ticks[1:])
+                or np.any(durations <= 0) or not np.isin(durations[:-1], [1, 2, 4, 8]).all() or durations[-1] > 8):
+            raise ValueError(f"long-horizon controls must exactly cover [0,horizon) with horizon in {variants.HORIZONS[1:]} "
+                             "and segment lengths 1/2/4/8")
+
+    @property
+    def horizon(self) -> int:
+        return int(self.ends_ticks[-1])
+
+
+def horizon_of(controls) -> int:
+    """下达动作覆盖的 tick 数：TrajectoryControls 是 32，LongControls 是它的 horizon。"""
+    if isinstance(controls, simulation.TrajectoryControls):
+        return TICKS
+    if isinstance(controls, LongControls):
+        return controls.horizon
+    raise ValueError("controls must be simulation.TrajectoryControls or systems.LongControls")
+
+
 POLICY_HORIZON = 1.      # 秒：goal 策略按“1 秒内走到目标”给速度，u = (目标 − 估计位置)/(K·1 s)
 POLICY_EXPLORE = .1      # goal 策略的探索噪声标准差（动作单位，随机流 9）
 
@@ -60,16 +107,20 @@ def commanded_controls(trajectory_id: int) -> simulation.TrajectoryControls:
     “朝目标”是开环的：不跑仿真，用初值的受控点位置 p̂ 做航位推算 p̂ ← p̂ + K·u·段长，K 是下达动作到受控点速度的
     名义倍数（System.policy_anchor）。所以缓存核对动作（cache.py）时不用重跑仿真；执行时的增益、延迟、噪声、饱和
     和场景本身的动力学策略都不知道。
+
+    S24a 长时程（horizon > 32）：同一个循环抽到 horizon 个 tick（流 1、流 9 都是接着抽），返回 LongControls。前 32 个 tick
+    的逐 tick 动作与 horizon=32 相同；跨过 tick 32 的那一段在 horizon=32 时被截在 32，这里不截。
     """
     v = datasets.active().knobs
-    if not v.changes_controls():
+    T = v.horizon
+    if not v.changes_controls() and T == TICKS:
         return simulation.sample_controls(trajectory_id)
     g = simulation._rng(trajectory_id, 1); lengths = variants.SEGMENT_SETS[v.segments]
     if v.policy != "random":
         g9 = simulation._rng(trajectory_id, 9)
         estimate, target, kin = get().policy_anchor(trajectory_id, v, g9)
     starts, ends, values, tick = [], [], [], 0
-    while tick < TICKS:
+    while tick < T:
         length = int(g.choice(lengths)) if len(lengths) > 1 else lengths[0]
         value = np.zeros(2) if g.random() < v.zero else g.uniform(-.5, .5, 2)
         if v.policy != "random" and value.any():
@@ -79,15 +130,20 @@ def commanded_controls(trajectory_id: int) -> simulation.TrajectoryControls:
         if v.axes == "x": value[1] = 0.
         if v.axes == "y": value[0] = 0.
         if v.policy != "random":
-            estimate = estimate+kin*value*(min(tick+length, TICKS)-tick)*PERIOD
-        starts.append(tick); tick = min(tick+length, TICKS); ends.append(tick); values.append(value)
-    return simulation.TrajectoryControls(trajectory_id, np.array(starts, dtype=np.int64), np.array(ends, dtype=np.int64),
-                                         np.array(values, dtype=np.float64))
+            estimate = estimate+kin*value*(min(tick+length, T)-tick)*PERIOD
+        starts.append(tick); tick = min(tick+length, T); ends.append(tick); values.append(value)
+    kind = simulation.TrajectoryControls if T == TICKS else LongControls
+    return kind(trajectory_id, np.array(starts, dtype=np.int64), np.array(ends, dtype=np.int64),
+                np.array(values, dtype=np.float64))
 
 
 def applied_ticks(trajectory_id, v, controls) -> np.ndarray:
-    """物理里实际执行的动作 [32,2]：下达动作 → 延迟 delay tick → 乘增益 → 加执行噪声（随机流 5，模型看不到）。"""
-    u = np.zeros((TICKS, 2))
+    """物理里实际执行的动作 [horizon,2]：下达动作 → 延迟 delay tick → 乘增益 → 加执行噪声（随机流 5，模型看不到）。
+    S24a：长度 = 下达动作覆盖的 tick 数，必须等于 v.horizon（不许把 32 tick 的动作拿到长时程数据集上用，反之亦然）。"""
+    T = horizon_of(controls)
+    if T != v.horizon:
+        raise ValueError(f"下达动作覆盖 {T} 个 tick，调节项的 horizon 是 {v.horizon}")
+    u = np.zeros((T, 2))
     for a, b, value in zip(controls.starts_ticks, controls.ends_ticks, controls.values):
         u[a:b] = value
     if v.delay:
@@ -122,15 +178,15 @@ MOVER_OMEGA = .6                            # rad/s，逆时针（y 向上）；
 MOVER_RADIUS = (40., 110.)                  # 像素，绕画面中心
 
 
-def frame_ticks(L, ticks):
-    """每帧对应的 tick：整条轨迹（33 帧）默认 0…32；单帧或几帧（反事实、规划）必须给出 ticks。"""
+def frame_ticks(L, ticks, horizon=TICKS):
+    """每帧对应的 tick：整条轨迹（horizon+1 帧，默认 33）默认 0…horizon；单帧或几帧（反事实、规划）必须给出 ticks。"""
     if ticks is None:
-        if L != TICKS+1:
+        if L != horizon+1:
             raise ValueError("会动的干扰光点和像素噪声需要知道每帧的 tick：只画部分帧时要传 ticks")
-        return np.arange(TICKS+1)
+        return np.arange(horizon+1)
     ticks = np.asarray(ticks)
-    if ticks.shape != (L,) or ticks.min() < 0 or ticks.max() > TICKS:
-        raise ValueError("ticks 必须是 [L] 个 0…32 的整数")
+    if ticks.shape != (L,) or ticks.min() < 0 or ticks.max() > horizon:
+        raise ValueError(f"ticks 必须是 [L] 个 0…{horizon} 的整数")
     return ticks
 
 
@@ -152,13 +208,14 @@ def blend_spots(image, centers, color, sigma):
     return image
 
 
-def pixel_noise(g, sigma, shape, ticks=None):
-    """像素噪声（随机流 4）：整条轨迹一次抽 [33,256,256,3]，第 t 帧用第 t 份。
+def pixel_noise(g, sigma, shape, ticks=None, horizon=TICKS):
+    """像素噪声（随机流 4）：整条轨迹一次抽 [horizon+1,256,256,3]（默认 33 帧），第 t 帧用第 t 份。
     画整条 33 帧且不给 ticks 时就是原来的一次抽取（逐位不变）；只画部分帧（反事实、规划，S21b）时按 ticks 取同一份噪声，
-    所以单帧重画与整条轨迹的那一帧逐位相同。部分帧不给 ticks 报错（不静默地把第 0 帧的噪声用到别的 tick 上）。"""
-    if ticks is None and shape[0] == TICKS+1:
+    所以单帧重画与整条轨迹的那一帧逐位相同。部分帧不给 ticks 报错（不静默地把第 0 帧的噪声用到别的 tick 上）。
+    S24a：长时程按顺序多抽，前 33 帧的噪声与 horizon=32 相同。"""
+    if ticks is None and shape[0] == horizon+1:
         return g.normal(0., sigma, shape)
-    return g.normal(0., sigma, (TICKS+1,)+tuple(shape[1:]))[frame_ticks(shape[0], ticks)]
+    return g.normal(0., sigma, (horizon+1,)+tuple(shape[1:]))[frame_ticks(shape[0], ticks, horizon)]
 
 
 def occlude(image, g, count):
@@ -186,7 +243,7 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
     row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
     image = np.broadcast_to(base, (L, SIZE, SIZE, 3)).copy()
     if v.movers:
-        centers = mover_centers(simulation._rng(trajectory_id, 8), v.movers, frame_ticks(L, ticks))
+        centers = mover_centers(simulation._rng(trajectory_id, 8), v.movers, frame_ticks(L, ticks, v.horizon))
         image = blend_spots(image, centers, DISTRACTOR_COLOR, sigma)
     for p in range(rc.shape[1]):
         r = rc[:, p, 0, None, None]; c = rc[:, p, 1, None, None]
@@ -195,7 +252,7 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
     if v.occluders:
         image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
     if v.pixel_noise:
-        image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks)
+        image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks, v.horizon)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -224,7 +281,8 @@ class System:
     def render(self, states: np.ndarray) -> np.ndarray: raise NotImplementedError
 
     def frames(self, trajectory_id: int) -> tuple[np.ndarray, np.ndarray]:
-        """返回 (隐藏状态 [33,D], 画面 [33,256,256,3] uint8)。基础场景走原实现（逐位不变），有调节项时走可调实现。"""
+        """返回 (隐藏状态 [33,D], 画面 [33,256,256,3] uint8)。基础场景走原实现（逐位不变），有调节项时走可调实现。
+        S24a：horizon > 32 时是 [horizon+1, …]（horizon 也是调节项，走可调实现）。"""
         v = datasets.active().knobs
         if v.is_default:
             states = self.reference_trajectory(trajectory_id)
@@ -237,17 +295,18 @@ class System:
         """分段常数“执行”动作下的 RK4（每 tick 128 步）；可从任意 tick 的给定状态出发（反事实探针用）。
 
         S21a 过程噪声：dq = f(q,u) dt + σ dW。漂移每个子步用 RK4，噪声在子步末尾加 σ·√h·ξ（加性噪声的
-        Euler–Maruyama）。ξ 是随机流 6 一次抽好的 [32,128,D] 标准正态，按绝对 tick 取，所以从任意 tick 出发的
-        反事实仿真用的是同一份噪声（同一起点、同一噪声、只换动作）。
+        Euler–Maruyama）。ξ 是随机流 6 一次抽好的 [horizon,128,D] 标准正态（默认 [32,128,D]），按绝对 tick 取，所以从任意
+        tick 出发的反事实仿真用的是同一份噪声（同一起点、同一噪声、只换动作）；长时程的前 32 个 tick 与 horizon=32 相同。
         """
         u = applied_ticks(trajectory_id, v, commanded_controls(trajectory_id) if controls is None else controls)
+        T = len(u)
         q = (self.vinitial(trajectory_id, v) if state is None else np.asarray(state, dtype=np.float64)).copy()
         out = [q.copy()]; h = PERIOD/128
         f = lambda x, ut: self.vfield(x, ut, v)+self.wall(x)
         if v.process_noise:
-            xi = simulation._rng(trajectory_id, 6).standard_normal((TICKS, 128, q.shape[0]))
+            xi = simulation._rng(trajectory_id, 6).standard_normal((T, 128, q.shape[0]))
             scale = v.process_noise*math.sqrt(h)
-        for tick in range(start, TICKS if ticks is None else start+ticks):
+        for tick in range(start, T if ticks is None else start+ticks):
             for sub in range(128):
                 k1 = f(q, u[tick]); k2 = f(q+h*k1/2, u[tick])
                 k3 = f(q+h*k2/2, u[tick]); k4 = f(q+h*k3, u[tick])
@@ -501,12 +560,13 @@ class AdvectionDiffusion(System):
     def variant_fields(self, trajectory_id, v, *, controls=None, start=0, field=None, ticks=None):
         """可调版本：扩散系数、流速比例、团数；执行动作经 applied_ticks（增益、延迟、噪声）。"""
         u = applied_ticks(trajectory_id, v, commanded_controls(trajectory_id) if controls is None else controls)
+        T = len(u)
         D, flow = v.param(self.name, "diffusion"), v.param(self.name, "flow")
         k = np.fft.fftfreq(SIZE, d=1./SIZE)*2*np.pi
         ky, kx = np.meshgrid(k, k, indexing="ij")
         spectrum = np.fft.fft2(self.variant_initial(trajectory_id, v) if field is None else field)
         out = [np.fft.ifft2(spectrum).real]
-        for tick in range(start, TICKS if ticks is None else start+ticks):
+        for tick in range(start, T if ticks is None else start+ticks):
             wx, wy = flow*u[tick]
             spectrum = spectrum*np.exp((-D*(kx**2+ky**2)-1j*(kx*wx-ky*wy))*PERIOD)
             out.append(np.fft.ifft2(spectrum).real)
@@ -520,7 +580,7 @@ class AdvectionDiffusion(System):
         if v.occluders:
             image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
         if v.pixel_noise:
-            image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks)
+            image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks, v.horizon)
         return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 
@@ -595,7 +655,7 @@ class NewSystem(System):
     """
 
     def _impl(self, trajectory_id, v=None, controls=None):
-        """→ (new_systems 里的实现, 执行动作 [32,2], 当前数据集的调节项)。controls：下达动作，None = 这条轨迹自己的
+        """→ (new_systems 里的实现, 执行动作 [horizon,2]（默认 [32,2]）, 当前数据集的调节项)。controls：下达动作，None = 这条轨迹自己的
         （反事实探针、规划换成别的动作）。v：调用方以为的调节项，必须就是当前数据集的（S21b：探针和规划传进来的 v）。"""
         spec = datasets.active()
         if spec.system != self.name:
@@ -620,11 +680,11 @@ class NewSystem(System):
         raise ValueError(f"{self.name} 的画面要用 frames() 生成")
 
     @staticmethod
-    def _window(start, state, ticks):
-        """反事实/规划的续算区间检查：start>0 时必须给出 tick=start 的状态。→ 推进的 tick 数。"""
-        ticks = TICKS-start if ticks is None else ticks
-        if type(start) is not int or type(ticks) is not int or not (0 <= start and 0 <= ticks and start+ticks <= TICKS):
-            raise ValueError("续算区间必须是整数 0 ≤ start ≤ start+ticks ≤ 32")
+    def _window(start, state, ticks, horizon=TICKS):
+        """反事实/规划的续算区间检查：start>0 时必须给出 tick=start 的状态。→ 推进的 tick 数。horizon：轨迹的 tick 数（S24a）。"""
+        ticks = horizon-start if ticks is None else ticks
+        if type(start) is not int or type(ticks) is not int or not (0 <= start and 0 <= ticks and start+ticks <= horizon):
+            raise ValueError(f"续算区间必须是整数 0 ≤ start ≤ start+ticks ≤ {horizon}")
         if start > 0 and state is None:
             raise ValueError("从 tick>0 出发要给出那一刻的状态 state")
         return ticks
@@ -654,7 +714,7 @@ class GrayScottSystem(NewSystem):
 
     def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
         impl, u, v = self._impl(trajectory_id, v, controls)
-        ticks = self._window(start, state, ticks); params = dict(v.params)
+        ticks = self._window(start, state, ticks, len(u)); params = dict(v.params)
         if state is None:
             U, V, p = impl.start_state(trajectory_id, params)
         else:
@@ -683,7 +743,7 @@ class PushSystem(NewSystem):
 
     def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
         impl, u, v = self._impl(trajectory_id, v, controls)
-        ticks = self._window(start, state, ticks)
+        ticks = self._window(start, state, ticks, len(u))
         return impl.trajectory(trajectory_id, u, dict(v.params), state=state, start=start, ticks=ticks)
 
     def draw(self, states, trajectory_id, v, ticks=None):
@@ -719,12 +779,12 @@ class SecondOrderSystem(NewSystem):
         return second_order
 
     def frames_with_prev(self, trajectory_id):
-        """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1。"""
+        """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1（S24a 长时程是 horizon+2 帧）。"""
         impl, u, v = self._impl(trajectory_id)
         return impl.frames(trajectory_id, u, dict(v.params), v)
 
     def frames(self, trajectory_id):
-        """→ (隐藏状态 [33, d], 画面 [33,256,256,3] uint8)，tick 0…32（= frames_with_prev 的下标 1…33）。"""
+        """→ (隐藏状态 [33, d], 画面 [33,256,256,3] uint8)，tick 0…32（= frames_with_prev 的下标 1…33；长时程 0…horizon）。"""
         states, frames = self.frames_with_prev(trajectory_id)
         return states[1:], frames[1:]
 
@@ -744,7 +804,7 @@ class SecondOrderSystem(NewSystem):
 
     def variant_trajectory(self, trajectory_id, v, *, controls=None, start=0, state=None, ticks=None):
         impl, u, v = self._impl(trajectory_id, v, controls)
-        ticks = self._window(start, state, ticks); params = dict(v.params)
+        ticks = self._window(start, state, ticks, len(u)); params = dict(v.params)
         if state is None:
             state = impl.start(trajectory_id, params)[1]      # tick 0：初值 + 零动作预跑，与 trajectory() 相同
             impl.check(state, params)
@@ -760,9 +820,9 @@ class SecondOrderSystem(NewSystem):
         if v != datasets.active().knobs:
             raise ValueError(f"{self.name}：传入的调节项与当前数据集 {datasets.active().tag} 的不一致")
         if ticks is None:
-            if len(states) != TICKS+1:
+            if len(states) != v.horizon+1:
                 raise ValueError("只画部分帧时要传 ticks")
-            ticks = np.arange(TICKS+1)
+            ticks = np.arange(v.horizon+1)
         return self._module().SYSTEMS[self.name].draw(states, trajectory_id, dict(v.params), v, ticks)
 
     def policy_anchor(self, trajectory_id, v, g):
