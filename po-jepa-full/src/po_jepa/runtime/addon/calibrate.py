@@ -27,11 +27,13 @@ from po_jepa.fourier import build_fixed_fourier
 from po_jepa.losses import LossConfig
 
 IMPORT_RECORD = "IMPORTED.json"
+# 和 tools/import_v7_calibration.py 的 V7_COMMITS 相同（测试核对）：只接受 token 写法 0ac45fe 导入的 v7 标定
+V7_COMMIT = "0ac45fe03bf43b96bf861446b8aa2ada4f4a8987"
 
 
 def require_imported_v7_calibration() -> str:
     """补跑入口用的 v7 标定必须是 tools/import_v7_calibration.py 导入的那份（16 §3.1）：IMPORTED.json 里有这个文件名的
-    记录，记录的 sha256 等于文件当前的 SHA。返回这个 SHA。"""
+    记录，记录的 sha256 等于文件当前的 SHA，记录的 v7_commit 是 0ac45fe（旧提交是模态写法，不能混用）。返回这个 SHA。"""
     path = check.v7_calibration_path()
     record = path.parent/IMPORT_RECORD
     if not path.exists():
@@ -42,6 +44,9 @@ def require_imported_v7_calibration() -> str:
     digest = cache.file_sha(path)
     if entry is None or entry.get("sha256") != digest:
         raise ValueError(f"{path.name} 和 {IMPORT_RECORD} 的导入记录不符：本目录的 v7 标定被改过或不是导入的")
+    if entry.get("v7_commit") != V7_COMMIT:
+        raise ValueError(f"{path.name} 的导入记录 v7_commit 是 {entry.get('v7_commit')}，应为 {V7_COMMIT}"
+                         "（旧提交是模态写法，请 git pull 到 0ac45fe 后删掉本目录的 v7 标定和 IMPORTED.json 重新导入）")
     return digest
 
 

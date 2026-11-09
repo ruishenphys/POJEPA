@@ -14,6 +14,7 @@
 git 克隆里的 po-jepa/features/ 只有元数据、没有 raw_z.npy，不是这个目录。
 """
 import argparse
+import shlex
 from pathlib import Path
 import sys
 
@@ -57,13 +58,13 @@ def main_lines(stage, v6_features=""):
     common = f"--updates {updates}"
 
     def feats(scene):
-        return v6_features if uses_v6(scene, n, v6_features) else f"{FEATURES}/{name(scene)}-{n}"
+        return shlex.quote(v6_features) if uses_v6(scene, n, v6_features) else f"{FEATURES}/{name(scene)}-{n}"
 
     lines = ["# ===== A0 准备（CPU，3 条）",
              f"python tools/import_v7_calibration.py --v7-tree {V7_TREE} --stage {stage}",
              f"python tools/encoder_identity.py --encoder {ENCODER} --ac-checkpoint {AC} --output {root}/encoder-identity.json",
              f"python tools/addon_preflight.py --v7-results {v7} --features {FEATURES}"
-             + (f" --v6-features {v6_features}" if v6_features else "") + f" --stage {stage} --output {root}/preflight.json",
+             + (f" --v6-features {shlex.quote(v6_features)}" if v6_features else "") + f" --stage {stage} --output {root}/preflight.json",
              f"# ===== C 补跑标定（GPU，每个场景 1 条，共 {len(scenes)} 条）"]
     for s in scenes:
         lines.append(f"python run.py calibrate-addon {ds(s, n)} {common} --features-root {feats(s)} --device cuda:0 "

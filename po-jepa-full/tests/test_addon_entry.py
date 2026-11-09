@@ -407,3 +407,20 @@ def test_entry_parser_and_protocol(tmp_path, monkeypatch):
     monkeypatch.setenv(checks.PROTOCOL_ENV, "v6")
     with pytest.raises(ValueError, match="^补跑子命令只用于 v7 协议"):
         entry.execute(args("calibrate-addon", tmp_path))
+
+
+def test_import_record_must_name_token_v7(v7):
+    """Codex 评审（2026-11-09）：补跑入口不只核 SHA，还核导入记录的 v7_commit 是 0ac45fe；旧提交（模态写法）的记录拒绝。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("import_v7_calibration", Path(calibrate.__file__).parents[4]/"tools"/"import_v7_calibration.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    assert (calibrate.V7_COMMIT,) == tool.V7_COMMITS
+    assert calibrate.require_imported_v7_calibration() == cache.file_sha(v7)
+    record = v7.parent/"IMPORTED.json"
+    files = json.loads(record.read_text(encoding="utf-8"))["files"]
+    for old in ("653e2d07477d809e933fdedddebfc77c655b71c5", "911bc09", None):
+        entry = dict(files[v7.name], v7_commit=old) if old else {k: x for k, x in files[v7.name].items() if k != "v7_commit"}
+        record.write_bytes(cache._json_bytes(dict(schema="addon_v7_calibration_import_v1", files={v7.name: entry})))
+        with pytest.raises(ValueError, match="旧提交是模态写法"):
+            calibrate.require_imported_v7_calibration()

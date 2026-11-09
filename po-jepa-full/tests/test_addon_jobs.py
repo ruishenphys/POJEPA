@@ -406,3 +406,18 @@ def test_runner_resumes_run_renames_d4_and_skips_done(tmp_path):
         "d4 --condition koopman --training-run r/k-resume1 --output r/e"]                   # 下一段改指向续训目录
     assert (work/"r/d.broken1/run/job/job.json").exists() and (work/"r/d/run/COMPLETE.json").exists()
     assert (work/"r/k-resume1/run/COMPLETE.json").exists() and not (work/"r/k/run/COMPLETE.json").exists()
+
+
+def test_v6_features_path_is_shell_quoted():
+    """Codex 评审（2026-11-09）：--v6-features 的路径逐个参数 shell 引用，含空格的绝对路径经 shlex.split（run_jobs 的读法）后仍是一个参数。"""
+    spaced = "/srv/v6 data/features"
+    lines = [line for line in jobs.job_lines("pilot", spaced) if not line.startswith("#")]
+    hits = 0
+    for line in lines:
+        argv = shlex.split(line)
+        for flag in ("--features-root", "--v6-features"):
+            if flag in argv and argv[argv.index(flag)+1].startswith("/srv"):
+                assert argv[argv.index(flag)+1] == spaced, line
+                hits += 1
+    assert hits >= 4
+    assert jobs.job_lines("pilot", V6) == [line.replace(shlex.quote(spaced), V6) for line in jobs.job_lines("pilot", spaced)]
