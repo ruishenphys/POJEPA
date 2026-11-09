@@ -135,16 +135,20 @@ def _cfg(fake, **data):
 
 
 def build(fake: RawBucket, root: Path, **data):
-    """建索引和划分，再把每条入选回合的 h5 和 MP4 放进假存储桶。返回 (配置, 入选回合 {uuid: 行})。"""
+    """把每条回合的元数据、h5 和 MP4 放进假存储桶（索引要列到原始文件，S03b），再建索引和划分。
+    返回 (配置, 入选回合 {uuid: 行})。"""
+    rows = []
     for spec in SPECS:
         name, value = meta(**spec)
         fake.put(name, value)
+        rows.append(dict(value, _name=name))
     config = _cfg(fake, **data)
-    ix.run_index(config, root, sleep=lambda s: None, threads=2)
-    episodes = {e["uuid"]: e for e in sp.read_episodes(ix.index_dir(root)) if e["selected"]}
-    for k, e in enumerate(sorted(episodes.values(), key=lambda e: e["uuid"])):
+    for k, e in enumerate(sorted((ix.normalize(row, config.data) for row in rows), key=lambda e: e["uuid"])):
         for local, name in dl.episode_files(e, config.data):
             fake.put(name, _payload(zlib.crc32(f"{k}/{local}".encode()), 30_000 + 1_000*k + (7 if local.endswith(".mp4") else 0)))
+    ix.run_index(config, root, sleep=lambda s: None, threads=2)
+    episodes = {e["uuid"]: e for e in sp.read_episodes(ix.index_dir(root)) if e["selected"]}
+    assert len(episodes) == len(SPECS)
     fake.object_gets.clear()
     fake.info_paths.clear()
     return config, episodes

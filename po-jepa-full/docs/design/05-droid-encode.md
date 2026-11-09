@@ -20,7 +20,7 @@
 3. 转 float16 存成 `features/<片名>/<uuid>.npy`（先写 `.tmp` 再改名）。转之前检查最大绝对值 < 65504，并记下最大相对舍入误差（v7 同样做法）。
 4. 写 `features/<片名>/<uuid>.json`：`rows`、`shape`、`dtype`、文件 SHA、**每一行的 SHA**（float16 字节）、`frame_sha256`（抄自准备文件，便于下游直接核）、准备文件 JSON 的 SHA、编码器权重 SHA、预处理 SHA（v7 `cache.v7_preprocess_sha256()`）、上游提交、`batch_frames`、最大相对舍入误差、代码 SHA、GPU 型号和驱动、torch 版本、用时。
 
-特征第 i 行就是第 15i 帧（第 i 个周期边界）。每条回合平均约 35 行；训练前 2 万条共 695,986 行，float16 约 500 GB。
+特征第 i 行就是第 15i 帧（第 i 个周期边界）。每条回合平均约 35 行；训练前 2 万条共 696,912 行，float16 约 500 GB。
 
 ## 3. 片完成和清单
 

@@ -1,7 +1,7 @@
 """DROID 1.0.1 划分（docs/design/02-droid-index-and-splits.md §5–§7）。
 
 阶段 1（`index`）的后半：从 `index/episodes.jsonl` 的入选回合算出验证集、同分布测试集、留出实验室测试集和
-完整训练顺序（§5），写 `index/splits.json`（§7），由 `index.run_index` 在写清单之前调用，清单因此记四个文件。
+完整训练顺序（§5），写 `index/splits.json`（§7），由 `index.run_index` 在写清单之前调用，清单因此记五个文件（S03b 加了 raw_objects.jsonl）。
 §6 的片由 `shard_plan` 从划分文件算出。所有排序都用 `index.salted_hash(split_salt, kind, key)` 升序。
 
 `splits.json` 是一个数据根共用的文件：它只依赖入选回合和 `SPLIT_KEYS` 这几个配置键，不依赖 N（`train_episodes`）
@@ -131,7 +131,7 @@ def read_episodes(directory: Path) -> list[dict]:
 
 
 def load_splits(data_root: Path | str, config: DroidConfig) -> dict:
-    """读 `index/splits.json`：先核索引清单和四个文件，再核 schema、salt、划分配置键都和 `config` 一致、
+    """读 `index/splits.json`：先核索引清单和五个文件，再核 schema、salt、划分配置键都和 `config` 一致、
     `episodes_sha256` 等于清单里 episodes.jsonl 的 SHA、`counts` 和列表长度一致。冒烟数据根（schema
     `droid_splits_smoke_v1`，14 §4）和任何别的 schema 都拒绝。"""
     directory = ix.index_dir(data_root)

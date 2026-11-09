@@ -281,10 +281,10 @@ def test_run_index_fails_without_manifest_when_splits_fail(bucket, tmp_path):  #
 
 
 def _index_dir(tmp_path, splits_value, episodes_text="{}\n"):
-    """手搭一个索引目录：四个文件和一份自洽的清单。"""
+    """手搭一个索引目录：五个文件和一份自洽的清单。"""
     directory = tmp_path/"index"
     directory.mkdir(exist_ok=True)
-    for name in ("listing.jsonl", "metadata.jsonl"):
+    for name in ("listing.jsonl", "metadata.jsonl", "raw_objects.jsonl"):
         (directory/name).write_text("", encoding="utf-8")
     (directory/"episodes.jsonl").write_text(episodes_text, encoding="utf-8")
     if callable(splits_value):
@@ -341,24 +341,24 @@ def test_feature_rows_and_list_digest_hand_values():
 
 REAL_ROOT = os.environ.get("PO_JEPA_DROID_DATA_ROOT")
 ACCEPTANCE = {
-    "candidate_scenes": 1050,
+    "candidate_scenes": 1038,
     "first_test_scene": "IPRL/5445595898",
     "first_val_scene": "AUTOLab/2913242782",
     "first_id_test": "IPRL+41a1536a+2023-11-08-23h-35m-17s",
     "first_ood_test": "PennPAL+acda9df3+2023-07-15-17h-18m-49s",
     "train_first": "CLVR+13759f6e+2023-05-15-22h-28m-19s",
-    "train_20000th": "IRIS+226b9f35+2023-07-16-17h-12m-40s",
+    "train_20000th": "TRI+52ca9b6a+2024-02-06-15h-12m-51s",
     "excluded_scene_ids": [4465064685, 4823049285],
-    "removed_from_train": 3546,
-    "success_failure": {"id_test": [405, 95], "val": [245, 55], "ood_test": [430, 70],
-                        "train_first_20000": [16471, 3529]},
+    "removed_from_train": 3524,
+    "success_failure": {"id_test": [409, 91], "val": [246, 54], "ood_test": [430, 70],
+                        "train_first_20000": [16600, 3400]},
     "id_test_labs": {"AUTOLab": 45, "CLVR": 5, "GuptaLab": 5, "ILIAD": 45, "IPRL": 70, "IRIS": 30, "RAD": 35,
                      "RAIL": 30, "TRI": 200, "WEIRD": 35},
-    "digests": {"id_test": "d22b120cd8cee197", "val": "4c62e9eab0668bf2", "ood_test": "89b6a75a6d1aeb91",
-                "train_order": "c6835c3487671a07"},
-    "feature_rows": {"train_first_20000": 695986, "train_first_500": 18025, "id_test": 18657, "ood_test": 15468,
-                     "val": 9119},
-    "long_horizon": {"id_test": [259, 143], "ood_test": [263, 153]},
+    "digests": {"id_test": "2de8807ef70ace77", "val": "490b22363540ae95", "ood_test": "f3caf536bff734bf",
+                "train_order": "b9dc25a09c5fe88a"},
+    "feature_rows": {"train_first_20000": 696912, "train_first_500": 17931, "id_test": 18596, "ood_test": 15592,
+                     "val": 9128},
+    "long_horizon": {"id_test": [259, 141], "ood_test": [268, 156]},
 }
 
 
@@ -374,8 +374,8 @@ def test_real_splits_acceptance_table():
     assert (directory/"splits.json").read_bytes() == ix.cache._json_bytes(recomputed)
     assert sp.load_splits(REAL_ROOT, load_config(CONFIGS/"full.yaml")) == splits
     summary = sp.summary(splits, episodes)
-    assert summary.pop("counts") == {"selected": 32585, "candidate_scenes": 1050, "id_test": 500, "val": 300,
-                                     "ood_test": 500, "train_order": 23745, "train_failures": 4196}
+    assert summary.pop("counts") == {"selected": 32141, "candidate_scenes": 1038, "id_test": 500, "val": 300,
+                                     "ood_test": 500, "train_order": 23484, "train_failures": 4000}
     assert summary == ACCEPTANCE
     assert len(sp.shard_plan(splits, load_config(CONFIGS/"full.yaml").data)) == 23
     assert list(sp.shard_plan(splits, config.data)) == ["train-000", "val", "id_test", "ood_test"]

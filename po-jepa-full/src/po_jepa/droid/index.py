@@ -1,8 +1,9 @@
 """DROID 1.0.1 索引（docs/design/02-droid-index-and-splits.md §1–§4、§7、§8）。
 
-阶段 1 的前半：用 GCS JSON API 列出全部 `metadata_*.json`（§1），逐个下载并核对 MD5（§2），统一字段（§3），
-判定入选（§4），写 `index/listing.jsonl`、`index/metadata.jsonl`、`index/episodes.jsonl`；后半（§5–§7，S03）由
-`splits.py` 算划分、写 `index/splits.json`；最后写记这四个文件的 `index/MANIFEST.json`（§7）。§8 的抽样核对是 `verify_sample`。
+阶段 1 的前半：用 GCS JSON API 列出全部 `metadata_*.json` 和全部原始文件（`trajectory.h5`、`recordings/MP4/*.mp4`，§1），
+逐个下载元数据并核对 MD5（§2），统一字段（§3），判定入选（§4，含 S03b 的 `missing_raw`），写 `index/listing.jsonl`、
+`index/metadata.jsonl`、`index/episodes.jsonl`、`index/raw_objects.jsonl`；后半（§5–§7，S03）由 `splits.py` 算划分、
+写 `index/splits.json`；最后写记这五个文件的 `index/MANIFEST.json`（§7）。§8 的抽样核对是 `verify_sample`。
 
 网络只走两个地址前缀：`data.list_api`（列表）和 `data.object_base`（对象内容），都从配置读，测试时换成本地假服务器。
 每次请求失败（连接、HTTP 状态、JSON、MD5/大小不对）都按 `RETRY_DELAYS` 重试，重试用尽就报错退出，不跳过任何对象。
@@ -34,19 +35,26 @@ LISTING_FILE = "listing.jsonl"
 METADATA_FILE = "metadata.jsonl"
 EPISODES_FILE = "episodes.jsonl"
 MANIFEST_FILE = "MANIFEST.json"
+RAW_FILE = "raw_objects.jsonl"       # S03b：每条回合两个原始文件的列表条目（02 §4、§7）
 SPLITS_FILE = "splits.json"          # 内容由 splits.py 写（02 §5–§7）
-INDEX_FILES = (LISTING_FILE, METADATA_FILE, EPISODES_FILE, SPLITS_FILE)
+INDEX_FILES = (LISTING_FILE, METADATA_FILE, EPISODES_FILE, RAW_FILE, SPLITS_FILE)
 MANIFEST_SCHEMA = "droid_index_v1"
 
 METADATA_GLOB = "**/metadata_*.json"
 LIST_FIELDS = "items(name,size,md5Hash,crc32c,updated),nextPageToken"
+# S03b：原始文件的两次列表（§1）；键是 episodes.jsonl 里对应的字段名。glob 只列这两种名字，所以 §3 要求
+# `h5` 的文件名是 trajectory.h5、`left_mp4` 直接在 recordings/MP4/ 下，否则在列表里找不到会被误判成缺文件。
+RAW_GLOBS = (("h5", "**/trajectory.h5"), ("left_mp4", "**/recordings/MP4/*.mp4"))
+RAW_LIST_FIELDS = "items(name,size,md5Hash),nextPageToken"
+RAW_ITEM_KEYS = ("name", "size", "md5Hash")
+H5_NAME = "trajectory.h5"
 PAGE_SIZE = 1000
 RETRY_DELAYS = (1, 2, 4, 8, 16)      # §1：失败后重试 5 次，间隔 1、2、4、8、16 秒
 METADATA_THREADS = 32                # §2
 TIMEOUT_SECONDS = 60
 
 OUTCOMES = ("success", "failure")
-REASONS = ("duplicate_uuid", "short", "flag_mismatch", "no_scene_id")   # §4 表的顺序
+REASONS = ("duplicate_uuid", "short", "flag_mismatch", "no_scene_id", "missing_raw")   # §4 表的顺序
 RECORD_FIELDS = ("building", "date", "robot_serial", "user_id", "r2d2_version")   # §3：只作记录
 EXTERNAL_CAMERAS = (("ext1", "ext1_cam_serial"), ("ext2", "ext2_cam_serial"))
 INTERNAL_PREFIX = "_"
@@ -117,8 +125,8 @@ def _md5_base64(body: bytes) -> str:
 
 # ---------------------------------------------------------------- §1 列表
 
-def list_url(data: DataConfig, token: str | None) -> str:
-    query = {"prefix": data.prefix, "matchGlob": METADATA_GLOB, "maxResults": str(PAGE_SIZE), "fields": LIST_FIELDS}
+def list_url(data: DataConfig, token: str | None, glob: str = METADATA_GLOB, fields: str = LIST_FIELDS) -> str:
+    query = {"prefix": data.prefix, "matchGlob": glob, "maxResults": str(PAGE_SIZE), "fields": fields}
     if token is not None:
         query["pageToken"] = token
     return data.list_api + "?" + urllib.parse.urlencode(query)
@@ -141,33 +149,51 @@ def _check_item(item, data: DataConfig) -> dict:
     return item
 
 
-def list_metadata(data: DataConfig, *, get: Getter = http_get,
-                  sleep: Callable[[float], None] = time.sleep) -> list[dict]:
-    """§1：按 nextPageToken 翻页列出全部元数据对象，按 name 排序；条数必须等于 expected_metadata_files。"""
+def list_objects(data: DataConfig, glob: str, fields: str, *, get: Getter = http_get,
+                 sleep: Callable[[float], None] = time.sleep) -> list[dict]:
+    """§1：按 nextPageToken 翻页列出 `glob` 匹配的全部对象，按 name 排序；名字重复就报错。"""
     items: list[dict] = []
     token: str | None = None
     seen_tokens: set[str] = set()
     page = 0
+    what = "listing" if glob == METADATA_GLOB else f"listing {glob}"
     while True:
-        url = list_url(data, token)
-        body = with_retries(lambda: _list_page(get(url), page), f"listing page {page} ({url})", sleep=sleep)
+        url = list_url(data, token, glob, fields)
+        body = with_retries(lambda: _list_page(get(url), page), f"{what} page {page} ({url})", sleep=sleep)
         items.extend(_check_item(item, data) for item in body.get("items", []))
         token = body.get("nextPageToken")
         if token is None:
             break
         if not isinstance(token, str) or not token or token in seen_tokens:
-            raise ValueError(f"listing page {page}: bad or repeated nextPageToken {token!r}")
+            raise ValueError(f"{what} page {page}: bad or repeated nextPageToken {token!r}")
         seen_tokens.add(token)
         page += 1
     items.sort(key=lambda item: item["name"])
     names = [item["name"] for item in items]
     duplicates = sorted(n for n, k in Counter(names).items() if k > 1)
     if duplicates:
-        raise ValueError(f"listing has duplicate object names: {duplicates[:5]}")
+        raise ValueError(f"{what} has duplicate object names: {duplicates[:5]}")
+    return items
+
+
+def list_metadata(data: DataConfig, *, get: Getter = http_get,
+                  sleep: Callable[[float], None] = time.sleep) -> list[dict]:
+    """§1：全部元数据对象，按 name 排序；条数必须等于 expected_metadata_files。"""
+    items = list_objects(data, METADATA_GLOB, LIST_FIELDS, get=get, sleep=sleep)
     if len(items) != data.expected_metadata_files:
         raise ValueError(f"listing has {len(items)} metadata files, expected {data.expected_metadata_files} "
                          f"(data.version {data.version} is a fixed release: the source changed, a human must look)")
     return items
+
+
+def list_raw(data: DataConfig, *, get: Getter = http_get,
+             sleep: Callable[[float], None] = time.sleep) -> dict[str, dict[str, dict]]:
+    """§1（S03b）：两次列表，返回 {"h5": {对象名: 条目}, "left_mp4": {对象名: 条目}}；条目只留 name、size、md5Hash。"""
+    raw = {}
+    for field, glob in RAW_GLOBS:
+        items = list_objects(data, glob, RAW_LIST_FIELDS, get=get, sleep=sleep)
+        raw[field] = {item["name"]: {key: item[key] for key in RAW_ITEM_KEYS} for item in items}
+    return raw
 
 
 def _list_page(raw: bytes, page: int) -> dict:
@@ -304,6 +330,9 @@ def _normalize(row: dict, data: DataConfig) -> dict:
     h5 = f"{lab}/{_require(row, 'hdf5_path', str, 'a string')}"
     if not h5.startswith(folder + "/") or not _plain_path(h5):
         raise ValueError(f"h5 {h5!r} is not inside the episode folder {folder!r}")
+    if h5.rsplit("/", 1)[-1] != H5_NAME:
+        raise ValueError(f"h5 {h5!r} is not named {H5_NAME!r} "
+                         f"(the raw listing glob {RAW_GLOBS[0][1]!r} lists only those)")
     left_mp4 = f"{lab}/{_require(row, data.camera, str, 'a string')}"
     if not _plain_path(left_mp4):
         raise ValueError(f"left_mp4 {left_mp4!r} has empty, '.' or '..' path segments")
@@ -326,8 +355,15 @@ def _normalize(row: dict, data: DataConfig) -> dict:
     return episode
 
 
-def judge(episodes: list[dict], data: DataConfig) -> list[dict]:
-    """02 §4：给每条回合加 `reasons`（按 REASONS 的顺序，可多条）和 `selected`（reasons 为空）。"""
+def raw_entries(episode: dict, raw: dict[str, dict[str, dict]], data: DataConfig) -> dict:
+    """一条回合的 raw_objects.jsonl 行：两个原始文件各自的列表条目，不在列表里为 None。"""
+    return {"uuid": episode["uuid"], "folder": episode["folder"],
+            **{field: raw[field].get(data.prefix + episode[field]) for field, _ in RAW_GLOBS}}
+
+
+def judge(episodes: list[dict], data: DataConfig, raw: dict[str, dict[str, dict]]) -> list[dict]:
+    """02 §4：给每条回合加 `reasons`（按 REASONS 的顺序，可多条）和 `selected`（reasons 为空）。
+    `raw` 是 `list_raw` 的结果；`h5` 或 `left_mp4` 不在列表里就是 `missing_raw`（S03b）。"""
     uuid_counts = Counter(e["uuid"] for e in episodes)
     judged = []
     for e in episodes:
@@ -340,13 +376,16 @@ def judge(episodes: list[dict], data: DataConfig) -> list[dict]:
             reasons.append("flag_mismatch")
         if e["group"] == "id" and e["scene_id"] < 0:
             reasons.append("no_scene_id")
+        entries = raw_entries(e, raw, data)
+        if any(entries[field] is None for field, _ in RAW_GLOBS):
+            reasons.append("missing_raw")
         judged.append(dict(e, selected=not reasons, reasons=reasons))
     return judged
 
 
-def build_episodes(rows: list[dict], data: DataConfig) -> list[dict]:
+def build_episodes(rows: list[dict], data: DataConfig, raw: dict[str, dict[str, dict]]) -> list[dict]:
     """§3 + §4，按 (uuid, folder) 排序（重复 uuid 的两行靠 folder 区分）。"""
-    episodes = judge([normalize(row, data) for row in rows], data)
+    episodes = judge([normalize(row, data) for row in rows], data, raw)
     return sorted(episodes, key=lambda e: (e["uuid"], e["folder"]))
 
 
@@ -412,13 +451,15 @@ def run_index(config: DroidConfig, data_root: Path | str, *, get: Getter = http_
     listing = list_metadata(data, get=get, sleep=sleep)
     listed_at = clock().isoformat(timespec="seconds")
     _write_lines(directory/LISTING_FILE, (_line(item, sort_keys=True) for item in listing))
+    raw = list_raw(data, get=get, sleep=sleep)
     rows = read_current_metadata(directory/METADATA_FILE, listing)
     reused = rows is not None
     if rows is None:
         rows = fetch_metadata(data, listing, get=get, sleep=sleep, threads=threads)
         _write_lines(directory/METADATA_FILE, (_line(row, sort_keys=False) for row in rows))
-    episodes = build_episodes(rows, data)
+    episodes = build_episodes(rows, data, raw)
     _write_lines(directory/EPISODES_FILE, (_line(e, sort_keys=True) for e in episodes))
+    _write_lines(directory/RAW_FILE, (_line(raw_entries(e, raw, data), sort_keys=True) for e in episodes))
     splits = sp.compute_splits(episodes, data, cache.file_sha(directory/EPISODES_FILE))
     sp.write_splits(directory, splits)
     manifest = {
@@ -429,6 +470,7 @@ def run_index(config: DroidConfig, data_root: Path | str, *, get: Getter = http_
                         "min_steps": data.min_steps, "ood_labs": list(data.ood_labs)},
         "listed_at": listed_at,
         "metadata_reused": reused,
+        "raw_listed": {glob: len(raw[field]) for field, glob in RAW_GLOBS},
         "code_commit": code_commit(),
         "code_manifest_sha256": cache.file_sha(cache.ROOT/"MANIFEST.json"),
         "files": {name: _file_entry(directory/name) for name in INDEX_FILES},
