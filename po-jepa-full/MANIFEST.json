@@ -101,7 +101,7 @@
     "tests/test_droid_actions.py": "7e1fbc30a90828ad2bdb4e1bb360aa649e3566faca132985e93bbbac17001594",
     "tests/test_droid_config.py": "37ca8976506274ef5e1cb1dd29de801b4a163f52a912ae5a48be981d8af84049",
     "tests/test_droid_index.py": "6500edfaa6f98371a64e89bd488ea6dbb31199adcc949fe5e0a735354f767cf6",
-    "tests/test_droid_splits.py": "61e3b38f2271251e950c3d440b770b4a1a0bf30ec56cec4cb4f3436babe2f1f1",
+    "tests/test_droid_splits.py": "3ace79aff914ac87336d6ae1c1eba31a54b70ee8f73c4ed6867ec6fcfc93e908",
     "tests/test_dynamics.py": "62bf674d0b918936bb1bf2e4a92e65c830d2a68947c579cfafc0a6bc4e4e3a72",
     "tests/test_evaluation.py": "5b066dec2c3b6a076619364f6a8246785b1de0ad503cdd955b7f76fdad5430c2",
     "tests/test_geometry.py": "3c28b11262ce03804678e5822113365bd3aa83db12f54eea8077af1cd2369897",

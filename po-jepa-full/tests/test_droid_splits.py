@@ -103,6 +103,15 @@ def test_each_step_matches_hand_computation():
     assert splits["schema"] == "droid_splits_v1" and splits["salt"] == SALT and splits["episodes_sha256"] == "e"*64
 
 
+def test_ood_test_follows_ood_labs_order():
+    rows = world()
+    splits = compute(rows, ood_labs=("RPL", "PennPAL", "REAL"), ood_quota=(1, 2, 2))
+    lab = {e["uuid"]: e["lab"] for e in rows}
+    assert [lab[u] for u in splits["ood_test"]] == ["RPL", "PennPAL", "PennPAL", "REAL", "REAL"]
+    rpl = sorted((e["uuid"] for e in rows if e["lab"] == "RPL"), key=lambda u: h("ood", u))
+    assert splits["ood_test"][0] == rpl[0]
+
+
 def test_config_keys_exclude_n_and_use_failures():
     assert compute()["config_keys"] == {"min_steps": 242, "ood_labs": ["PennPAL", "REAL", "RPL"], "ood_quota": [2, 2, 1],
                                         "id_test_scenes": 3, "val_scenes": 2, "episodes_per_scene": 2}
