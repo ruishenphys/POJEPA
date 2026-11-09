@@ -25,7 +25,7 @@ from po_jepa import metrics
 
 ROOT = Path(__file__).resolve().parents[3]
 
-CONDITIONS = (*comparison.CONDITIONS, "identity", *comparison.AC_CONDITIONS)
+CONDITIONS = (*comparison.CONDITIONS, "identity", *comparison.AC_CONDITIONS, *comparison.ADDON_CONDITIONS)
 
 TRAIN_TIMES = (1., 2., 4., 8.)
 
@@ -338,6 +338,9 @@ def load_selected_checkpoint(condition, selected, *, model, optimizer, config, e
 
     测试指标不得影响 checkpoint 选择；调用者负责完整训练证据准入。
     """
+    if condition in comparison.ADDON_CONDITIONS:   # 07 §2.5：新条件的检查项和下面的 v7 分支相同，见 addon.conditions.load_selected
+        return comparison.addon_conditions.load_selected(condition, selected, model=model, optimizer=optimizer, config=config,
+                                                         expected_provenance=expected_provenance, root=root)
     if condition not in comparison.V7_CONDITIONS or type(selected.get("step")) is not int or selected["step"] < 0:
         raise ValueError("trained condition and explicit successful validation step required")
     if type(selected["mean"]) not in (int,float) or not math.isfinite(selected["mean"]) or selected["mean"] < 0 or selected["checkpoint_provenance"] != expected_provenance:
@@ -392,6 +395,7 @@ def run_prepared_evaluation(model, condition, features, output, config, *, queri
     _record_map([],queries,(condition,))
     expected_type = (comparison.IdentityPredictor if condition=="identity" else comparison.TokenTransformer if condition=="matched_transformer"
                      else comparison.ACPredictor if comparison.is_ac(condition) else comparison.POJEPA)
+    if condition in comparison.ADDON_CONDITIONS: expected_type = comparison.addon_conditions.expected_type(condition, model)   # 07 §2.5
     if not isinstance(model,expected_type): raise TypeError("condition/model type mismatch")
     if condition != "identity" and not checkpoint_identity: raise ValueError("selected checkpoint identity required")
     # identity没有参数，必须由调用者明确设备，不能把无参数误判为CPU运行。

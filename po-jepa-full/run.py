@@ -22,7 +22,8 @@ def main(argv=None):
     parser.add_argument('--trajectories',type=int,required=True,choices=(200,500,2000),help='v7：轨迹总条数（划分 80/10/10）')
     parser.add_argument('--updates',type=int,required=True,choices=(2000,10000),help='v7：每个条件的训练步数（2000 试跑，10000 正式）')
     parser.add_argument('--condition',choices=('po_jepa_full','po_jepa_no_consistency','matched_transformer','identity',
-                        'vjepa2_ac_small','vjepa2_ac'),help='v7：run/resume/evaluate 每次只跑一个条件，可并行提交')
+                        'vjepa2_ac_small','vjepa2_ac','po_jepa_time_only','po_jepa_space_only','transformer_consistency',
+                        'fixed_fourier','koopman'),help='v7：run/resume/evaluate 每次只跑一个条件，可并行提交（后 5 个是补跑的新条件，07 §2.6）')
     parser.add_argument('--ac-checkpoint',type=Path,help='v7：vjepa2_ac 需要的官方权重 vjepa2-ac-vitg.pt')
     parser.add_argument('--test-variant',help='v7 transfer：测试集的调节项（--system/--variant/--trajectories 写训练用的基础数据集）')
     args=parser.parse_args(argv)

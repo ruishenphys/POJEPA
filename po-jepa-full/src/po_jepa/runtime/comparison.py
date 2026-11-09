@@ -45,6 +45,8 @@ from po_jepa.baselines import TokenTransformer, TransformerSpec, IdentityPredict
 
 from po_jepa.geometry import apply_spatial_transfer, build_spatial_transfer
 
+from po_jepa.koopman import KoopmanPredictor
+
 from po_jepa.losses import (LossConfig, input_scale, TemporalPredictions, SpatialPredictions, jepa_distance,
                             temporal_predictions, spatial_predictions, _temporal_time_contract,
                             _temporal_raw_contract)
@@ -59,6 +61,10 @@ CONDITIONS = ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full")
 # v7：外部基线 V-JEPA 2-AC 两个版本（官方规模微调 / 参数匹配缩小版）；只在 v7 协议下可用
 from po_jepa.ac_baseline import AC_CONDITIONS, ACPredictor
 V7_CONDITIONS = (*CONDITIONS, *AC_CONDITIONS)
+# 07 §1 第 3、4 条：补跑的 5 个新条件定义在 addon.conditions，共享函数开头按名字分发；ALL_CONDITIONS 不含 identity
+from .addon import conditions as addon_conditions
+ADDON_CONDITIONS = addon_conditions.ADDON_CONDITIONS
+ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
 
 def is_ac(condition) -> bool:
     return condition in AC_CONDITIONS
@@ -71,6 +77,9 @@ def consumer_sources():
         names += ["src/po_jepa/ac_baseline.py", "src/po_jepa/third_party/vjepa2_ac.py", "src/po_jepa/runtime/ac_training.py",
                   "src/po_jepa/runtime/v7jobs.py", "src/po_jepa/runtime/plots.py", "src/po_jepa/systems.py",
                   "src/po_jepa/datasets.py"]
+        # 07 §2.7：补跑新条件的源码（runtime/addon/ 下全部 .py，后续段加的文件也自动进来）
+        names += ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py",
+                  *sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/"src/po_jepa/runtime/addon").glob("*.py"))]
     for name in names:
         sources[name] = data.cache.file_sha(ROOT/name)
     return sources
@@ -168,6 +177,7 @@ def preregister():
 
 def build_condition(condition: str, device):
     """共用固定模型工厂与初始化，仅按条件设置批准的损失权重。"""
+    if condition in ADDON_CONDITIONS: return addon_conditions.build(condition, device)   # 07 §2.4
     config = check.load_protocol()
     loss = LossConfig(**{f.name:config["loss"][f.name] for f in fields(LossConfig)})
     if condition == "identity":
@@ -205,6 +215,7 @@ def _tf_parameters(model) -> list:
 
 def make_optimizer(model):
     """全部预测器参数恰一次进入原AdamW设置；identity没有优化器。"""
+    if isinstance(model, KoopmanPredictor): return addon_conditions.make_koopman_optimizer(model)   # 07 §2.4
     if isinstance(model, ACPredictor):
         from . import ac_training
         return ac_training.make_optimizer(model, model.ac_condition)
@@ -257,6 +268,7 @@ def _tf_batch(batch, model):
 
 def condition_step(condition, model, optimizer, batch, loss_config, completed_steps):
     """成功才计步：PO 五次 Phi 联合更新，Transformer 仅 JEPA 一次反传。"""
+    if condition in ADDON_CONDITIONS: return addon_conditions.condition_step(condition, model, optimizer, batch, loss_config, completed_steps)   # 07 §2.4
     if condition in ("po_jepa_full", "po_jepa_no_consistency"):
         label = "full" if condition == "po_jepa_full" else "no_consistency"
         return training.train_step(model, optimizer, batch, loss_config=loss_config,
@@ -296,7 +308,7 @@ def evaluate_batch(model, raw, controls, duration, transfer, target, loss_config
         temporal = temporal_predictions(model, raw, controls, tau, sigma, transfer.source)
         spatial = spatial_predictions(model, raw, controls, duration, transfer)
     else:
-        if not isinstance(model, (TokenTransformer, IdentityPredictor, ACPredictor)):
+        if not isinstance(model, (TokenTransformer, IdentityPredictor, ACPredictor, KoopmanPredictor)):
             raise TypeError("unregistered evaluation predictor")
         pair = split_action_segments(controls, tau=tau, sigma=sigma)
         direct = model(raw, concatenate_action_segments(pair.first, pair.second), duration, transfer.source)
@@ -322,6 +334,7 @@ def _provenance(value):
 
 def save_checkpoint(condition, path, model, optimizer, config, completed, sampling, provenance):
     """PO 沿共同保存器；Transformer 使用自身原生 schema，原子发布并拒覆盖。"""
+    if condition in ADDON_CONDITIONS: return addon_conditions.save_checkpoint(condition, path, model, optimizer, config, completed, sampling, provenance)   # 07 §2.4
     provenance = _provenance(provenance)
     if condition in ("po_jepa_full", "po_jepa_no_consistency"):
         return training.save_training_checkpoint(path, model=model, optimizer=optimizer, loss_config=config,
@@ -434,6 +447,7 @@ def validate_condition(model, features, output, device, config):
 
 def _validate_registration(condition, model, sequence, registration):
     """先核实际模型计数、封存查询/源码/配置；容量不匹配或身份过时则不创建运行目录。"""
+    if condition in ADDON_CONDITIONS: return addon_conditions.validate_registration(condition, model, sequence, registration)   # 07 §2.4
     if condition not in V7_CONDITIONS or not sequence or any(not rows for rows in sequence):
         raise ValueError("registered trainable condition and nonempty sequence required")
     if is_ac(condition):
@@ -484,6 +498,7 @@ def _observed_update_ac(condition, model, optimizer, features, rows, device, con
 
 def _observed_update(condition, model, optimizer, batch, config, completed):
     """记录实际raw读出（TF 1次；PO-JEPA 5次Phi，残差读出时每次2次），不加额外前向/backward；TF未算的缺陷为None。"""
+    if condition in ADDON_CONDITIONS: return addon_conditions.observed_update(condition, model, optimizer, batch, config, completed)   # 07 §2.4
     scales = []
     handle = model.p_out.register_forward_hook(lambda owner,args,value:scales.append(check.tensor_stats(value)))
     try:
@@ -584,6 +599,7 @@ def consistency_share(condition, model, batch, loss_config, completed):
     share = λ·w(s)·|grad L_c| / |grad L_JEPA|，即加权一致性梯度相对 JEPA 梯度的实际比例；
     标定时按中位数令其等于 rho。无一致性条件只记录梯度范数（share=0），Transformer 不计算。
     """
+    if condition in ADDON_CONDITIONS: return addon_conditions.consistency_share(condition, model, batch, loss_config, completed)   # 07 §2.4
     interval = check.load_protocol()["monitoring"]["consistency_interval"]
     if condition == "matched_transformer" or completed % interval:
         return None
@@ -597,12 +613,14 @@ def monitored_consistency_terms(condition, loss_config):
     """07 §2.4：一致性监控和提前检查看哪几项。
 
     po_jepa_full 固定看 ("time", "space")，不读权重（v7 行为）；其余 v7 条件和 identity 不看，返回 None；
-    其他条件看权重 > 0 的项（按 time、space 的顺序），一项都没有就返回 None。
+    5 个新条件看权重 > 0 的项（按 time、space 的顺序），一项都没有就返回 None；其他名字报 ValueError（S10）。
     """
     if condition == "po_jepa_full":
         return ("time", "space")
     if condition in V7_CONDITIONS or condition == "identity":
         return None
+    if condition not in ADDON_CONDITIONS:
+        raise ValueError("unknown condition for consistency monitoring")
     if not isinstance(loss_config, LossConfig):
         raise TypeError("loss_config must be a LossConfig")
     terms = tuple(name for name, weight in (("time", loss_config.time_weight), ("space", loss_config.space_weight))
