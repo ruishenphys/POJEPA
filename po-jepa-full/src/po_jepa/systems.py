@@ -19,8 +19,13 @@ S24a 长时程（调节项 horizon ∈ {32, 64, 128}）：轨迹有 horizon 个�
 与 horizon=32、其余调节项相同的数据集逐位相同；horizon > 32 的下达动作是 LongControls（不是 v7 的 TrajectoryControls，
 v7 的缓存和模型接口只收 32 tick，长时程接入正式流程在第 6 阶段）。
 
+S24b 时间采样（调节项 fps、jitter、exposure、switch_offset）：画面在 tick 内部的时刻取，走 po_jepa.timing（各场景的 frames()
+看到 Variant.changes_timing() 就交给它）。switch_offset 让下达动作的段边界落在 tick 内部，下达动作是 SubtickControls
+（以 1/4 tick 为单位），物理里的执行动作是 applied_subticks 的 [4·horizon, 2]。默认值时一个字节不变。
+
 隐藏状态只用于生成画面和诊断，不进入模型。
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 
@@ -86,20 +91,76 @@ class LongControls:
         return int(self.ends_ticks[-1])
 
 
+SUBTICKS = 4      # S24b：SubtickControls 和 applied_subticks 的时间单位是 1/4 tick（= 16 fps 的帧间隔）
+
+
+@dataclass(frozen=True)
+class SubtickControls:
+    """S24b：段边界不在 tick 边界上的下达动作（调节项 switch_offset）。半开段 [starts, ends) 以 1/4 tick 为单位，
+    覆盖 [0, 4·horizon)；取值与检查同 TrajectoryControls（有限、|u| ≤ 0.5）。字段名故意不叫 *_ticks：
+    按 tick 读段边界的旧代码（applied_ticks、v7 的缓存和模型接口）遇到它会直接报错，不会把 1/4 tick 当成 tick。"""
+    trajectory_id: int
+    starts_subticks: np.ndarray
+    ends_subticks: np.ndarray
+    values: np.ndarray
+
+    def __post_init__(self) -> None:
+        datasets.active().check_id(self.trajectory_id)
+        for value in (self.starts_subticks, self.ends_subticks):
+            if not isinstance(value, np.ndarray) or value.dtype != np.int64 or value.ndim != 1 or not value.size:
+                raise ValueError("control subticks must be nonempty int64[S]")
+        n = self.starts_subticks.size
+        if (self.ends_subticks.shape != (n,) or not isinstance(self.values, np.ndarray) or self.values.dtype != np.float64
+                or self.values.shape != (n, 2) or not np.isfinite(self.values).all() or np.any(np.abs(self.values) > .5)):
+            raise ValueError("commands must be finite float64[S,2] in physical bounds")
+        end = int(self.ends_subticks[-1])
+        if (self.starts_subticks[0] != 0 or end % SUBTICKS or end//SUBTICKS not in variants.HORIZONS
+                or not np.array_equal(self.ends_subticks[:-1], self.starts_subticks[1:])
+                or np.any(self.ends_subticks-self.starts_subticks <= 0)):
+            raise ValueError(f"subtick controls must exactly cover [0,{SUBTICKS}·horizon) with horizon in {variants.HORIZONS}")
+
+    @property
+    def horizon(self) -> int:
+        return int(self.ends_subticks[-1])//SUBTICKS
+
+
 def horizon_of(controls) -> int:
-    """下达动作覆盖的 tick 数：TrajectoryControls 是 32，LongControls 是它的 horizon。"""
+    """下达动作覆盖的 tick 数：TrajectoryControls 是 32，LongControls 是它的 horizon。
+    S24b 的 SubtickControls 不按 tick 分段，这里有意报错（逐 tick 的 applied_ticks 表示不了 tick 内部的切换）。"""
     if isinstance(controls, simulation.TrajectoryControls):
         return TICKS
     if isinstance(controls, LongControls):
         return controls.horizon
+    if isinstance(controls, SubtickControls):
+        raise ValueError("SubtickControls（switch_offset）的段边界在 tick 内部：用 applied_subticks，不能逐 tick 展开")
     raise ValueError("controls must be simulation.TrajectoryControls or systems.LongControls")
+
+
+def shift_controls(controls, offset: float) -> SubtickControls:
+    """S24b switch_offset：把按 tick 分段的下达动作的内部段边界整体往后挪 offset 个 tick（1/4 tick 的整数倍）。
+    取值和段数不变（与 switch_offset=0 的同编号轨迹一一配对）；第一段变长 offset，最后一段变短 offset（段长 ≥ 1 > offset）。"""
+    q = int(round(offset*SUBTICKS))
+    if q not in (1, 2, 3) or q != offset*SUBTICKS:
+        raise ValueError(f"switch_offset 必须是 {variants.SWITCH_OFFSETS[1:]} 之一")
+    inner = SUBTICKS*controls.ends_ticks[:-1]+q
+    end = SUBTICKS*horizon_of(controls)
+    return SubtickControls(controls.trajectory_id, np.concatenate(([0], inner)).astype(np.int64),
+                           np.concatenate((inner, [end])).astype(np.int64), controls.values.copy())
 
 
 POLICY_HORIZON = 1.      # 秒：goal 策略按“1 秒内走到目标”给速度，u = (目标 − 估计位置)/(K·1 s)
 POLICY_EXPLORE = .1      # goal 策略的探索噪声标准差（动作单位，随机流 9）
 
 
-def commanded_controls(trajectory_id: int) -> simulation.TrajectoryControls:
+def commanded_controls(trajectory_id: int):
+    """模型看到的（下达的）动作。switch_offset = 0 时见 _commanded_ticks（TrajectoryControls 或 LongControls）；
+    S24b switch_offset > 0 时是同一组段、边界往后挪 switch_offset 个 tick 的 SubtickControls。"""
+    v = datasets.active().knobs
+    controls = _commanded_ticks(trajectory_id, v)
+    return controls if not v.switch_offset else shift_controls(controls, v.switch_offset)
+
+
+def _commanded_ticks(trajectory_id: int, v) -> simulation.TrajectoryControls:
     """模型看到的（下达的）动作。基础场景 = v6 的 sample_controls；调节项改动作抽样时用同一随机流按新规则抽。
 
     S21a 采集策略 policy：段长、零动作段和随机值照旧从流 1 抽（三种策略消耗流 1 的方式完全相同，所以段的边界和
@@ -111,7 +172,6 @@ def commanded_controls(trajectory_id: int) -> simulation.TrajectoryControls:
     S24a 长时程（horizon > 32）：同一个循环抽到 horizon 个 tick（流 1、流 9 都是接着抽），返回 LongControls。前 32 个 tick
     的逐 tick 动作与 horizon=32 相同；跨过 tick 32 的那一段在 horizon=32 时被截在 32，这里不截。
     """
-    v = datasets.active().knobs
     T = v.horizon
     if not v.changes_controls() and T == TICKS:
         return simulation.sample_controls(trajectory_id)
@@ -154,6 +214,47 @@ def applied_ticks(trajectory_id, v, controls) -> np.ndarray:
     if v.saturation is not None:      # S21a：执行器饱和，按分量截断（在增益和执行噪声之后）
         u = np.clip(u, -v.saturation, v.saturation)
     return u
+
+
+def applied_subticks(trajectory_id, v, controls) -> np.ndarray:
+    """S24b：物理里实际执行的动作 [4·horizon, 2]，以 1/4 tick 为单位。步骤和顺序与 applied_ticks 相同：展开 → 延迟 delay
+    tick（= 4·delay 个 1/4 tick，前面补零）→ 乘增益 → 加执行噪声（流 5，仍是每个 tick 一个，[horizon,2]，同一 tick 的
+    四个 1/4 tick 用同一个）→ 饱和。controls 按 tick 分段时结果就是 applied_ticks 每行重复 4 次（逐位相同）。"""
+    if isinstance(controls, SubtickControls):
+        T = controls.horizon
+        starts, ends = controls.starts_subticks, controls.ends_subticks
+    else:
+        T = horizon_of(controls)
+        starts, ends = SUBTICKS*controls.starts_ticks, SUBTICKS*controls.ends_ticks
+    if T != v.horizon:
+        raise ValueError(f"下达动作覆盖 {T} 个 tick，调节项的 horizon 是 {v.horizon}")
+    u = np.zeros((SUBTICKS*T, 2))
+    for a, b, value in zip(starts, ends, controls.values):
+        u[a:b] = value
+    if v.delay:
+        d = SUBTICKS*v.delay
+        u = np.concatenate((np.zeros((d, 2)), u[:-d]))
+    u = v.gain*u
+    if v.noise:
+        u = u+np.repeat(simulation._rng(trajectory_id, 5).normal(0., v.noise, (T, 2)), SUBTICKS, axis=0)
+    if v.saturation is not None:
+        u = np.clip(u, -v.saturation, v.saturation)
+    return u
+
+
+# —— S24b：画“原始”画面（遮挡块之后、像素噪声和取整之前的 float64），timing 在它上面做曝光平均、加像素噪声 ——
+_RAW = [False]
+
+
+@contextmanager
+def raw_images():
+    """在这个上下文里，各场景的画图函数（compose、draw_fields、new_systems._finish、second_order._finish）返回
+    像素噪声和 clip/取整之前的 float64 画面。timing 用它：同一帧 raw + 像素噪声 → clip → 取整，与原来的画法逐位相同。"""
+    old, _RAW[0] = _RAW[0], True
+    try:
+        yield
+    finally:
+        _RAW[0] = old
 
 
 def _texture(kind: str) -> np.ndarray:
@@ -251,6 +352,8 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
         image = image+(colors[p]-image)*w
     if v.occluders:
         image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
+    if _RAW[0]:
+        return image
     if v.pixel_noise:
         image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks, v.horizon)
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
@@ -282,8 +385,11 @@ class System:
 
     def frames(self, trajectory_id: int) -> tuple[np.ndarray, np.ndarray]:
         """返回 (隐藏状态 [33,D], 画面 [33,256,256,3] uint8)。基础场景走原实现（逐位不变），有调节项时走可调实现。
-        S24a：horizon > 32 时是 [horizon+1, …]（horizon 也是调节项，走可调实现）。"""
+        S24a：horizon > 32 时是 [horizon+1, …]（horizon 也是调节项，走可调实现）。S24b 时间采样调节项起作用时走 timing。"""
         v = datasets.active().knobs
+        if v.changes_timing():
+            from . import timing
+            return timing.frames(self, trajectory_id)
         if v.is_default:
             states = self.reference_trajectory(trajectory_id)
             return states, self.render(states)
@@ -537,6 +643,9 @@ class AdvectionDiffusion(System):
 
     def frames(self, trajectory_id):
         v = datasets.active().knobs
+        if v.changes_timing():
+            from . import timing
+            return timing.frames(self, trajectory_id)
         if not v.is_default:
             f = self.variant_fields(trajectory_id, v)
             states = f.reshape(f.shape[0], 16, 16, 16, 16).mean((2, 4)).reshape(f.shape[0], -1)
@@ -579,6 +688,8 @@ class AdvectionDiffusion(System):
         image = bg+(np.array(COLORS[v.color])-bg)*w
         if v.occluders:
             image = occlude(image, simulation._rng(trajectory_id, 7), v.occluders)
+        if _RAW[0]:
+            return image
         if v.pixel_noise:
             image = image+pixel_noise(simulation._rng(trajectory_id, 4), v.pixel_noise, image.shape, ticks, v.horizon)
         return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
@@ -673,6 +784,9 @@ class NewSystem(System):
         return new_systems
 
     def frames(self, trajectory_id):
+        if datasets.active().knobs.changes_timing():
+            from . import timing
+            return timing.frames(self, trajectory_id)
         impl, u, v = self._impl(trajectory_id)
         return impl.frames(trajectory_id, u, dict(v.params), v)
 
@@ -779,12 +893,20 @@ class SecondOrderSystem(NewSystem):
         return second_order
 
     def frames_with_prev(self, trajectory_id):
-        """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1（S24a 长时程是 horizon+2 帧）。"""
+        """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1（S24a 长时程是 horizon+2 帧）。
+        S24b 时间采样：第 0 帧是 frames() 第 0 帧往前一个帧间隔（−4/fps tick，取预跑那个 tick 内部的状态；fps=2 时
+        前一帧在 −2 tick，预跑只有 1 tick，报错），其余就是 frames()。"""
+        if datasets.active().knobs.changes_timing():
+            from . import timing
+            return timing.frames(self, trajectory_id, prev=True)
         impl, u, v = self._impl(trajectory_id)
         return impl.frames(trajectory_id, u, dict(v.params), v)
 
     def frames(self, trajectory_id):
         """→ (隐藏状态 [33, d], 画面 [33,256,256,3] uint8)，tick 0…32（= frames_with_prev 的下标 1…33；长时程 0…horizon）。"""
+        if datasets.active().knobs.changes_timing():
+            from . import timing
+            return timing.frames(self, trajectory_id)
         states, frames = self.frames_with_prev(trajectory_id)
         return states[1:], frames[1:]
 

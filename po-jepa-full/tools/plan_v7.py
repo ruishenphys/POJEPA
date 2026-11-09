@@ -132,6 +132,9 @@ def main():
     if base.knobs.horizon != systems.TICKS:
         # S24a：规划按 32 tick 的回合（start+horizon ≤ 32、TrajectoryControls）；长时程规划在第 6 阶段接
         raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
+    if base.knobs.changes_timing():
+        # S24b：规划按每 tick 一帧、逐 tick 的动作；时间采样的规划在第 6 阶段接
+        raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":
@@ -150,6 +153,8 @@ def main():
     spec = datasets.active(); v = spec.knobs; system = systems.get()
     if v.horizon != systems.TICKS:      # S24a：--test-variant 也不许带 horizon（同上）
         raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
+    if v.changes_timing():              # S24b：--test-variant 也不许带时间采样调节项（同上）
+        raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
 
     # —— 编码器 ——
     if a.fake_encoder:

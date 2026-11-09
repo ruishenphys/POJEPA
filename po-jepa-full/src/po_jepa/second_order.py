@@ -26,7 +26,7 @@ import math
 import numpy as np
 from scipy.linalg import expm
 
-from . import variants
+from . import systems, variants
 from .systems import COLORS, DISTRACTOR_COLOR, SIZE, _texture, blend_spots, mover_centers, occlude
 
 TICKS = 32
@@ -69,14 +69,16 @@ def _check_controls(u):
 
 
 def frame_ticks(L, ticks, horizon=TICKS):
-    """每帧对应的 tick：整条轨迹（horizon+2 帧，默认 34）默认 −1…horizon；只画部分帧时必须给出 ticks（−1…horizon 的整数）。"""
+    """每帧对应的 tick：整条轨迹（horizon+2 帧，默认 34）默认 −1…horizon；只画部分帧时必须给出 ticks（−1…horizon）。
+    S24b：ticks 可以是 tick 内部的时刻（浮点，时间采样调节项，只给会动的干扰光点用）；像素噪声按 tick 取，那里另核整数。"""
     if ticks is None:
         if L != horizon+2:
             raise ValueError("只画部分帧时要传 ticks（会动的干扰光点、像素噪声要知道每帧的 tick）")
         return np.arange(-1, horizon+1)
     ticks = np.asarray(ticks)
-    if ticks.shape != (L,) or not np.issubdtype(ticks.dtype, np.integer) or ticks.min() < -1 or ticks.max() > horizon:
-        raise ValueError(f"ticks 必须是 [L] 个 −1…{horizon} 的整数")
+    if (ticks.shape != (L,) or not (np.issubdtype(ticks.dtype, np.integer) or np.issubdtype(ticks.dtype, np.floating))
+            or not np.isfinite(ticks).all() or ticks.min() < -1 or ticks.max() > horizon):
+        raise ValueError(f"ticks 必须是 [L] 个 −1…{horizon} 的数")
     return ticks
 
 
@@ -99,9 +101,14 @@ def _finish(image, system, trajectory_id, v, ticks):
     """遮挡块（流 7）→ 像素噪声（流 4，一次抽 horizon+2 帧（默认 34），第 f 帧用 tick f−1 那份）→ uint8。"""
     if v.occluders:
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
+    if systems._RAW[0]:           # S24b：timing 要像素噪声和取整之前的画面（systems.raw_images）
+        return image
     if v.pixel_noise:
         noise = rng(system, trajectory_id, 4).normal(0., v.pixel_noise, (v.horizon+2,)+image.shape[1:])
-        image = image+noise[frame_ticks(image.shape[0], ticks, v.horizon)+1]
+        t = frame_ticks(image.shape[0], ticks, v.horizon)
+        if not np.issubdtype(t.dtype, np.integer):
+            raise ValueError("像素噪声按整 tick 取：ticks 必须是整数（tick 内部的帧由 po_jepa.timing 加噪声）")
+        image = image+noise[t+1]
     return np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
 
 

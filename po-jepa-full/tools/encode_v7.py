@@ -59,6 +59,9 @@ def main():
     if spec.knobs.horizon != systems.TICKS:
         # S24a：长时程（horizon > 32）只登记了数据生成；缓存格式、清单（33 帧）和评测窗口怎么接在第 6 阶段定，不静默截断
         raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：编码和缓存还没接（S24a 只做数据生成，第 6 阶段接入）")
+    if spec.knobs.changes_timing():
+        # S24b：帧数、帧时刻、tick 内部切换的动作都不是缓存格式（33 帧、每 tick 一帧、TrajectoryControls）能表示的
+        raise SystemExit(f"{spec.scene} 带时间采样调节项（fps/jitter/exposure/switch_offset）：编码和缓存还没接（S24b 只做数据生成，第 6 阶段接入）")
     out = args.output.resolve()
 
     if args.mode == "finalize":

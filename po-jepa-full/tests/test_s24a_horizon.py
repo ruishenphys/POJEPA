@@ -69,7 +69,7 @@ def test_parse_format_and_validate():
 
 def test_coverage_lists_horizon_for_every_scene():
     assert variants.coverage()["horizon"] == datasets.SYSTEMS
-    assert variants.KNOB_GROUPS["时间"] == ("horizon",)
+    assert variants.KNOB_GROUPS["时间"][0] == "horizon"       # S24b 在后面追加了 fps、jitter、exposure、switch_offset
     text = (ROOT/"DATASET.md").read_text(encoding="utf-8")
     assert "| 时间 | `horizon` | " + " | ".join(["✓"]*12) + " | 12 |" in text
 

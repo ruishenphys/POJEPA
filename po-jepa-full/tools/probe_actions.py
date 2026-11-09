@@ -121,6 +121,9 @@ def main():
     if spec.knobs.horizon != systems.TICKS:
         # S24a：探针按 33 帧取起点和时长（start+tau ≤ 32）；长时程的探针在第 6 阶段接
         raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：动作探针还没接（S24a 只做数据生成）")
+    if spec.knobs.changes_timing():
+        # S24b：探针按每 tick 一帧、TrajectoryControls 取起点和时长；时间采样的探针在第 6 阶段接
+        raise SystemExit(f"{spec.scene} 带时间采样调节项：动作探针还没接（S24b 只做数据生成）")
     if a.fake_encoder:
         encoder = encode_v7._fake_encoder(torch)
     else:

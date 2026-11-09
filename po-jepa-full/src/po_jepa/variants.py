@@ -16,6 +16,8 @@
 - 数据采集（S21a）：policy 采集策略 random / goal / mixed；
 - 场景族本身（landscape 的 shape）；
 - 时间（S24a）：horizon 轨迹长度（控制 tick 数），32 = 原来的 33 帧，64、128 是长时程（65、129 帧）。
+  S24b 时间采样：fps 帧率、jitter 帧时间抖动、exposure 曝光（运动模糊）、switch_offset 控制在两帧之间切换。
+  这四项不改物理（switch_offset 除外，它改的是下达动作的切换时刻），只改在哪些时刻、怎样取画面（po_jepa.timing）。
 
 模型看到的始终是“下达的”动作；执行噪声、延迟和饱和只作用在物理里（模型看不到），用来测鲁棒性。
 除 occluders（被遮住时状态看不到，有意做成部分可观测）外，所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
@@ -25,6 +27,7 @@ S23b 的五个二阶场景（SECOND_ORDER）本身不是一阶：画面只给位
 5 执行噪声；S21a 新增 6 过程噪声、7 遮挡块、8 会动的干扰光点、9 采集策略（目标点、探索噪声、mixed 的选择）。
 S24a horizon 不用新的随机流：每个流按 tick 顺序抽，长轨迹只是接着抽下去，所以前 32 个 tick 的动作、噪声和画面
 与 horizon=32（其余调节项相同）逐位相同（前缀一致，见 docs/segments/S24a.md §2）。
+S24b 新增流 10 = 帧时间抖动，流 11 = 不在整 tick 上的帧的像素噪声（按帧号另起，见 po_jepa.timing）。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -52,6 +55,10 @@ BACKGROUNDS = ("grid", "plain", "checker", "noise")
 SEGMENT_SETS = {"148": (1, 4, 8), "1": (1,), "2": (2,), "4": (4,), "8": (8,)}
 POLICIES = ("random", "goal", "mixed")
 HORIZONS = (32, 64, 128)       # S24a：轨迹的控制 tick 数（帧数 = horizon+1；二阶场景另多 t = −1 一帧）
+# S24b 时间采样（docs/segments/S24b.md）
+FPS = (2, 4, 8, 16)             # 帧率；4 = 原来的每 tick 一帧。帧数 = horizon·fps/4 + 1
+SWITCH_OFFSETS = (0., .25, .5, .75)   # 下达动作的段边界整体往后挪多少 tick（1/4 tick 的整数倍）
+JITTER_MAX = .4                 # 帧时间抖动上限（帧间隔的比例；< 0.5 保证帧时间严格递增）
 # S21a：只对 ODE 粒子类场景（状态是 RK4 积分的向量、受控点是状态前两维）成立的调节项不适用的场景
 FIELD_SYSTEMS = ("advection_diffusion", "gray_scott", "wave")   # 场方程：没有光点（wave 是 S23b 加的）
 # S23b：二阶场景（一帧看不到速度；数据集仍是 33 帧，34 帧见 systems.SecondOrderSystem.frames_with_prev）
@@ -86,6 +93,11 @@ class Variant:
     policy: str = "random"            # 采集策略：random = v6 随机；goal = 朝目标（开环推算）；mixed = 每段各半
     # S24a 时间：轨迹长度（控制 tick 数）。32 = 原来的 33 帧；64、128 是长时程，前 33 帧与 32 逐位相同
     horizon: int = 32
+    # S24b 时间采样（默认值 = 不起作用）。fps、jitter、exposure 只改取画面的时刻和方式，不改物理；switch_offset 改下达动作的切换时刻
+    fps: int = 4                      # 帧率（帧/秒）：每 4/fps 个 tick 一帧
+    jitter: float = 0.                # 帧时间抖动：中间各帧的时刻加 jitter·帧间隔·U(−1,1)（流 10），首尾两帧不动
+    exposure: float = 0.              # 曝光时间（帧间隔的比例）：画面是 [t−E, t] 内等距若干时刻画面的平均（只用过去，不看未来）
+    switch_offset: float = 0.         # 下达动作的段边界整体往后挪 switch_offset 个 tick（第一段变长、最后一段变短，取值不变）
 
     def param(self, system: str, name: str):
         default = PARAMS[system][name][0]
@@ -100,6 +112,10 @@ class Variant:
 
     def changes_execution(self) -> bool:
         return self.gain != 1. or self.noise != 0. or self.delay != 0 or self.saturation is not None
+
+    def changes_timing(self) -> bool:
+        """S24b：时间采样调节项（帧率、抖动、曝光、两帧之间切换）是否起作用。起作用时画面走 po_jepa.timing。"""
+        return (self.fps, self.jitter, self.exposure, self.switch_offset) != (4, 0., 0., 0.)
 
     def changes_observation(self) -> bool:
         return ((self.sigma, self.color, self.background, self.distractors, self.pixel_noise, self.occluders, self.movers)
@@ -142,9 +158,10 @@ def parse(system: str, text: str) -> Variant:
 def _convert(kw):
     out = {}
     for name, value in kw.items():
-        if name in ("gain", "zero", "noise", "sigma", "pixel_noise", "process_noise", "saturation"):
+        if name in ("gain", "zero", "noise", "sigma", "pixel_noise", "process_noise", "saturation", "jitter", "exposure",
+                    "switch_offset"):
             out[name] = float(value)
-        elif name in ("delay", "distractors", "occluders", "movers", "horizon"):
+        elif name in ("delay", "distractors", "occluders", "movers", "horizon", "fps"):
             out[name] = int(value)
         else:
             out[name] = value
@@ -167,11 +184,14 @@ def validate(system: str, v: Variant) -> None:
               (v.saturation is None or .05 <= v.saturation <= 2., "saturation ∈ [0.05,2]"),
               (0 <= v.occluders <= 3, "occluders ∈ 0–3"), (0 <= v.movers <= 4, "movers ∈ 0–4"),
               (v.policy in POLICIES, f"policy ∈ {POLICIES}"),
-              (type(v.horizon) is int and v.horizon in HORIZONS, f"horizon ∈ {HORIZONS}")]
+              (type(v.horizon) is int and v.horizon in HORIZONS, f"horizon ∈ {HORIZONS}"),
+              (type(v.fps) is int and v.fps in FPS, f"fps ∈ {FPS}"),
+              (0. <= v.jitter <= JITTER_MAX, f"jitter ∈ [0,{JITTER_MAX}]"), (0. <= v.exposure <= 1., "exposure ∈ [0,1]"),
+              (v.switch_offset in SWITCH_OFFSETS, f"switch_offset ∈ {SWITCH_OFFSETS}")]
     for ok, message in checks:
         if not ok:
             raise ValueError("调节项越界：" + message)
-    for x in ((v.gain, v.zero, v.noise, v.pixel_noise, v.process_noise) + ((v.sigma,) if v.sigma is not None else ())
+    for x in ((v.gain, v.zero, v.noise, v.pixel_noise, v.process_noise, v.jitter, v.exposure, v.switch_offset) + ((v.sigma,) if v.sigma is not None else ())
               + ((v.saturation,) if v.saturation is not None else ())):
         if not math.isfinite(x):
             raise ValueError("调节项必须是有限数")
@@ -195,11 +215,11 @@ def validate(system: str, v: Variant) -> None:
 GENERAL_SAMPLES = {"gain": "2", "axes": "x", "segments": "2", "zero": "0.5", "noise": "0.1", "delay": "1",
                    "saturation": "0.3", "policy": "goal", "process_noise": "0.1", "sigma": "4", "color": "white",
                    "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10",
-                   "horizon": "128"}
+                   "horizon": "128", "fps": "8", "jitter": "0.2", "exposure": "0.5", "switch_offset": "0.5"}
 KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", "saturation"), "数据采集": ("policy",),
                "物理": ("process_noise",),
                "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise"),
-               "时间": ("horizon",)}
+               "时间": ("horizon", "fps", "jitter", "exposure", "switch_offset")}
 
 
 def coverage() -> dict:
