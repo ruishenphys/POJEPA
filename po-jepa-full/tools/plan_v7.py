@@ -16,6 +16,13 @@ S21b 新场景 gray_scott 是 U、V 的 16×16 池化场（512 维，和 advecti
 (c_x, c_y, b_x, b_y, size/2·θ) 到目标状态的距离：只看方块时推杆碰到方块之前代价处处相同，CEM 无从下手；模型规划的代价
 本来就是到目标画面（推杆也在画面里）的特征距离。push 的目标动作不是纯随机（随机动作很少碰到方块）：
 每 2 个 tick 一段，方向 = 起点时推杆指向方块中心的方向 ± 30° 内均匀，幅值 ∈ [0.25, 0.5]，同样要求方块位姿和“不动”差 ≥ 0.15。
+S25a 二阶场景（po_jepa.configuration）：状态摘要是画面上看得到的位置——pendulum 摆锤 (sin θ, −cos θ)、cart_pole 小车和摆锤
+(x, x + l·sin θ, l·cos θ)、spring_chain 和 bouncing_balls 第 0 个（受控）质点/球的位置、wave 是 u 的 16×16 池化场（256 维，
+场，目标门槛按 5%）；速度不计入（目标只是一帧画面）。真值规划的代价也用这个摘要；目标动作与粒子类场景相同（均匀随机，
+每 2 tick 一段）。“不动”在二阶场景里不是停住：惯性和振荡照样在走，成功判据照旧是“误差 ≤ 0.5 × 不动时的误差”。
+spring_chain 的目标门槛是 0.03（GOAL_GAP）：弹簧硬（k = 16），8 个 tick 的随机动作只把受控质点推开约 0.04（≈ 2 像素），
+0.15 根本够不着（S25a 实测，docs/segments/S25a.md §3）。
+二阶场景现在按单帧复制（dup）编码（与 encode_v7 一致，特征看不到速度）；两帧（pair）编码在 S25b 接（等 S22 探针结果）。
 
 用法（GPU，需要冻结编码器做目标与重规划编码）：
   python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/po_jepa_full \
@@ -44,6 +51,9 @@ def summary(system_name, system, v, state):
         return system.hidden(state[None])[0][:512]               # U、V 池化场；注入点不计入
     if system_name == "push":
         return np.array([state[2], state[3], .5*v.param("push", "size")*state[4]])   # 方块位姿
+    from po_jepa import configuration, variants
+    if system_name in variants.SECOND_ORDER:                     # S25a：构形里受控的那部分（wave 先池化）
+        return configuration.controlled(system_name, system.hidden(np.asarray(state)[None])[0], dict(v.params))
     return state[:2]                                             # 受控小球（多粒子场景是第 0 个）
 
 
@@ -67,11 +77,15 @@ def goal_controls(system_name, state, horizon, goal_rng):
     return np.repeat(goal_rng.uniform(-.5, .5, (n, 2)), 2, 0)[:horizon]
 
 
-def goal_far_enough(g, zero_final, relative):
-    """目标门槛：与“不动”的终点差 ≥ 0.05 × 目标范数（场：advection_diffusion、gray_scott）或 ≥ 0.15（其他场景）。"""
+GOAL_GAP = {"spring_chain": .03}        # S25a：非场场景的绝对门槛，默认 0.15（见文件头）
+
+
+def goal_far_enough(g, zero_final, relative, absolute=.15):
+    """目标门槛：与“不动”的终点差 ≥ 0.05 × 目标范数（场：advection_diffusion、gray_scott、wave）或 ≥ absolute（其他场景，
+    默认 0.15；S25a：spring_chain 0.03，见 GOAL_GAP）。"""
     import numpy as np
     gap = np.linalg.norm(g-zero_final)
-    return bool(gap >= (.05*np.linalg.norm(g) if relative else .15))
+    return bool(gap >= (.05*np.linalg.norm(g) if relative else absolute))
 
 
 def _parse():
@@ -126,9 +140,6 @@ def main():
     device = torch.device(a.device)
     condition = job["condition"]
     base = datasets.active()
-    if base.system in variants.SECOND_ORDER:
-        # S23b 只登记了数据生成；二阶场景的规划摘要、目标和两帧编码要等 S22 探针结果和第 6 阶段，不静默按粒子类处理
-        raise SystemExit(f"{base.system} 是二阶场景，规划还没接（S23b 只登记数据生成）")
     if base.knobs.horizon != systems.TICKS:
         # S24a：规划按 32 tick 的回合（start+horizon ≤ 32、TrajectoryControls）；长时程规划在第 6 阶段接
         raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
@@ -178,8 +189,8 @@ def main():
         return torch.from_numpy(z).float().to(device)            # [1,256,1408]
 
     field_scene = spec.system == "advection_diffusion"
-    new_scene = spec.system in ("gray_scott", "push")             # S21b：没有 v6 原实现，基础场景也走可调实现
-    relative_gap = field_scene or spec.system == "gray_scott"     # 场：目标与“不动”的差按场的范数的 5% 判
+    new_scene = spec.system in ("gray_scott", "push")+variants.SECOND_ORDER   # S21b：没有 v6 原实现，基础场景也走可调实现（S25a 加二阶场景）
+    relative_gap = field_scene or spec.system in ("gray_scott", "wave")       # 场：目标与“不动”的差按场的范数的 5% 判（S25a 加 wave）
 
     def simulate(tid, state, start, actions, render=True):
         """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。render=False 不画（真值规划的代价只看状态）。"""
@@ -258,7 +269,7 @@ def main():
             gu = goal_actions(s0)
             goal_state, goal_frame = simulate(tid, s0, start, gu)
             g = summary_state(goal_state)
-            valid = goal_far_enough(g, zero_final, relative_gap)
+            valid = goal_far_enough(g, zero_final, relative_gap, GOAL_GAP.get(spec.system, .15))
             if valid:
                 break
         # S21b（Codex 审核）：20 次都没达到门槛的目标记为无效，不进成功率和误差统计（规划照常跑，随机流消耗不变）
@@ -293,14 +304,16 @@ def main():
     if not scored:
         raise SystemExit(f"{a.episodes} 个回合的目标都没达到门槛（与“不动”差得不够远）：时域 --horizon {a.horizon} 太短？")
 
-    scale = 1. if relative_gap else (48. if spec.system in ("double_well", "multi_particle", "landscape", "push") else 27.)
+    from po_jepa import configuration
+    scale = 1. if relative_gap else (48. if spec.system in ("double_well", "multi_particle", "landscape", "push") else
+                                     configuration.PX.get(spec.system, 27.))       # S25a：二阶场景每单位像素数
     def stats(name):
         e = np.array([r[name] for r in scored]); z = np.array([r["zero"] for r in scored])
         ok = (e <= a.success*np.maximum(z, 1e-9))
         return dict(success_rate=float(ok.mean()), mean_error=float(e.mean()),
                     mean_error_px=None if relative_gap else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
     summary_name = {"advection_diffusion": "16×16 平均浓度场", "gray_scott": "U、V 的 16×16 池化场（512 维）",
-                    "push": "方块位姿 (b_x, b_y, size/2·θ)"}.get(spec.system, "受控小球位置")
+                    "push": "方块位姿 (b_x, b_y, size/2·θ)", **configuration.SUMMARY_NAME}.get(spec.system, "受控小球位置")
     report = dict(kind="planning", job=str(job_dir), condition=condition, train_dataset=base.tag, dataset=spec.tag,
                   seed=job["seed"], horizon_ticks=a.horizon, replan_ticks=a.replan, state_summary=summary_name,
                   cem=dict(samples=a.samples, oracle_samples=a.oracle_samples, iterations=a.iterations, elites=a.elites), success_rule=f"误差 ≤ {a.success} × 不动时的误差",
@@ -308,8 +321,10 @@ def main():
                   random=None if a.no_baselines else stats("random"),
                   zero=dict(mean_error=float(np.mean([r["zero"] for r in scored]))), episodes=rows,
                   goals=dict(valid=len(scored), invalid=len(rows)-len(scored),
-                             rule="与“不动”的差 ≥ 0.05 × 目标范数（场）或 ≥ 0.15（其他）；20 次重抽都不够的回合不计分"),
-                  encoder="fake" if a.fake_encoder else "vjepa2-vitg", scientific_conclusions_verified=False)
+                             rule="与“不动”的差 ≥ 0.05 × 目标范数（场）或 ≥ 0.15（其他）；20 次重抽都不够的回合不计分"
+                                  + (f"；本场景门槛 {GOAL_GAP[spec.system]}" if spec.system in GOAL_GAP else "")),
+                  encoder="fake" if a.fake_encoder else "vjepa2-vitg", scientific_conclusions_verified=False,
+                  **({"tubelet": "dup"} if spec.system in variants.SECOND_ORDER else {}))
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({k: report[k] for k in ("condition", "dataset", "model", "oracle", "random", "zero")}, ensure_ascii=False, indent=1))

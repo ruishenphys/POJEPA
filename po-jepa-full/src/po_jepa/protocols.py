@@ -8,6 +8,10 @@
 强度三档：轻、标准、重。分布外评测（make_v8_jobs --stage variants）只评标准档；强度曲线（--stage strength）评轻档和重档。
 有的协议只有两档（延迟只能取整数 tick；采集策略只有 mixed、goal 两种）。某个场景不适用的协议（variants.validate 会拒绝的，
 例如场方程没有光点、push 不加过程噪声）在表里是空的，不评。
+
+S25a：五个二阶场景（SECOND_ORDER_SCENES）加进协议（P1、P2 各自的物理参数档位，其余通用协议照 variants.validate 适用），
+ALL_SCENES = SCENES + SECOND_ORDER_SCENES。SCENES（v8 任务表默认的 7 个场景）和它的测试格不变：二阶场景现在只能按
+单帧复制（dup）编码，看不到速度；两帧（pair）编码等 S22 探针结果在 S25b 接，接好以后再并进默认任务表。
 """
 from dataclasses import dataclass
 
@@ -17,6 +21,9 @@ LEVELS = ("轻", "标准", "重")
 # v8 的 7 个基础场景（训练场景）：v7 的 5 个（landscape 取多势阱地形，与 v7 相同）+ S20 的两个新场景
 SCENES = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape~shape=multi_well",
           "gray_scott", "push")
+# S25a：二阶场景（S23b 登记，序号 7–11）。make_v8_jobs 要显式 --scenes 才排它们（见文件头）
+SECOND_ORDER_SCENES = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
+ALL_SCENES = SCENES+SECOND_ORDER_SCENES
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,12 @@ PROTOCOLS = (
         "landscape": {"轻": "depth=1.5", "标准": "depth=2", "重": "depth=3"},
         "gray_scott": {"轻": "feed=0.043", "标准": "feed=0.046", "重": "feed=0.05"},
         "push": {"轻": "mu_s=0.45", "标准": "mu_s=0.6", "重": "mu_s=0.9"},
+        # S25a 二阶场景（Claude 定，Jerry 可以改；都在 variants.PARAMS 的范围里，S23a 的参数扫描覆盖）
+        "pendulum": {"轻": "g_over_l=12", "标准": "g_over_l=14", "重": "g_over_l=16"},
+        "bouncing_balls": {"轻": "drag=0.4", "标准": "drag=0.6", "重": "drag=1"},
+        "wave": {"轻": "speed=0.2", "标准": "speed=0.25", "重": "speed=0.3"},
+        "cart_pole": {"轻": "length=1.15", "标准": "length=1.25", "重": "length=1.4"},
+        "spring_chain": {"轻": "stiffness=19", "标准": "stiffness=21", "重": "stiffness=25"},
     }),
     Protocol("P2", "物理参数 B", "物理", "第二个物理参数（只有一个参数的场景把它往另一边调）", {
         "double_well": {"轻": "tilt=0.1", "标准": "tilt=0.2", "重": "tilt=0.3"},
@@ -51,6 +64,11 @@ PROTOCOLS = (
         "landscape": {"轻": "depth=0.75", "标准": "depth=0.5", "重": "depth=0.25"},
         "gray_scott": {"轻": "kill=0.061", "标准": "kill=0.062", "重": "kill=0.063"},
         "push": {"轻": "slope=0.1", "标准": "slope=0.2", "重": "slope=0.25"},
+        "pendulum": {"轻": "damping=0.4", "标准": "damping=0.6", "重": "damping=1"},
+        "bouncing_balls": {"轻": "restitution=0.8", "标准": "restitution=0.7", "重": "restitution=0.5"},
+        "wave": {"轻": "damping=0.2", "标准": "damping=0.3", "重": "damping=0.5"},
+        "cart_pole": {"轻": "mass_ratio=0.5", "标准": "mass_ratio=0.7", "重": "mass_ratio=1"},
+        "spring_chain": {"轻": "damping=0.2", "标准": "damping=0.3", "重": "damping=0.5"},
     }),
     Protocol("P3", "过程噪声", "物理", "dq = f dt + σ dW（只用于粒子类 ODE 场景）",
              _common({"轻": "process_noise=0.05", "标准": "process_noise=0.1", "重": "process_noise=0.2"})),
@@ -76,8 +94,8 @@ PROTOCOLS = (
 
 
 def _combined(system, level):
-    """P13 组合：P1 + P4 + P8 的同一档叠在一起（物理 × 执行 × 观察）。P1 没有给档位的场景（S23b 的二阶场景，还不在
-    SCENES 里）没有 P13。"""
+    """P13 组合：P1 + P4 + P8 的同一档叠在一起（物理 × 执行 × 观察）。P1 没有给档位的场景没有 P13（S25a 起每个登记的
+    场景都有 P1 档位，这条留着防以后新登记的场景）。"""
     parts = [p.levels.get(system, {}).get(level) for p in PROTOCOLS if p.id in ("P1", "P4", "P8")]
     return None if None in parts else ",".join(parts)
 
@@ -135,20 +153,23 @@ def table() -> str:
 
     lines = ["| 协议 | 类别 | 变什么 | 轻 | 标准 | 重 | 不适用的场景 |", "|---|---|---|---|---|---|---|"]
     for p in PROTOCOLS:
-        same = {tuple(cell(p, system_of(s), level) for level in LEVELS) for s in SCENES}
+        same = {tuple(cell(p, system_of(s), level) for level in LEVELS) for s in ALL_SCENES}
         if len(same) == 1:
             shown = [f"`{x}`" if x else "—" for x in next(iter(same))]
         else:
             shown = ["见下表"]*3
-        missing = [system_of(s) for s in SCENES if not any(applicable(p, s, level) for level in LEVELS)]
+        missing = [system_of(s) for s in ALL_SCENES if not any(applicable(p, s, level) for level in LEVELS)]
         lines.append(f"| {p.id} {p.name} | {p.group} | {p.what} | " + " | ".join(shown) +
                      f" | {'、'.join(f'`{m}`' for m in missing) or '—'} |")
     lines += ["", "P1、P2 各场景的档位（P13 用 P1 的同一档）：", "",
               "| 场景 | P1 轻 | P1 标准 | P1 重 | P2 轻 | P2 标准 | P2 重 |", "|---|---|---|---|---|---|---|"]
-    for s in SCENES:
+    for s in ALL_SCENES:
         row = [f"`{cell(BY_ID[i], system_of(s), level)}`" for i in ("P1", "P2") for level in LEVELS]
         lines.append(f"| `{system_of(s)}` | " + " | ".join(row) + " |")
-    counts = {level: sum(len(tests(s, (level,))) for s in SCENES) for level in LEVELS}
-    lines += ["", f"适用的测试格（7 个场景合计）：标准档 {counts['标准']} 个，轻档 {counts['轻']} 个，重档 {counts['重']} 个。"
-              "P0 分布内就是基础场景的测试段，不另编码。"]
+    def counts(scenes):
+        c = {level: sum(len(tests(s, (level,))) for s in scenes) for level in LEVELS}
+        return f"标准档 {c['标准']} 个，轻档 {c['轻']} 个，重档 {c['重']} 个"
+    lines += ["", f"适用的测试格：一阶 {len(SCENES)} 个场景（v8 任务表默认）合计{counts(SCENES)}；"
+              f"二阶 {len(SECOND_ORDER_SCENES)} 个场景合计{counts(SECOND_ORDER_SCENES)}（S25a；现在是单帧复制编码，"
+              "要显式 `make_v8_jobs.py --scenes` 才排）。P0 分布内就是基础场景的测试段，不另编码。"]
     return "\n".join(lines)

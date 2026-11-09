@@ -144,9 +144,13 @@
 | 分布外泛化 | 在基础场景上训练，在换了物理参数、控制方式或外观的测试集上评测（按下面的评测协议） | `run.py transfer` |
 | 规划 | 给目标画面，用模型和 CEM 搜动作，把受控物体推到目标；报成功率，并给不动、随机、真值规划三个参照 | `tools/plan_v7.py` |
 
-前 7 个场景都能跑动作探针和规划（S21b 接上了 `gray_scott`、`push`）；二阶场景还没接（两个工具对它们直接报错），要等两帧编码定下来。规划的“状态误差”按场景取：小球场景是受控小球位置，
+12 个场景都能跑动作探针和规划（S21b 接上了 `gray_scott`、`push`，S25a 接上了二阶场景）。规划的“状态误差”按场景取：小球场景是受控小球位置，
 `advection_diffusion` 是 16×16 平均浓度场，`gray_scott` 是 U、V 的 16×16 池化场，`push` 是方块位姿（推杆在哪不算）。
 `push` 的目标由“朝方块推”的动作生成（随机动作很少碰到方块），真值规划的代价用推杆加方块的完整状态。细节见 `tools/plan_v7.py` 文件头。
+二阶场景（S25a，`src/po_jepa/configuration.py`）只比画面上看得到的位置，不比速度：探针的 *_px 列是整个构形（摆锤、小车和摆锤、全部质点或球）的像素距离，
+`wave` 是 u 的 16×16 池化场；规划的状态误差是摆锤位置（`pendulum`）、小车和摆锤位置（`cart_pole`）、第 0 个受控质点或球的位置（`spring_chain`、`bouncing_balls`）、
+u 的池化场（`wave`，门槛按场的 5%）。`spring_chain` 的弹簧硬，8 个 tick 的随机动作只把受控质点推开约 2 像素，目标门槛取 0.03（其他场景 0.15）。
+二阶场景现在按单帧复制编码（特征看不到速度），两帧编码等 S22 探针结果。
 
 ## 评测协议
 
@@ -164,14 +168,14 @@ v7 的表本身不改（v7 正式实验和仿真补跑都在用）。协议的�
 |---|---|---|---|---|---|---|
 | P1 物理参数 A | 物理 | 每个场景自己的第一个物理参数调大 | 见下表 | 见下表 | 见下表 | — |
 | P2 物理参数 B | 物理 | 第二个物理参数（只有一个参数的场景把它往另一边调） | 见下表 | 见下表 | 见下表 | — |
-| P3 过程噪声 | 物理 | dq = f dt + σ dW（只用于粒子类 ODE 场景） | `process_noise=0.05` | `process_noise=0.1` | `process_noise=0.2` | `advection_diffusion`、`gray_scott`、`push` |
+| P3 过程噪声 | 物理 | dq = f dt + σ dW（只用于粒子类 ODE 场景） | `process_noise=0.05` | `process_noise=0.1` | `process_noise=0.2` | `advection_diffusion`、`gray_scott`、`push`、`pendulum`、`bouncing_balls`、`wave`、`cart_pole`、`spring_chain` |
 | P4 执行增益 | 执行 | 执行动作 = 增益 × 下达动作（模型看不到） | `gain=1.5` | `gain=2` | `gain=3` | — |
 | P5 执行延迟 | 执行 | 执行动作晚若干 tick（模型看不到） | — | `delay=1` | `delay=2` | — |
 | P6 执行饱和 | 执行 | 执行动作按分量截断到 [−s, s]（模型看不到） | `saturation=0.4` | `saturation=0.3` | `saturation=0.15` | — |
-| P7 采集策略 | 动作分布 | 测试轨迹的动作换成朝目标（goal）或一半朝目标（mixed） | `policy=mixed` | `policy=goal` | — | `advection_diffusion`、`gray_scott` |
+| P7 采集策略 | 动作分布 | 测试轨迹的动作换成朝目标（goal）或一半朝目标（mixed） | `policy=mixed` | `policy=goal` | — | `advection_diffusion`、`gray_scott`、`pendulum`、`bouncing_balls`、`wave`、`cart_pole`、`spring_chain` |
 | P8 外观 | 观察 | 背景和受控物体颜色 | `color=white` | `background=checker,color=white` | `background=noise,color=blue` | — |
-| P9 静止干扰光点 | 观察 | 灰色干扰光点，不受控制 | `distractors=1` | `distractors=2` | `distractors=4` | `advection_diffusion`、`gray_scott` |
-| P10 会动的干扰光点 | 观察 | 绕画面中心匀速转的灰色光点 | `movers=1` | `movers=2` | `movers=4` | `advection_diffusion`、`gray_scott` |
+| P9 静止干扰光点 | 观察 | 灰色干扰光点，不受控制 | `distractors=1` | `distractors=2` | `distractors=4` | `advection_diffusion`、`gray_scott`、`wave` |
+| P10 会动的干扰光点 | 观察 | 绕画面中心匀速转的灰色光点 | `movers=1` | `movers=2` | `movers=4` | `advection_diffusion`、`gray_scott`、`wave` |
 | P11 像素噪声 | 观察 | 每帧独立的高斯像素噪声（0–255 刻度） | `pixel_noise=5` | `pixel_noise=10` | `pixel_noise=20` | — |
 | P12 遮挡 | 观察 | 48×48 像素的静止遮挡块（部分可观测） | `occluders=1` | `occluders=2` | `occluders=3` | — |
 | P13 组合 | 组合 | P1、P4、P8 的同一档叠加 | 见下表 | 见下表 | 见下表 | — |
@@ -187,8 +191,13 @@ P1、P2 各场景的档位（P13 用 P1 的同一档）：
 | `landscape` | `depth=1.5` | `depth=2` | `depth=3` | `depth=0.75` | `depth=0.5` | `depth=0.25` |
 | `gray_scott` | `feed=0.043` | `feed=0.046` | `feed=0.05` | `kill=0.061` | `kill=0.062` | `kill=0.063` |
 | `push` | `mu_s=0.45` | `mu_s=0.6` | `mu_s=0.9` | `slope=0.1` | `slope=0.2` | `slope=0.25` |
+| `pendulum` | `g_over_l=12` | `g_over_l=14` | `g_over_l=16` | `damping=0.4` | `damping=0.6` | `damping=1` |
+| `bouncing_balls` | `drag=0.4` | `drag=0.6` | `drag=1` | `restitution=0.8` | `restitution=0.7` | `restitution=0.5` |
+| `wave` | `speed=0.2` | `speed=0.25` | `speed=0.3` | `damping=0.2` | `damping=0.3` | `damping=0.5` |
+| `cart_pole` | `length=1.15` | `length=1.25` | `length=1.4` | `mass_ratio=0.5` | `mass_ratio=0.7` | `mass_ratio=1` |
+| `spring_chain` | `stiffness=19` | `stiffness=21` | `stiffness=25` | `damping=0.2` | `damping=0.3` | `damping=0.5` |
 
-适用的测试格（7 个场景合计）：标准档 82 个，轻档 75 个，重档 77 个。P0 分布内就是基础场景的测试段，不另编码。
+适用的测试格：一阶 7 个场景（v8 任务表默认）合计标准档 82 个，轻档 75 个，重档 77 个；二阶 5 个场景合计标准档 53 个，轻档 48 个，重档 53 个（S25a；现在是单帧复制编码，要显式 `make_v8_jobs.py --scenes` 才排）。P0 分布内就是基础场景的测试段，不另编码。
 <!-- protocols:end -->
 
 ## 生成与划分
@@ -204,7 +213,7 @@ P1、P2 各场景的档位（P13 用 P1 的同一档）：
 
 ## 已知局限
 
-- 模型只看单帧；二阶场景已登记，但两帧（pair）编码要等 S22 探针结果，单帧编码时看不到速度。
+- 模型只看单帧；二阶场景已登记，探针、规划、评测协议也接上了（S25a），但两帧（pair）编码要等 S22 探针结果，单帧编码时看不到速度；v8 任务表默认不排二阶场景。
 - `process_noise` 只用于粒子类 ODE 场景；`policy` 不用于场方程（`advection_diffusion` 的动作是整场流速，`gray_scott` 是注入点速度，没有要推到目标的受控点），也不用于二阶场景（动作是力，`policy=goal` 的开环推算按“动作 ∝ 受控点速度”做，对它们不成立）。
 - `cart_pole` 只受水平推力，`axes=y` 等于没有控制，不接受。
 - `policy=goal` 是开环推算，不知道执行时的增益、延迟、噪声、饱和和场景的动力学，所以并不总能到目标；它的作用是让动作更多地作用在受控物体上（`push` 上推动方块的轨迹比例明显高于 random，实测见 `docs/segments/S21a.md` §4）。

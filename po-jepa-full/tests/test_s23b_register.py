@@ -2,7 +2,7 @@
 
 物理本身在 tests/test_second_order.py 里核；这里只核“接线”（做法同 tests/test_new_systems_registration.py）：
 登记顺序与随机流、参数单一来源、validate 的适用性、frames()/frames_with_prev() 与直接调用 second_order 逐位相同、
-每类调节项传到该传的地方、续算和部分帧重画与整条轨迹逐位相同、探针和规划对二阶场景报错。
+每类调节项传到该传的地方、续算和部分帧重画与整条轨迹逐位相同（探针和规划对二阶场景报错那一条 S25a 起不再成立，见 test_s25a）。
 """
 import json
 import os
@@ -296,21 +296,12 @@ def _clean_env():
     return env
 
 
-def test_probe_and_plan_refuse_second_order_scenes(tmp_path):
-    r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/probe_actions.py"), "--system", "pendulum",
-                        "--trajectories", "40", "--fake-encoder", "--device", "cpu", "--output", str(tmp_path/"p.json")],
-                       env=_clean_env(), capture_output=True, text=True)
-    assert r.returncode != 0 and "二阶场景" in r.stderr and not (tmp_path/"p.json").exists()
-    job = tmp_path/"job"; job.mkdir()
-    (job/"job.json").write_text(json.dumps(dict(seed=0, updates=1, dataset="wave-40", condition="identity")))
-    r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/plan_v7.py"), "--job", str(job), "--fake-encoder",
-                        "--device", "cpu", "--output", str(tmp_path/"plan.json")], env=_clean_env(), capture_output=True, text=True)
-    assert r.returncode != 0 and "二阶场景" in r.stderr and not (tmp_path/"plan.json").exists()
+# S25a：探针和规划接上了二阶场景（以前这里核“直接报错”），改由 tests/test_s25a_second_order_tasks.py 核。
 
 
 def test_protocols_do_not_pick_up_second_order_scenes():
-    """协议的场景表（SCENES）不变：二阶场景不进 v8 分布外评测；P13 不给它们组合档（P1 没有它们的档位）。"""
+    """协议的场景表（SCENES，v8 任务表默认）不变：二阶场景不在里面。S25a 起二阶场景有 P1 档位，P13 给它们组合档
+    （tests/test_s25a_second_order_tasks.py 核），它们在 protocols.SECOND_ORDER_SCENES。"""
     assert not set(NAMES) & {protocols.system_of(s) for s in protocols.SCENES}
-    p13 = protocols.BY_ID["P13"]
-    assert all(p13.levels[name] == {} for name in NAMES)
+    assert protocols.SECOND_ORDER_SCENES == NAMES
     assert sum(len(protocols.tests(s)) for s in protocols.SCENES) == 82

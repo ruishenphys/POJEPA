@@ -8,7 +8,10 @@
 - 像素位移        |q_cf − q_true|、|q_{t+τ} − q_t|        ：同一件事在画面里有多大
 d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
 *_px 列：粒子类场景是状态的 L2 × 每单位像素数；advection_diffusion 是 16×16 平均浓度场的 L2；S21b 新场景 push 是推杆和
-方块中心 4 个位置坐标的 L2 × 48（不含朝向角），gray_scott 是 U、V 池化场（512 维）的 L2（不是像素，注入点不计入）。
+方块中心 4 个位置坐标的 L2 × 48（不含朝向角），gray_scott 是 U、V 池化场（512 维）的 L2（不是像素，注入点不计入）；
+S25a 二阶场景只比画面上看得到的位置（构形，见 po_jepa.configuration）：pendulum 摆锤 × 80、cart_pole 小车和摆锤 × 36、
+spring_chain 和 bouncing_balls 全部质点/球 × 48，wave 是 u 的 16×16 池化场（256 维）的 L2（不是像素）。
+二阶场景现在按单帧复制（dup）编码，和 encode_v7 一致：特征里看不到速度；两帧（pair）编码在 S25b 接（等 S22 探针结果）。
 若 Δ_act* 和 identity 误差同量级，而训练好的模型 delta_act≈1e-6，说明是模型/训练没学会用动作，不是数据里没有动作信号。
 
 用法（GPU 上几分钟；和 encode_v7.py 用同一个编码器与权重）：
@@ -27,12 +30,18 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 DURATIONS = (1, 2, 4, 8)
 NEW_SYSTEMS = ("gray_scott", "push")      # S21b：走 System.variant_trajectory 的续算接口（基础场景也走，没有 v6 原实现）
+# S25a：二阶场景（variants.SECOND_ORDER）也走同一个续算接口（SecondOrderSystem：完整状态续算、hidden()、按 tick 画）
 _FULL = {}                                # S21b：新场景每条轨迹的整条仿真只算一次（gray_scott 约 5 秒/条）
 
 
-def motion(system_name, a, b, scale):
-    """*_px 列的距离（见文件头）。"""
+def motion(system_name, a, b, scale, params=None):
+    """*_px 列的距离（见文件头）。a、b 是 frames() 的隐藏状态；params：二阶场景的物理参数 dict(v.params)（构形要用）。"""
     import numpy as np
+    from po_jepa import configuration, variants
+    if system_name in variants.SECOND_ORDER:
+        if params is None:
+            raise ValueError(f"{system_name} 是二阶场景：motion 要给物理参数 params")
+        return configuration.motion(system_name, a, b, params)
     if system_name == "push":
         return float(np.linalg.norm(a[:4]-b[:4])*48.)
     if system_name == "gray_scott":
@@ -59,8 +68,9 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
     """从 tid 的真实起点状态出发，用 donor 在 [start, start+duration) 的控制仿真 → (真实终点状态, 反事实终点状态, 反事实终点画面)。"""
     import numpy as np
     from po_jepa import datasets, systems
+    from po_jepa import variants
     v = datasets.active().knobs
-    if system.name in NEW_SYSTEMS:       # S21b：从第 start 帧的完整状态续算；隐藏状态用 hidden() 换成 frames() 的那种
+    if system.name in NEW_SYSTEMS+variants.SECOND_ORDER:       # S21b；S25a 二阶场景同一条路径：从第 start 帧的完整状态续算；隐藏状态用 hidden() 换成 frames() 的那种
         if (tid, datasets.active().tag) not in _FULL:
             _FULL.clear(); _FULL[tid, datasets.active().tag] = system.variant_trajectory(tid, v)
         full = _FULL[tid, datasets.active().tag]
@@ -115,9 +125,6 @@ def main():
     import encode_v7
 
     spec = datasets.active(); system = systems.get(); device = torch.device(a.device)
-    if spec.system in variants.SECOND_ORDER:
-        # S23b 只登记了数据生成；二阶场景的 *_px 距离、两帧编码怎么接要等 S22 探针结果和第 6 阶段，不静默按粒子类处理
-        raise SystemExit(f"{spec.system} 是二阶场景，动作探针还没接（S23b 只登记数据生成）")
     if spec.knobs.horizon != systems.TICKS:
         # S24a：探针按 33 帧取起点和时长（start+tau ≤ 32）；长时程的探针在第 6 阶段接
         raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：动作探针还没接（S24a 只做数据生成）")
@@ -150,6 +157,7 @@ def main():
     test = list(spec.split_range("test"))[:a.max_trajectories]
     rows, started = [], time.perf_counter()
     scale = 48. if system.name == "double_well" else getattr(system, "SCALE", 1.)   # advection_diffusion：*_px 列是 16×16 平均浓度场的 L2 变化，不是像素
+    params = dict(spec.knobs.params)            # S25a：二阶场景的构形要用物理参数（cart_pole 的摆长、质点数 n）
     for i, tid in enumerate(test):
         donor = datasets.donor_id(tid)
         states, frames = system.frames(tid)
@@ -171,8 +179,8 @@ def main():
                 z_cf = encode(cf_frame[None], tid)[0]
                 rows.append(dict(trajectory_id=tid, donor_id=donor, start_tick=start, duration_cycles=tau,
                                  identity=d(z[start], z[start+tau]), oracle_delta_act=d(z_cf, z[start+tau]),
-                                 motion_px=motion(system.name, states[start+tau], states[start], scale),
-                                 action_swap_px=motion(system.name, cf_state, true_end, scale)))
+                                 motion_px=motion(system.name, states[start+tau], states[start], scale, params),
+                                 action_swap_px=motion(system.name, cf_state, true_end, scale, params)))
         print(f"[{spec.tag}] {i+1}/{len(test)} 条，{time.perf_counter()-started:.0f} s", flush=True)
 
     def summary(sel):
@@ -181,7 +189,9 @@ def main():
                 oracle_over_identity=float(np.mean([r["oracle_delta_act"] for r in sel])/np.mean([r["identity"] for r in sel])))
     report = dict(system=a.system, dataset=spec.tag, encoder="fake" if a.fake_encoder else "vjepa2-vitg",
                   overall=summary(rows), by_duration={str(t): summary([r for r in rows if r["duration_cycles"] == t]) for t in DURATIONS},
-                  rows=rows, note="oracle_delta_act = 完美模型的 delta_act；与训练好模型的 delta_act（评测报告）对比")
+                  rows=rows, note="oracle_delta_act = 完美模型的 delta_act；与训练好模型的 delta_act（评测报告）对比",
+                  **({"tubelet": "dup", "motion_units": "构形（po_jepa.configuration），二阶场景单帧复制编码看不到速度"}
+                     if spec.system in variants.SECOND_ORDER else {}))
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False))
     print(json.dumps(dict(overall=report["overall"], by_duration=report["by_duration"]), indent=1, ensure_ascii=False))

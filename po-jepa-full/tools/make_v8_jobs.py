@@ -13,6 +13,10 @@
 - 正式阶段的动作探针（B2）每个场景都跑，不只 double_well。
 - 默认目录是 ../features-v8、../results-v8，和 v7 分开。同一个场景、同一个调节项的数据在 v7 树和 v8 树上逐位相同
   （S20b、S21a、S21b 的跨树对照），想复用 v7 已编码的特征，可以用 --features 指到 v7 的特征目录。
+
+S25a：五个二阶场景（protocols.SECOND_ORDER_SCENES）能排了，但要显式写 --scenes（默认仍是 7 个一阶场景，任务表不变）。
+它们现在按单帧复制（dup）编码，特征里看不到速度，只适合当“看不到速度时有多差”的对照；两帧（pair）编码等 S22 探针结果
+在 S25b 接，接好以后并进默认场景。排了二阶场景时，输出的第一行注释会写明这一点。
 """
 import argparse
 from pathlib import Path
@@ -25,7 +29,9 @@ CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "
 SEEDS = (1703, 1704, 1705)
 # 规划的真值参照（oracle）每次 CEM 的样本数：真值仿真在 CPU 上逐个跑，新场景每个 tick 贵得多
 # （gray_scott 约 60 ms、push 约 30 ms，粒子类约 3 ms），默认 64 会让 identity 那条规划任务占着 GPU 跑几个小时（S21b 实测）
-ORACLE_SAMPLES = {"gray_scott": 16, "push": 32}
+# S25a：二阶场景每个 tick 本机 CPU 实测 wave 约 12 ms，其余 ≤ 3 ms（pendulum 0.8、bouncing_balls 2.6、cart_pole 2.0、
+# spring_chain 0.1；double_well 3.9 作对照），只有 wave 降到 32（docs/segments/S25a.md §4）
+ORACLE_SAMPLES = {"gray_scott": 16, "push": 32, "wave": 32}
 
 
 def split_scene(scene):
@@ -49,8 +55,8 @@ def main():
     a = p.parse_args()
     scenes = [s for s in a.scenes.split(",") if s]
     for s in scenes:
-        if s not in protocols.SCENES:
-            raise SystemExit(f"{s} 不是 v8 的基础场景：{protocols.SCENES}")
+        if s not in protocols.ALL_SCENES:
+            raise SystemExit(f"{s} 不是 v8 的基础场景：{protocols.ALL_SCENES}")
     ids = [i for i in a.protocols.split(",") if i] or None
     if ids and not set(ids) <= set(protocols.BY_ID):
         raise SystemExit(f"没有这些协议：{sorted(set(ids)-set(protocols.BY_ID))}")
@@ -60,6 +66,9 @@ def main():
     n, updates = (200, 2000) if a.stage == "pilot" else (2000, 10000)
     seeds = SEEDS[:1] if a.stage == "pilot" else SEEDS
     root = f"{a.results}/{'pilot' if a.stage == 'pilot' else 'full'}"
+    second = [s for s in scenes if s in protocols.SECOND_ORDER_SCENES]
+    if second:
+        print(f"# 注意：二阶场景 {','.join(second)} 按单帧复制（dup）编码，特征里看不到速度（pair 编码等 S22 探针结果，S25b 接）。")
     enc = f"--upstream-root {a.upstream_root} --checkpoint {a.encoder}"
 
     def name(scene, extra=None):
