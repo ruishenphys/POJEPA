@@ -26,7 +26,7 @@ def build(condition: str, *, config: DroidConfig, seed: int, sigma_z: float,
 
 ### 2.1 模型配置块
 
-PO-JEPA 类的配置块 = po-jepa-full 里 `configs/train/default.yaml` 深度合并 `configs/train/v4.yaml`（和 v7 `checks.load_protocol()` 的前两步相同，不合并 v7 的日程和标定）之后的 `model` 段，只改两项：`dynamics.action_dim = 7`，`graph.sigma_z = sigma_z`（§3.1 的值）。读之前先做 v7 的 `cache.verify_fixed_protocol()`，所以这两份文件必须和 v7 逐字节相同。其余全部沿用：投影 1408→64 残差读出，K = 16，σ_x = 0.125，Q 的种子 1703，指数欧拉积分、内部最大步长 0.25 个周期。
+PO-JEPA 类的配置块 = po-jepa-full 里 `configs/train/default.yaml` 深度合并 `configs/train/v4.yaml`（和 v7 `checks.load_protocol()` 的前两步相同，不合并 v7 的日程和标定）之后的 `model` 段，再合并 v7 `configs/train/v7.yaml` 的 `model` 段（`dynamics.forcing_space: token`，S00t；不合并就是旧的模态写法，参数量和下表都不对），然后只改两项：`dynamics.action_dim = 7`，`graph.sigma_z = sigma_z`（§3.1 的值）。读之前先做 v7 的 `cache.verify_fixed_protocol()`，所以这两份文件必须和 v7 逐字节相同。其余全部沿用：投影 1408→64 残差读出，K = 16，σ_x = 0.125，Q 的种子 1703，指数欧拉积分、内部最大步长 0.25 个周期。
 
 ### 2.2 每个条件
 
@@ -35,11 +35,11 @@ PO-JEPA 类的配置块 = po-jepa-full 里 `configs/train/default.yaml` 深度�
 | po_jepa_full | `POJEPA(ProjectionConfig, GraphSpectrum(GraphConfig), ModalDynamics(DynamicsConfig), IntegratorConfig)`，顺序和 `checks.build_full_model` 完全相同，`torch.random.fork_rng(devices=[])` 里 `manual_seed(seed)` | `config.loss_config(time_weight=λ_t, space_weight=λ_s)`，λ 取 `lambda-po_jepa_full.json` | `training.make_optimizer` |
 | po_jepa_no_consistency | 同上 | 两个权重 0 | 同上 |
 | fixed_fourier | S10 的构造函数，显式传 §2.1 的配置块和 `seed`（08 §1.2） | λ 取 `lambda-fixed_fourier.json` | 同上 |
-| koopman | S10 的构造函数，`KoopmanConfig(modes=72, action_dim=7)`，显式传 `seed` | 两个权重 0 | 和 Transformer 相同的 AdamW（07 §2.4） |
-| matched_transformer | `TokenTransformer(TransformerSpec(action_dim=7, width=64, heads=4, layers=1, feedforward=288, residual=True))`，其余字段取 v7 默认；同样 `fork_rng` + `manual_seed(seed)` | 两个权重 0 | v7 的 Transformer AdamW |
+| koopman | S10 的构造函数，`KoopmanConfig(modes=87, action_dim=7)`，显式传 `seed` | 两个权重 0 | 和 Transformer 相同的 AdamW（07 §2.4） |
+| matched_transformer | `TokenTransformer(TransformerSpec(action_dim=7, width=64, heads=4, layers=1, feedforward=384, residual=True))`，其余字段取 v7 默认；同样 `fork_rng` + `manual_seed(seed)` | 两个权重 0 | v7 的 Transformer AdamW |
 | transformer_consistency | 和 matched_transformer 完全相同 | λ 取 `lambda-transformer_consistency.json` | 同上 |
 | vjepa2_ac | `ACPredictor(ACSpec(action_dim=7, state_input=config.model.ac_state))`（官方规模），载入官方权重（§6.2） | v7 AC 的官方损失；学习率调度用 `config.loss_config(0, 0)`，峰值 1e-4 | `ac_training.make_optimizer` |
-| vjepa2_ac_small | `ACSpec(width=64, depth=1, heads=4, mlp_ratio=4.5, action_dim=7, state_input=config.model.ac_state)`，从头训练 | 同上，峰值 4.25e-4 | 同上 |
+| vjepa2_ac_small | `ACSpec(width=64, depth=1, heads=4, mlp_ratio=6.0, action_dim=7, state_input=config.model.ac_state)`，从头训练 | 同上，峰值 4.25e-4 | 同上 |
 | identity（不训练） | `IdentityPredictor(action_dim=7)` | — | — |
 | vjepa2_ac_zeroshot（不训练） | 和 vjepa2_ac 相同的构造和载入，不训练 | — | — |
 
@@ -49,13 +49,13 @@ PO-JEPA 类的配置块 = po-jepa-full 里 `configs/train/default.yaml` 深度�
 
 在构造时按规则现算，不看任何数据和结果，写进登记：
 
-| 条件 | 候选（`matching` 配置段，01 §3） | 规则 | 结果 | 和 PO-JEPA（236,898）相差 |
+| 条件 | 候选（`matching` 配置段，01 §3） | 规则 | 结果 | 和 PO-JEPA（248,737，token 写法）相差 |
 |---|---|---|---|---|
-| matched_transformer、transformer_consistency | FFN 宽 [272, 288, 304] | 绝对差最小，平局取规格字典序较小的（v7 `choose_architecture` 同一规则） | 288 → 236,640 | 258（0.109%） |
-| vjepa2_ac_small | mlp_ratio [4.25, 4.5, 4.75] | 同上 | 4.5 → 236,960 | 62（0.026%） |
-| koopman | K 为任意正整数 | 08 §5.6 | 72 → 236,992 | 94（0.040%） |
+| matched_transformer、transformer_consistency | FFN 宽 [368, 384, 400] | 绝对差最小，平局取规格字典序较小的（v7 `choose_architecture` 同一规则） | 384 → 249,024 | 287（0.115%） |
+| vjepa2_ac_small | mlp_ratio [5.75, 6.0, 6.25] | 同上 | 6.0 → 249,344 | 607（0.244%） |
+| koopman | K 为任意正整数 | 08 §5.6 | 87 → 248,512 | 225（0.090%） |
 
-v7 的候选（FFN 112/128/144，AC 的 mlp_ratio 2.0）在 7 维动作下都差 8% 以上，所以 DROID 另定候选：取使相差最小的值和它两侧各一档。任一条件超过 1% 就报错，不放宽。`ac_state: learned_constant` 时 AC 缩小版没有状态编码器、多一个常向量，同一组候选里仍是 4.5（236,512，相差 0.163%）。测试断言上表的每个数。
+v7 的候选（FFN 112/128/144，AC 的 mlp_ratio 2.0）在 7 维动作下都差 8% 以上，所以 DROID 另定候选：取使相差最小的值和它两侧各一档。任一条件超过 1% 就报错，不放宽。`ac_state: learned_constant` 时 AC 缩小版没有状态编码器、多一个常向量，同一组候选里仍是 6.0（248,896，相差 0.064%）。测试断言上表的每个数。（S00t 之后按 token 写法手算：Transformer 每单位 FFN 宽 129 个参数、7 维动作比 2 维多 320；AC 每 0.25 的 mlp_ratio 2,064 个；DROID 段实现时由测试核对）模态写法时的旧数（PO-JEPA 236,898；FFN 288；mlp_ratio 4.5；K 72）作废。
 
 ### 2.4 初始权重的关系
 

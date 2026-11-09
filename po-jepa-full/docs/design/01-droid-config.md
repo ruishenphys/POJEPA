@@ -109,8 +109,8 @@ training:
   untrained: [identity, vjepa2_ac_zeroshot]
 matching:                       # 参数量匹配的候选，只按参数量选（09 §2.3）
   tolerance: 0.01
-  transformer_feedforward_candidates: [272, 288, 304]
-  ac_small_mlp_ratio_candidates: [4.25, 4.5, 4.75]
+  transformer_feedforward_candidates: [368, 384, 400]   # S00t：token 写法 PO-JEPA 248,737（09 §2.3）
+  ac_small_mlp_ratio_candidates: [5.75, 6.0, 6.25]
 monitoring:
   min_share: 0.005              # 加权一致性梯度至少是 JEPA 梯度的 0.5%（v7 同值，09 §4.6）
 calibration:

@@ -183,7 +183,7 @@ PO-JEPA 是 token 写法（v7 提交 0ac45fe 的 v7 协议，§1.1）；DROID �
 
 代码里按规则算 K，写进检查点的 `model_config`；`validate_registration` 对 koopman 核 K 等于对登记的 PO-JEPA 参数量按规则取的值、实际参数量等于公式。v7 的 `preregister()` 不改，`check-addon` 的报告里另记 K。测试断言仿真得 103、DROID 得 87。
 
-参数量的口径和 v7 相同，含 `p_out.bias` 的 1,408 个参数。PO-JEPA 和 Koopman 都是残差读出 P_out(a) − P_out(b)，偏置精确相消、梯度恒为 0，所以这 1,408 个参数从不训练；matched_transformer 的读出是 Z + P_out(·)，偏置会训练。按可训练参数算，PO-JEPA 比 Transformer 少 1,408 个（约 0.62%），对基线有利。
+参数量的口径和 v7 相同，含 `p_out.bias` 的 1,408 个参数。PO-JEPA 和 Koopman 都是残差读出 P_out(a) − P_out(b)，偏置精确相消、梯度恒为 0，所以这 1,408 个参数从不训练；matched_transformer 的读出是 Z + P_out(·)，偏置会训练。按可训练参数算，PO-JEPA（226,209）比 Transformer（228,064）少 1,855 个（约 0.81%；其中 1,408 来自这个偏置，447 是匹配本身的差），对基线有利。
 
 ### 5.7 检查点
 
