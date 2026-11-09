@@ -86,11 +86,11 @@ def _layers(system, trajectory_id, v, L, ticks, sigma):
     """背景 → 静止干扰光点（流 3）→ 会动的干扰光点（流 8）→ [L,256,256,3] float64（与 systems.compose 同一顺序）。"""
     base = _texture(v.background).astype(np.float64)
     if v.distractors:
-        row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+        row, col = systems.pixel_grid()
         for r, c in rng(system, trajectory_id, 3).uniform(24., SIZE-24., (v.distractors, 2)):
             w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
             base = base+(DISTRACTOR_COLOR-base)*w
-    image = np.broadcast_to(base, (L, SIZE, SIZE, 3)).copy()
+    image = np.broadcast_to(base, (L,)+base.shape).copy()
     if v.movers:
         image = blend_spots(image, mover_centers(rng(system, trajectory_id, 8), v.movers, frame_ticks(L, ticks, v.horizon)),
                             DISTRACTOR_COLOR, sigma)
@@ -113,17 +113,19 @@ def _finish(image, system, trajectory_id, v, ticks):
 
 
 def _grid():
-    """像素中心的世界坐标需要的网格（行、列，像素）。"""
-    return np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+    """像素中心的世界坐标需要的网格（行、列，像素）。S24c：相机里是视野像素中心的画布坐标（systems.pixel_grid）。"""
+    return systems.pixel_grid()
 
 
 def _segment(image, a, b, color, half_width):
-    """抗锯齿线段（端点 a、b 为行、列像素）：到线段距离 ≤ half_width 全覆盖，再往外 1 像素线性淡出。image [256,256,3]。"""
+    """抗锯齿线段（端点 a、b 为行、列像素）：到线段距离 ≤ half_width 全覆盖，再往外 1 像素线性淡出。image [256,256,3]。
+    S24c：淡出宽度 e = systems.edge_width()（相机里输出像素比画布像素大时按输出像素；默认 1，式子与原来逐位相同）。"""
     row, col = _grid()
     d = np.asarray(b, dtype=np.float64)-np.asarray(a, dtype=np.float64)
     s = np.clip(((row-a[0])*d[0]+(col-a[1])*d[1])/max(d @ d, 1e-12), 0., 1.)
     dist = np.hypot(row-(a[0]+s*d[0]), col-(a[1]+s*d[1]))
-    w = np.clip(half_width+.5-dist, 0., 1.)[..., None]
+    e = systems.edge_width()
+    w = (np.clip(half_width+.5*e-dist, 0., e)/e)[..., None]
     return image+(color-image)*w
 
 
@@ -136,7 +138,8 @@ def _spot(image, rc, color, sigma):
 def _disc(image, rc, color, radius):
     """抗锯齿实心圆（半径 radius 像素，边缘 1 像素线性过渡）。"""
     row, col = _grid()
-    w = np.clip(radius+.5-np.hypot(row-rc[0], col-rc[1]), 0., 1.)[..., None]
+    e = systems.edge_width()
+    w = (np.clip(radius+.5*e-np.hypot(row-rc[0], col-rc[1]), 0., e)/e)[..., None]
     return image+(color-image)*w
 
 
@@ -145,7 +148,8 @@ def _box(image, center_rc, half_rc, color):
     row, col = _grid()
     er = np.abs(row-center_rc[0])-half_rc[0]; ec = np.abs(col-center_rc[1])-half_rc[1]
     sd = np.hypot(np.maximum(er, 0.), np.maximum(ec, 0.))+np.minimum(np.maximum(er, ec), 0.)
-    w = np.clip(.5-sd, 0., 1.)[..., None]
+    e = systems.edge_width()
+    w = (np.clip(.5*e-sd, 0., e)/e)[..., None]
     return image+(color-image)*w
 
 
@@ -705,15 +709,23 @@ class Wave(SecondOrder):
         self.check_variant(v)
         n = self.N; rep = SIZE//n; L = len(states)
         u = states[:, :n*n].reshape(L, n, n)
-        up = np.repeat(np.repeat(u, rep, axis=1), rep, axis=2)[..., None]
+        if systems._VIEW[0] is None:
+            up = np.repeat(np.repeat(u, rep, axis=1), rep, axis=2)[..., None]
+        else:      # S24c：相机里在视野像素中心上周期双线性插值
+            from . import camera
+            up = camera.sample_field(u, float(rep))[..., None]
         bg = _texture(v.background)[None]
         image = bg+np.clip(up, 0., 1.)*(np.array(COLORS[v.color])-bg)+np.clip(-up, 0., 1.)*(self.NEG_COLOR-bg)
         p = states[:, 2*n*n:]
-        x = np.arange(SIZE)+.5
-        dc = (x[None, :]-SIZE*p[:, 0, None]+SIZE/2) % SIZE-SIZE/2
-        dr = (x[None, :]-SIZE*(1.-p[:, 1, None])+SIZE/2) % SIZE-SIZE/2
+        xr, xc = systems.pixel_axes()
+        dc = (xc[None, :]-SIZE*p[:, 0, None]+SIZE/2) % SIZE-SIZE/2
+        dr = (xr[None, :]-SIZE*(1.-p[:, 1, None])+SIZE/2) % SIZE-SIZE/2
         d = np.sqrt(dr[:, :, None]**2+dc[:, None, :]**2)
-        wm = np.exp(-(d-5.)**2/2.)[..., None]
+        if systems._VIEW[0] is None:
+            wm = np.exp(-(d-5.)**2/2.)[..., None]
+        else:
+            from . import camera
+            wm = camera.ring_weight(d, 5.)[..., None]
         image = image+(MARK_COLOR-image)*wm
         return _finish(image, self.name, trajectory_id, v, ticks)
 

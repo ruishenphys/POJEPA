@@ -23,6 +23,10 @@ S24b 时间采样（调节项 fps、jitter、exposure、switch_offset）：画�
 看到 Variant.changes_timing() 就交给它）。switch_offset 让下达动作的段边界落在 tick 内部，下达动作是 SubtickControls
 （以 1/4 tick 为单位），物理里的执行动作是 applied_subticks 的 [4·horizon, 2]。默认值时一个字节不变。
 
+S24c 空间采样（调节项 resolution、zoom、pan、drift）：同样走 po_jepa.timing（Variant.resampled()），每帧在
+camera_view(view) 里画：画图函数从 pixel_axes()/pixel_grid() 取视野像素中心的画布坐标（默认就是 k + 0.5），
+背景纹理、遮挡块、场和抗锯齿宽度按 po_jepa.camera 的规则取值，输出 R×R。默认值时一个字节不变。
+
 隐藏状态只用于生成画面和诊断，不进入模型。
 """
 from contextlib import contextmanager
@@ -242,6 +246,42 @@ def applied_subticks(trajectory_id, v, controls) -> np.ndarray:
     return u
 
 
+# —— S24c：相机视野。camera_view(view) 里各画图函数在 view 的像素中心（画布坐标）上取值，输出 view.size 边长 ——
+_VIEW = [None]
+
+
+@contextmanager
+def camera_view(view):
+    """在这个上下文里，各场景的画图函数在 po_jepa.camera.View 的像素中心上画（只在 systems.raw_images() 里用：
+    画布外的 SURROUND 和像素噪声由 po_jepa.timing 加）。"""
+    old, _VIEW[0] = _VIEW[0], view
+    try:
+        yield
+    finally:
+        _VIEW[0] = old
+
+
+def pixel_axes():
+    """→ (行坐标 [R], 列坐标 [R])：输出像素中心在画布上的位置。不在相机里时就是 arange(256)+0.5（两者是同一个数组的值）。"""
+    view = _VIEW[0]
+    if view is None:
+        x = np.arange(SIZE)+.5
+        return x, x
+    return view.rows(), view.cols()
+
+
+def pixel_grid():
+    """→ (row, col) [R,R]（indexing="ij"）。不在相机里时与 np.meshgrid(np.arange(256)+.5, np.arange(256)+.5, indexing="ij") 相同。"""
+    r, c = pixel_axes()
+    return np.meshgrid(r, c, indexing="ij")
+
+
+def edge_width() -> float:
+    """抗锯齿边缘的线性过渡宽度（画布像素）：默认 1；相机里是 max(1, 输出像素边长)。"""
+    view = _VIEW[0]
+    return 1. if view is None else max(1., view.scale)
+
+
 # —— S24b：画“原始”画面（遮挡块之后、像素噪声和取整之前的 float64），timing 在它上面做曝光平均、加像素噪声 ——
 _RAW = [False]
 
@@ -257,8 +297,18 @@ def raw_images():
         _RAW[0] = old
 
 
+def _noise_coarse() -> np.ndarray:
+    """静态噪声纹理的 32×32 粗格（每格 8 像素）[32,32,1]，固定随机流 [1703, 77]。"""
+    g = np.random.Generator(np.random.PCG64(np.random.SeedSequence([1703, 77])))
+    return g.normal(0., 8., (32, 32, 1))
+
+
 def _texture(kind: str) -> np.ndarray:
-    """背景：grid = v6 网格；plain = 纯色；checker = 32 像素棋盘；noise = 固定的静态噪声纹理（同一数据集所有帧相同）。"""
+    """背景：grid = v6 网格；plain = 纯色；checker = 32 像素棋盘；noise = 固定的静态噪声纹理（同一数据集所有帧相同）。
+    S24c：相机里（camera_view）按视野像素的面积平均（po_jepa.camera.texture），[R,R,3]。"""
+    if _VIEW[0] is not None:
+        from . import camera
+        return camera.texture(kind, _VIEW[0])
     if kind == "grid":
         return _background()
     row, col = np.meshgrid(np.arange(SIZE), np.arange(SIZE), indexing="ij")
@@ -266,8 +316,7 @@ def _texture(kind: str) -> np.ndarray:
         return np.broadcast_to(BACKGROUND, (SIZE, SIZE, 3)).astype(np.float64)
     if kind == "checker":
         return np.where((((row//32)+(col//32)) % 2 == 0)[..., None], BACKGROUND, BACKGROUND+14.)
-    g = np.random.Generator(np.random.PCG64(np.random.SeedSequence([1703, 77])))
-    coarse = g.normal(0., 8., (32, 32, 1))
+    coarse = _noise_coarse()
     return BACKGROUND+np.kron(coarse, np.ones((8, 8, 3)))[:SIZE, :SIZE]
 
 
@@ -301,7 +350,7 @@ def mover_centers(g, count, ticks) -> np.ndarray:
 
 def blend_spots(image, centers, color, sigma):
     """image [L,256,256,3] float；centers [L,K,2]（行、列）；按顺序叠加同一颜色的高斯亮斑。"""
-    row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+    row, col = pixel_grid()
     for k in range(centers.shape[1]):
         r = centers[:, k, 0, None, None]; c = centers[:, k, 1, None, None]
         w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
@@ -320,10 +369,16 @@ def pixel_noise(g, sigma, shape, ticks=None, horizon=TICKS):
 
 
 def occlude(image, g, count):
-    """不透明遮挡块：左上角在 [16, 256−16−48] 均匀取整（随机流 7），整条轨迹静止；画在场景之上、像素噪声之前。"""
+    """不透明遮挡块：左上角在 [16, 256−16−48] 均匀取整（随机流 7），整条轨迹静止；画在场景之上、像素噪声之前。
+    S24c：相机里按像素被遮挡块盖住的面积比例混合（完全盖住的像素就是遮挡块颜色）。"""
     image = image.copy()
     for r, c in g.integers(16, SIZE-16-OCCLUDER_SIZE+1, (count, 2)):
-        image[:, r:r+OCCLUDER_SIZE, c:c+OCCLUDER_SIZE] = OCCLUDER_COLOR
+        if _VIEW[0] is None:
+            image[:, r:r+OCCLUDER_SIZE, c:c+OCCLUDER_SIZE] = OCCLUDER_COLOR
+        else:
+            from . import camera
+            cover = camera.square_cover(_VIEW[0], float(r), float(c), float(OCCLUDER_SIZE))[..., None]
+            image = np.where(cover == 1., OCCLUDER_COLOR, image+(OCCLUDER_COLOR-image)*cover)
     return image
 
 
@@ -337,12 +392,12 @@ def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
     if v.distractors:
         g = simulation._rng(trajectory_id, 3)
         fixed = g.uniform(24., SIZE-24., (v.distractors, 2))
-        row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+        row, col = pixel_grid()
         for r, c in fixed:
             w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
             base = base+(np.array([150., 150., 150.])-base)*w
-    row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
-    image = np.broadcast_to(base, (L, SIZE, SIZE, 3)).copy()
+    row, col = pixel_grid()
+    image = np.broadcast_to(base, (L,)+base.shape).copy()
     if v.movers:
         centers = mover_centers(simulation._rng(trajectory_id, 8), v.movers, frame_ticks(L, ticks, v.horizon))
         image = blend_spots(image, centers, DISTRACTOR_COLOR, sigma)
@@ -387,7 +442,7 @@ class System:
         """返回 (隐藏状态 [33,D], 画面 [33,256,256,3] uint8)。基础场景走原实现（逐位不变），有调节项时走可调实现。
         S24a：horizon > 32 时是 [horizon+1, …]（horizon 也是调节项，走可调实现）。S24b 时间采样调节项起作用时走 timing。"""
         v = datasets.active().knobs
-        if v.changes_timing():
+        if v.resampled():
             from . import timing
             return timing.frames(self, trajectory_id)
         if v.is_default:
@@ -643,7 +698,7 @@ class AdvectionDiffusion(System):
 
     def frames(self, trajectory_id):
         v = datasets.active().knobs
-        if v.changes_timing():
+        if v.resampled():
             from . import timing
             return timing.frames(self, trajectory_id)
         if not v.is_default:
@@ -682,7 +737,11 @@ class AdvectionDiffusion(System):
         return np.stack(out)
 
     def draw_fields(self, fields, trajectory_id, v, ticks=None):
-        """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（见 pixel_noise）。"""
+        """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（见 pixel_noise）。
+        S24c：相机里先把 256 格的浓度场在视野像素中心上周期双线性插值（po_jepa.camera.sample_field）。"""
+        if _VIEW[0] is not None:
+            from . import camera
+            fields = camera.sample_field(fields, 1.)
         w = np.clip(fields, 0., 1.)[..., None]
         bg = _texture(v.background)[None]
         image = bg+(np.array(COLORS[v.color])-bg)*w
@@ -751,11 +810,17 @@ class Landscape(System):
         return rc, np.array([COLORS[v.color]]), 8.
 
     def backdrop(self, v):
-        """地形底图：势能低处亮、高处暗，归一化到 [0,1]（像素 32 网格中心采样）。"""
+        """地形底图：势能低处亮、高处暗，归一化到 [0,1]（像素 32 网格中心采样）。
+        S24c：相机里在视野像素中心上取势能，归一化仍用画布 256×256 像素中心上的最小、最大值（缩放、平移不改变底图亮度）。"""
         c = (np.arange(SIZE)+.5-128)/self.SCALE
         x, y = np.meshgrid(c, -c)
         V = np.minimum(self.potential(x, y, v.shape), 3.)
-        return 1.-(V-V.min())/(V.max()-V.min()+1e-12)
+        lo, hi = V.min(), V.max()
+        if _VIEW[0] is not None:
+            rows, cols = pixel_axes()
+            x, y = np.meshgrid((cols-128)/self.SCALE, -(rows-128)/self.SCALE)
+            V = np.minimum(self.potential(x, y, v.shape), 3.)
+        return 1.-(V-lo)/(hi-lo+1e-12)
 
 
 class NewSystem(System):
@@ -784,7 +849,7 @@ class NewSystem(System):
         return new_systems
 
     def frames(self, trajectory_id):
-        if datasets.active().knobs.changes_timing():
+        if datasets.active().knobs.resampled():
             from . import timing
             return timing.frames(self, trajectory_id)
         impl, u, v = self._impl(trajectory_id)
@@ -896,7 +961,7 @@ class SecondOrderSystem(NewSystem):
         """→ (隐藏状态 [34, d], 画面 [34,256,256,3] uint8)，下标 f 对应 tick f−1（S24a 长时程是 horizon+2 帧）。
         S24b 时间采样：第 0 帧是 frames() 第 0 帧往前一个帧间隔（−4/fps tick，取预跑那个 tick 内部的状态；fps=2 时
         前一帧在 −2 tick，预跑只有 1 tick，报错），其余就是 frames()。"""
-        if datasets.active().knobs.changes_timing():
+        if datasets.active().knobs.resampled():
             from . import timing
             return timing.frames(self, trajectory_id, prev=True)
         impl, u, v = self._impl(trajectory_id)
@@ -904,7 +969,7 @@ class SecondOrderSystem(NewSystem):
 
     def frames(self, trajectory_id):
         """→ (隐藏状态 [33, d], 画面 [33,256,256,3] uint8)，tick 0…32（= frames_with_prev 的下标 1…33；长时程 0…horizon）。"""
-        if datasets.active().knobs.changes_timing():
+        if datasets.active().knobs.resampled():
             from . import timing
             return timing.frames(self, trajectory_id)
         states, frames = self.frames_with_prev(trajectory_id)

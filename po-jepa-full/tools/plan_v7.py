@@ -135,6 +135,9 @@ def main():
     if base.knobs.changes_timing():
         # S24b：规划按每 tick 一帧、逐 tick 的动作；时间采样的规划在第 6 阶段接
         raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
+    if base.knobs.changes_space():
+        # S24c：规划的目标画面按单帧重画（不经过相机）；空间采样的规划在第 6 阶段接
+        raise SystemExit("带空间采样调节项（resolution/zoom/pan/drift）的数据集：规划还没接（S24c 只做数据生成）")
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":
@@ -155,6 +158,8 @@ def main():
         raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
     if v.changes_timing():              # S24b：--test-variant 也不许带时间采样调节项（同上）
         raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
+    if v.changes_space():               # S24c：--test-variant 也不许带空间采样调节项（同上）
+        raise SystemExit("带空间采样调节项（resolution/zoom/pan/drift）的数据集：规划还没接（S24c 只做数据生成）")
 
     # —— 编码器 ——
     if a.fake_encoder:

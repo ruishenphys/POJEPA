@@ -182,19 +182,31 @@ class GrayScott:
     def draw(self, U, V, p, trajectory_id, v, ticks=None):
         """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（S21b）。"""
         rep = SIZE//self.N
-        up = lambda X: np.repeat(np.repeat(X, rep, axis=1), rep, axis=2)
+        if systems._VIEW[0] is None:
+            up = lambda X: np.repeat(np.repeat(X, rep, axis=1), rep, axis=2)
+        else:      # S24c：相机里在视野像素中心上周期双线性插值（格子边长 2 画布像素）
+            from . import camera
+            up = lambda X: camera.sample_field(X, float(rep))
         # 线性、不饱和：V 和 1−U 在物理域 [0,1] 内各占一个不平行的颜色方向，叠加后最大约 221 < 255，
         # 所以 (U, V) 能从 RGB 解回（只差 8 位量化）。clip 只挡谱方法约 1e−5 的数值下冲。
         wv = np.clip(up(V), 0., 1.)[..., None]; wu = np.clip(1.-up(U), 0., 1.)[..., None]
         bg = _texture(v.background)[None]
         image = bg+self.MIX_V*(np.array(COLORS[v.color])-bg)*wv+self.MIX_U*(self.COLOR_U-bg)*wu
-        x = np.arange(SIZE)+.5
-        dc = (x[None, :]-SIZE*p[:, 0, None]+SIZE/2) % SIZE-SIZE/2            # [L,256]
-        dr = (x[None, :]-SIZE*(1.-p[:, 1, None])+SIZE/2) % SIZE-SIZE/2
+        xr, xc = systems.pixel_axes()                                         # S24c：相机里是视野像素中心
+        dc = (xc[None, :]-SIZE*p[:, 0, None]+SIZE/2) % SIZE-SIZE/2            # [L,256]
+        dr = (xr[None, :]-SIZE*(1.-p[:, 1, None])+SIZE/2) % SIZE-SIZE/2
         d = np.sqrt(dr[:, :, None]**2+dc[:, None, :]**2)
-        wm = np.exp(-(d-5.)**2/2.)[..., None]
+        wm = self._ring(d)[..., None]
         image = image+(self.COLOR_MARK-image)*wm
         return _finish(image, trajectory_id, self.name, v, ticks)
+
+    @staticmethod
+    def _ring(d):
+        """注入点圆环（半径 5、宽约 1 画布像素）的权重；S24c 相机里按 camera.ring_weight 加宽。"""
+        if systems._VIEW[0] is None:
+            return np.exp(-(d-5.)**2/2.)
+        from . import camera
+        return camera.ring_weight(d, 5.)
 
     def frames(self, trajectory_id, u, params, v):
         """→ (隐藏状态 [33,514], 画面 [33,256,256,3] uint8)。"""
@@ -300,10 +312,10 @@ class Push:
         """ticks：每帧的 tick，只在有会动的干扰光点（S21a movers）时用到；画整条 33 帧时可不给。"""
         size = param(self.name, params, "size")
         sigma = v.sigma or 6.
-        x = (np.arange(SIZE)+.5-128)/self.SCALE
-        X, Y = np.meshgrid(x, -x)                      # 世界坐标，行向下 = y 减小
+        xr, xc = systems.pixel_axes()                  # S24c：相机里是视野像素中心（默认 arange(256)+0.5）
+        X, Y = np.meshgrid((xc-128)/self.SCALE, -((xr-128)/self.SCALE))   # 世界坐标，行向下 = y 减小
         base = _texture(v.background).astype(np.float64)
-        row, col = np.meshgrid(np.arange(SIZE)+.5, np.arange(SIZE)+.5, indexing="ij")
+        row, col = systems.pixel_grid()
         if v.distractors:
             for r, c in rng(self.name, trajectory_id, 3).uniform(24., SIZE-24., (v.distractors, 2)):
                 w = np.exp(-((col-c)**2+(row-r)**2)/(2*sigma**2))[..., None]
@@ -316,7 +328,8 @@ class Push:
             dx, dy = X-bx, Y-by
             ex = np.abs(co*dx+si*dy)-size/2; ey = np.abs(-si*dx+co*dy)-size/2
             sd = np.hypot(np.maximum(ex, 0.), np.maximum(ey, 0.))+np.minimum(np.maximum(ex, ey), 0.)
-            a = np.clip(.5-sd*self.SCALE, 0., 1.)[..., None]
+            e = systems.edge_width()                   # S24c：抗锯齿过渡宽度（默认 1 像素）
+            a = (np.clip(.5*e-sd*self.SCALE, 0., e)/e)[..., None]
             back = blend_spots(base[None], movers[i:i+1], DISTRACTOR_COLOR, sigma)[0] if v.movers else base
             image = back+(self.BLOCK-back)*a
             mx, my = bx+.25*size*co, by+.25*size*si

@@ -18,6 +18,8 @@
 - 时间（S24a）：horizon 轨迹长度（控制 tick 数），32 = 原来的 33 帧，64、128 是长时程（65、129 帧）。
   S24b 时间采样：fps 帧率、jitter 帧时间抖动、exposure 曝光（运动模糊）、switch_offset 控制在两帧之间切换。
   这四项不改物理（switch_offset 除外，它改的是下达动作的切换时刻），只改在哪些时刻、怎样取画面（po_jepa.timing）。
+- 空间（S24c）：resolution 输出分辨率、zoom 缩小、pan 相机平移、drift 相机缓慢漂移（po_jepa.camera）。只改画面，不改物理；
+  相机视野始终包含整块画布（画布外是深色的 SURROUND），所以画面仍能看全状态，相机位置也能从一帧看出来。
 
 模型看到的始终是“下达的”动作；执行噪声、延迟和饱和只作用在物理里（模型看不到），用来测鲁棒性。
 除 occluders（被遮住时状态看不到，有意做成部分可观测）外，所有调节项都保持一阶、画面能看全状态（模型只看当前一帧）。
@@ -28,6 +30,7 @@ S23b 的五个二阶场景（SECOND_ORDER）本身不是一阶：画面只给位
 S24a horizon 不用新的随机流：每个流按 tick 顺序抽，长轨迹只是接着抽下去，所以前 32 个 tick 的动作、噪声和画面
 与 horizon=32（其余调节项相同）逐位相同（前缀一致，见 docs/segments/S24a.md §2）。
 S24b 新增流 10 = 帧时间抖动，流 11 = 不在整 tick 上的帧的像素噪声（按帧号另起，见 po_jepa.timing）。
+S24c 新增流 12 = 相机（pan 的方向角）。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -59,6 +62,10 @@ HORIZONS = (32, 64, 128)       # S24a：轨迹的控制 tick 数（帧数 = hori
 FPS = (2, 4, 8, 16)             # 帧率；4 = 原来的每 tick 一帧。帧数 = horizon·fps/4 + 1
 SWITCH_OFFSETS = (0., .25, .5, .75)   # 下达动作的段边界整体往后挪多少 tick（1/4 tick 的整数倍）
 JITTER_MAX = .4                 # 帧时间抖动上限（帧间隔的比例；< 0.5 保证帧时间严格递增）
+# S24c 空间采样（docs/segments/S24c.md）
+RESOLUTIONS = (192, 256, 320, 384)   # 输出边长（像素）；视野不变，V-JEPA 2 的 16 像素 patch 对应 12/16/20/24 网格
+ZOOM_MIN = .5                   # zoom ∈ [0.5, 1]：只缩小（视野始终包含整块画布，画面能看全状态）
+DRIFT_MAX = .5                  # rad/s：相机绕画布中心转的角速度上限（一圈 ≥ 12.6 s ≈ 50 tick，“缓慢”）
 # S21a：只对 ODE 粒子类场景（状态是 RK4 积分的向量、受控点是状态前两维）成立的调节项不适用的场景
 FIELD_SYSTEMS = ("advection_diffusion", "gray_scott", "wave")   # 场方程：没有光点（wave 是 S23b 加的）
 # S23b：二阶场景（一帧看不到速度；数据集仍是 33 帧，34 帧见 systems.SecondOrderSystem.frames_with_prev）
@@ -98,6 +105,11 @@ class Variant:
     jitter: float = 0.                # 帧时间抖动：中间各帧的时刻加 jitter·帧间隔·U(−1,1)（流 10），首尾两帧不动
     exposure: float = 0.              # 曝光时间（帧间隔的比例）：画面是 [t−E, t] 内等距若干时刻画面的平均（只用过去，不看未来）
     switch_offset: float = 0.         # 下达动作的段边界整体往后挪 switch_offset 个 tick（第一段变长、最后一段变短，取值不变）
+    # S24c 空间采样（默认值 = 不起作用）。只改画面（po_jepa.camera），不改物理和动作
+    resolution: int = 256             # 输出边长（像素），视野不变
+    zoom: float = 1.                  # 每个世界单位的像素数相对默认的比例（≤ 1：缩小，画布四周露出 SURROUND）
+    pan: float = 0.                   # 相机中心偏离画布中心的距离 / 缩小留出的余量（方向每条轨迹随机，流 12）；要 zoom < 1
+    drift: float = 0.                 # 相机中心绕画布中心逆时针转的角速度（rad/s），半径就是 pan 给的偏移；要 pan > 0
 
     def param(self, system: str, name: str):
         default = PARAMS[system][name][0]
@@ -116,6 +128,14 @@ class Variant:
     def changes_timing(self) -> bool:
         """S24b：时间采样调节项（帧率、抖动、曝光、两帧之间切换）是否起作用。起作用时画面走 po_jepa.timing。"""
         return (self.fps, self.jitter, self.exposure, self.switch_offset) != (4, 0., 0., 0.)
+
+    def changes_space(self) -> bool:
+        """S24c：空间采样调节项（分辨率、缩放、相机平移和漂移）是否起作用。起作用时画面走 po_jepa.timing + po_jepa.camera。"""
+        return (self.resolution, self.zoom, self.pan, self.drift) != (256, 1., 0., 0.)
+
+    def resampled(self) -> bool:
+        """画面是否走 po_jepa.timing（时间采样或空间采样起作用）。两者都不起作用时走各场景原来的画法（逐位不变）。"""
+        return self.changes_timing() or self.changes_space()
 
     def changes_observation(self) -> bool:
         return ((self.sigma, self.color, self.background, self.distractors, self.pixel_noise, self.occluders, self.movers)
@@ -159,9 +179,9 @@ def _convert(kw):
     out = {}
     for name, value in kw.items():
         if name in ("gain", "zero", "noise", "sigma", "pixel_noise", "process_noise", "saturation", "jitter", "exposure",
-                    "switch_offset"):
+                    "switch_offset", "zoom", "pan", "drift"):
             out[name] = float(value)
-        elif name in ("delay", "distractors", "occluders", "movers", "horizon", "fps"):
+        elif name in ("delay", "distractors", "occluders", "movers", "horizon", "fps", "resolution"):
             out[name] = int(value)
         else:
             out[name] = value
@@ -187,14 +207,22 @@ def validate(system: str, v: Variant) -> None:
               (type(v.horizon) is int and v.horizon in HORIZONS, f"horizon ∈ {HORIZONS}"),
               (type(v.fps) is int and v.fps in FPS, f"fps ∈ {FPS}"),
               (0. <= v.jitter <= JITTER_MAX, f"jitter ∈ [0,{JITTER_MAX}]"), (0. <= v.exposure <= 1., "exposure ∈ [0,1]"),
-              (v.switch_offset in SWITCH_OFFSETS, f"switch_offset ∈ {SWITCH_OFFSETS}")]
+              (v.switch_offset in SWITCH_OFFSETS, f"switch_offset ∈ {SWITCH_OFFSETS}"),
+              (type(v.resolution) is int and v.resolution in RESOLUTIONS, f"resolution ∈ {RESOLUTIONS}"),
+              (ZOOM_MIN <= v.zoom <= 1., f"zoom ∈ [{ZOOM_MIN},1]"), (0. <= v.pan <= 1., "pan ∈ [0,1]"),
+              (0. <= v.drift <= DRIFT_MAX, f"drift ∈ [0,{DRIFT_MAX}] rad/s")]
     for ok, message in checks:
         if not ok:
             raise ValueError("调节项越界：" + message)
-    for x in ((v.gain, v.zero, v.noise, v.pixel_noise, v.process_noise, v.jitter, v.exposure, v.switch_offset) + ((v.sigma,) if v.sigma is not None else ())
+    for x in ((v.gain, v.zero, v.noise, v.pixel_noise, v.process_noise, v.jitter, v.exposure, v.switch_offset, v.zoom, v.pan,
+               v.drift) + ((v.sigma,) if v.sigma is not None else ())
               + ((v.saturation,) if v.saturation is not None else ())):
         if not math.isfinite(x):
             raise ValueError("调节项必须是有限数")
+    if v.pan and v.zoom == 1.:
+        raise ValueError("pan 是在缩小留出的余量里平移：要 zoom < 1（zoom = 1 时视野正好是画布，平移会切掉画面）")
+    if v.drift and not v.pan:
+        raise ValueError("drift 是相机中心绕画布中心转，半径由 pan 给：要 pan > 0")
     if system in FIELD_SYSTEMS and (v.sigma is not None or v.distractors or v.movers):
         raise ValueError(f"{system} 没有光点：sigma/distractors/movers 不适用")
     if system in FIELD_SYSTEMS and v.policy != "random":
@@ -215,11 +243,13 @@ def validate(system: str, v: Variant) -> None:
 GENERAL_SAMPLES = {"gain": "2", "axes": "x", "segments": "2", "zero": "0.5", "noise": "0.1", "delay": "1",
                    "saturation": "0.3", "policy": "goal", "process_noise": "0.1", "sigma": "4", "color": "white",
                    "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10",
-                   "horizon": "128", "fps": "8", "jitter": "0.2", "exposure": "0.5", "switch_offset": "0.5"}
+                   "horizon": "128", "fps": "8", "jitter": "0.2", "exposure": "0.5", "switch_offset": "0.5",
+                   "resolution": "384", "zoom": "0.75", "pan": "zoom=0.75,pan=0.5", "drift": "zoom=0.75,pan=0.5,drift=0.25"}
 KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", "saturation"), "数据采集": ("policy",),
                "物理": ("process_noise",),
                "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise"),
-               "时间": ("horizon", "fps", "jitter", "exposure", "switch_offset")}
+               "时间": ("horizon", "fps", "jitter", "exposure", "switch_offset"),
+               "空间": ("resolution", "zoom", "pan", "drift")}
 
 
 def coverage() -> dict:
@@ -229,7 +259,7 @@ def coverage() -> dict:
     for name, value in GENERAL_SAMPLES.items():
         ok = []
         for system in datasets.SYSTEMS:
-            text = (f"shape={SHAPES[0]}," if system == "landscape" else "") + f"{name}={value}"
+            text = (f"shape={SHAPES[0]}," if system == "landscape" else "") + (value if "=" in value else f"{name}={value}")
             try:
                 parse(system, text)
             except ValueError:

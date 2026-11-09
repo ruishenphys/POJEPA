@@ -124,6 +124,9 @@ def main():
     if spec.knobs.changes_timing():
         # S24b：探针按每 tick 一帧、TrajectoryControls 取起点和时长；时间采样的探针在第 6 阶段接
         raise SystemExit(f"{spec.scene} 带时间采样调节项：动作探针还没接（S24b 只做数据生成）")
+    if spec.knobs.changes_space():
+        # S24c：探针按单帧重画（systems.draw，不经过相机）；空间采样的探针在第 6 阶段接
+        raise SystemExit(f"{spec.scene} 带空间采样调节项：动作探针还没接（S24c 只做数据生成）")
     if a.fake_encoder:
         encoder = encode_v7._fake_encoder(torch)
     else:

@@ -22,7 +22,11 @@ t_k += jitter·Δ·ξ_k，ξ_k ~ U(−1,1)（流 10，按帧号顺序抽 N+1 个
 （熵 = 流 11 的熵 + [帧号+1]，帧号 −1 是二阶场景的前一帧），所以 frames() 与 frames_with_prev() 的同一帧噪声相同。
 二阶场景的 frames_with_prev：多一帧 t = −Δ（预跑那个零动作 tick 内部的状态）；fps = 2 时 −Δ = −2 tick 早于预跑，报错。
 
-只做数据生成：编码、缓存、探针、规划遇到时间采样调节项直接报错，接入在第 6 阶段。
+S24c 空间采样（resolution、zoom、pan、drift，po_jepa.camera）也走这里（Variant.resampled()）：状态照上面取，每个取样时刻在它
+自己的相机视野里画（systems.camera_view），画布外按面积混成 camera.SURROUND，再做曝光平均、加像素噪声（输出 R×R，
+流 4 按块 [R,R,3] 顺序抽；R = 256 时与原来逐位相同）。
+
+只做数据生成：编码、缓存、探针、规划遇到时间采样、空间采样调节项直接报错，接入在第 6 阶段。
 """
 import math
 
@@ -477,28 +481,47 @@ def simulate(sc, u4, times):
 
 
 class _NoiseBlocks:
-    """流 4 的像素噪声按块（一帧 [256,256,3]）顺序抽：第 i 块与一次抽 [n,256,256,3] 的第 i 份逐位相同（numpy 按 C 顺序逐个填）。"""
+    """流 4 的像素噪声按块（一帧 [256,256,3]）顺序抽：第 i 块与一次抽 [n,256,256,3] 的第 i 份逐位相同（numpy 按 C 顺序逐个填）。
+    S24c：块边长 size = 输出分辨率。"""
 
-    def __init__(self, g, sigma):
-        self.g, self.sigma, self.i, self.last = g, sigma, -1, None
+    def __init__(self, g, sigma, size=systems.SIZE):
+        self.g, self.sigma, self.i, self.last, self.size = g, sigma, -1, None, size
 
     def block(self, i):
         if i < self.i:
             raise ValueError("像素噪声块要按顺序取")
         while self.i < i:
-            self.last = self.g.normal(0., self.sigma, (systems.SIZE, systems.SIZE, 3)); self.i += 1
+            self.last = self.g.normal(0., self.sigma, (self.size, self.size, 3)); self.i += 1
         return self.last
 
 
-def _offgrid_noise(trajectory_id, key, sigma):
+def _offgrid_noise(trajectory_id, key, sigma, size=systems.SIZE):
     entropy = simulation.seed_entropy(trajectory_id, STREAM_OFFGRID_NOISE)+[int(key)]
     g = np.random.Generator(np.random.PCG64(np.random.SeedSequence(entropy)))
-    return g.normal(0., sigma, (systems.SIZE, systems.SIZE, 3))
+    return g.normal(0., sigma, (size, size, 3))
+
+
+def _draw_raw(sc, states, samples, trajectory_id, v):
+    """一帧的原始画面（曝光平均之后、像素噪声之前）[R,R,3] float64。samples：这一帧曝光窗口里的 M 个取样时刻。
+    S24c 空间采样：每个取样时刻在自己的相机视野里画、画布外混成 SURROUND，再平均（drift 时曝光窗口里相机也在动）。"""
+    if not v.changes_space():
+        with systems.raw_images():
+            raw = sc.draw(states, samples)
+        return raw[0] if len(samples) == 1 else raw.mean(0)
+    from . import camera
+    out = []
+    for state, t, view in zip(states, samples, camera.views(trajectory_id, samples, v)):
+        with systems.raw_images(), systems.camera_view(view):
+            raw = sc.draw([state], np.array([t]))[0]
+        if raw.shape != (view.size, view.size, 3):
+            raise AssertionError(f"{type(sc).__name__} 的画图函数没有按相机视野画：{raw.shape}")
+        out.append(camera.canvas_mask(raw, view))
+    return out[0] if len(out) == 1 else np.stack(out).mean(0)
 
 
 def frames(system, trajectory_id: int, *, prev: bool = False):
-    """→ (隐藏状态 [L, d], 画面 [L,256,256,3] uint8)，L = N+1（prev=True 时二阶场景多 t = −Δ 一帧在最前）。
-    各场景的 frames()（及二阶场景的 frames_with_prev()）在时间采样调节项起作用时调这里。"""
+    """→ (隐藏状态 [L, d], 画面 [L,R,R,3] uint8)，L = N+1（prev=True 时二阶场景多 t = −Δ 一帧在最前），R = resolution（默认 256）。
+    各场景的 frames()（及二阶场景的 frames_with_prev()）在时间采样或空间采样调节项起作用时调这里。"""
     spec = datasets.active(); v = spec.knobs
     if spec.system != system.name:
         raise ValueError(f"{system.name} 需要当前数据集是 {system.name}，现在是 {spec.system}")
@@ -520,17 +543,16 @@ def frames(system, trajectory_id: int, *, prev: bool = False):
     L, M = samples.shape
     hidden = sc.hidden([states[i*M] for i in range(L)])
     offset = 1 if sc.pre_run else 0
-    noise4 = _NoiseBlocks(simulation._rng(trajectory_id, 4), v.pixel_noise) if v.pixel_noise else None
-    images = np.empty((L, systems.SIZE, systems.SIZE, 3), dtype=np.uint8)
+    R = v.resolution
+    noise4 = _NoiseBlocks(simulation._rng(trajectory_id, 4), v.pixel_noise, R) if v.pixel_noise else None
+    images = np.empty((L, R, R, 3), dtype=np.uint8)
     for i in range(L):
-        with systems.raw_images():
-            raw = sc.draw(states[i*M:(i+1)*M], samples[i])
-        image = raw[0] if M == 1 else raw.mean(0)
+        image = _draw_raw(sc, states[i*M:(i+1)*M], samples[i], trajectory_id, v)
         if v.pixel_noise:
             t = times[i]
             if t == math.floor(t):
                 image = image+noise4.block(int(t)+offset)
             else:
-                image = image+_offgrid_noise(trajectory_id, keys[i], v.pixel_noise)
+                image = image+_offgrid_noise(trajectory_id, keys[i], v.pixel_noise, R)
         images[i] = np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
     return hidden, images
