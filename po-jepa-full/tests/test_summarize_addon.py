@@ -125,7 +125,8 @@ def d4_job(root, condition, seed, *, passed=True, manifest=None):
     metrics = {m: dict(count=1, bitwise_equal=1, max_abs_diff=1e-9 if m == "scd_normalized" else 0., max_rel_diff=0., outside_tolerance=0)
                for m in d4.EQUIVALENCE_METRICS}
     complete(folder, dict(job=job, status="passed" if passed else "failed", equivalence=dict(passed=passed, metrics=metrics),
-                          triangle=dict(violations=0, cases=[])))
+                          triangle=dict(violations=0, cases=[]),
+                          counts=dict(windows=len(TIDS)*len(STARTS), long_trajectories=len(TIDS), test_trajectories=len(TIDS))))
     write(folder/"source.json", dict(job_dir="x"))
     return folder
 
@@ -366,3 +367,118 @@ def test_duplicate_completed_job_stops_before_writing(tree):
     with pytest.raises(ValueError, match="completed twice"):
         run_main(tree)
     assert not (tmp/"summary").exists()
+
+
+# ---------- Codex 评审（2026-11-09）后补的核对 ----------
+
+def test_ac_input_scale_is_not_comparable_in_t5_t7_and_figure(tree):
+    """10 §3.1、本段 §9 第 4 条：AC 的输入尺度量（pd_in、xpd_in、tcd_unequal_in、long_pd_in、ε̂、有效斜率）在 T5、T7 和 pd 对 x 图里
+    也标“不可比”；LN 空间的量照常给数，其他条件不受影响。"""
+    v7, addon, cal, tmp = tree
+    assert run_main(tree) == 0
+    scene = read_json(tmp/"summary"/"summary.json")["scenes"][f"{SCENE}-u{UPDATES}"]
+    for c in sa.CONDITIONS:
+        p, long = scene["partitions"][c], scene["long_horizon"][c]
+        if c in sa.AC:
+            assert p["epsilon_hat"] == "not_comparable"
+            assert all(r["pd_in"] == r["effective_slope"] == "not_comparable" and r["pd_ln"]["mean"] is not None for r in p["partitions"])
+            grid = {**p["cross_grid"], **p["unequal"]}
+            assert {n for n, v in grid.items() if v == "not_comparable"} == {n for n in grid if n.split(":")[0].endswith("_in")}
+            assert all(v["mean"] is not None for n, v in grid.items() if n.split(":")[0].endswith("_ln"))
+            assert {n for n, v in long.items() if v == "not_comparable"} == {n for n in long if n.startswith("long_pd_in:")}
+        else:
+            assert p["epsilon_hat"]["mean"] is not None and all(r["effective_slope"]["mean"] is not None for r in p["partitions"])
+            assert "not_comparable" not in json.dumps(p) and "not_comparable" not in json.dumps(long)
+    md = (tmp/"summary"/"summary.md").read_text()
+    t5 = md[md.index("### T5"):md.index("### T6")]
+    assert next(line for line in t5.splitlines() if line.startswith("| vjepa2_ac |")).count("不可比") >= 1+2*len(d4.PARTITIONS)
+    svg = (tmp/"summary"/"figures"/f"{SCENE}-u{UPDATES}-pd-vs-x.svg").read_text()
+    assert "po_jepa_full" in svg and "vjepa2_ac" not in svg
+
+
+def _drop_row(folder, condition, index):
+    (folder/"evaluation"/condition/"rows"/f"{index:05d}.json").unlink()
+
+
+def _corrupt_eval(tree, how):
+    v7, addon, cal, tmp = tree
+    folder = v7/SCENE/"seed1703"/"matched_transformer"/"run"/"job"
+    rows = folder/"evaluation"/"matched_transformer"/"rows"
+    d4_dir = addon/"d4"/SCENE/"seed1704"/"koopman"/"run"/"job"
+    if how == "row_missing":
+        _drop_row(folder, "matched_transformer", 3)
+    elif how == "row_failed":
+        r = read_json(rows/"00003.json")
+        write(rows/"00003.json", dict(r, status="failed", values=None))
+    elif how == "row_duplicate":
+        write(rows/"99999.json", read_json(rows/"00003.json"))
+    elif how == "row_wrong_seed":
+        r = read_json(rows/"00003.json")
+        write(rows/"00003.json", dict(r, seed=1704))
+    elif how == "row_wrong_condition":
+        r = read_json(rows/"00003.json")
+        write(rows/"00003.json", dict(r, condition="identity"))
+    elif how == "d4_window_missing":
+        (d4_dir/"rows"/"00002.json").unlink()
+    elif how == "d4_window_duplicate":
+        write(d4_dir/"rows"/"99999.json", read_json(d4_dir/"rows"/"00002.json"))
+    elif how == "d4_window_replaced":      # 文件数和计数都对，但两份是同一个窗口
+        write(d4_dir/"rows"/"00003.json", read_json(d4_dir/"rows"/"00002.json"))
+    elif how == "d4_long_replaced":
+        write(d4_dir/"long"/f"{TIDS[1]:04d}.json", read_json(d4_dir/"long"/f"{TIDS[0]:04d}.json"))
+    elif how == "d4_long_duplicate":
+        write(d4_dir/"long"/"9999.json", read_json(d4_dir/"long"/f"{TIDS[0]:04d}.json"))
+    elif how == "d4_long_missing":
+        (d4_dir/"long"/f"{TIDS[0]:04d}.json").unlink()
+    elif how == "d4_counts_missing":
+        r = read_json(d4_dir/"report.json")
+        r.pop("counts")
+        complete(d4_dir, r)
+
+
+@pytest.mark.parametrize("how", ["row_missing", "row_failed", "row_duplicate", "row_wrong_seed", "row_wrong_condition",
+                                 "d4_window_missing", "d4_window_duplicate", "d4_window_replaced",
+                                 "d4_long_missing", "d4_long_duplicate", "d4_long_replaced", "d4_counts_missing"])
+def test_incomplete_evaluation_rows_block_the_scene(tree, how):
+    """已有任务的评测行少了、失败、重复、种子或条件不对，D4 的窗口或长时程行数和报告计数对不上：evaluation_queries 不通过，
+    不在剩下的行上悄悄重算（Codex 评审 2026-11-09）。"""
+    v7, addon, cal, tmp = tree
+    _corrupt_eval(tree, how)
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert s["scenes"][scene]["status"] == "blocked" and s["scenes"][scene]["failed"] == ["evaluation_queries"]
+    detail = next(c["detail"] for c in s["checks"][scene] if c["item"] == "evaluation_queries")
+    assert detail == (["d4 koopman seed 1704"] if how.startswith("d4_") else ["matched_transformer seed 1703"])
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_initial_weights_requires_recorded_hashes(tree, value):
+    """po_jepa_full 和 po_jepa_time_only 都没记初始权重 SHA（缺、null、空串）时 initial_weights 不通过（Codex 评审 2026-11-09）。"""
+    v7, addon, cal, tmp = tree
+    for root, condition in ((v7, "po_jepa_full"), (addon, "po_jepa_time_only")):
+        folder = root/SCENE/"seed1703"/condition/"run"/"job"
+        report = read_json(folder/"report.json")
+        if value is None:
+            report.pop("initial_model_sha256")
+        else:
+            report["initial_model_sha256"] = value
+        complete(folder, report)
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert s["scenes"][scene]["failed"] == ["initial_weights"]
+    assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "initial_weights") == [
+        "fixed_fourier seed 1703", "po_jepa_space_only seed 1703", "po_jepa_time_only seed 1703"]   # 三个都对 po_jepa_full
+
+
+def test_long_horizon_manifest_is_checked(tree):
+    """D4 长时程行的 manifest_sha256 也要等于 preflight 的（features；Codex 评审 2026-11-09）。"""
+    v7, addon, cal, tmp = tree
+    path = addon/"d4"/SCENE/"seed1703"/"po_jepa_full"/"run"/"job"/"long"/f"{TIDS[1]:04d}.json"
+    write(path, dict(read_json(path), manifest_sha256="wrong"))
+    assert run_main(tree) == 1
+    s = read_json(tmp/"summary"/"summary.json")
+    scene = f"{SCENE}-u{UPDATES}"
+    assert s["scenes"][scene]["failed"] == ["features"]
+    assert next(c["detail"] for c in s["checks"][scene] if c["item"] == "features") == [f"d4 long po_jepa_full seed 1703 trajectory {TIDS[1]}"]

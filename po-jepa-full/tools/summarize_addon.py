@@ -43,6 +43,8 @@ MATCH_TOLERANCE = .05                  # 13 §2：|e_a − e_b| ≤ 0.05·min(e_
 BOOTSTRAP_REPS = 2000                  # 13 §3
 BOOTSTRAP_SEED = 1703
 NOT_COMPARABLE = {"tcd_normalized", "scd_normalized", "pd_in", "xpd_in"}   # 10 §3.1、§3.8：AC 只比 LN 空间的量
+# D4 里输入尺度（RMS_in）的量：AC 在 T5、T7 和 pd 对 x 图里也标“不可比”（ε̂、有效斜率同理）（Codex 评审 2026-11-09）
+INPUT_SCALE_D4 = ("pd_in", "xpd_in", "tcd_unequal_in", "long_pd_in")
 
 # v7 评测记录上的量：(kind, 网格, 时长, 值的键)
 ROW_METRICS = {
@@ -106,15 +108,20 @@ def _row_key(q):
     return (q["kind"], q["trajectory_id"], q["start_tick"], float(q["duration_cycles"]), q["grid_size"])
 
 
-def load_rows(folder, condition):
-    rows, failed = {}, 0
+def load_rows(folder, condition, seed):
+    """逐查询的评测行。失败行、重复行、条件或种子不对的行不进 rows，计数交给 evaluation_queries 核对（Codex 评审 2026-11-09）。"""
+    rows, failed, bad = {}, 0, 0
     for path in sorted((folder/"evaluation"/condition/"rows").glob("*.json")):
         r = read(path)
         if r["status"] != "ok":
             failed += 1
             continue
-        rows[_row_key(r["query"])] = r["values"]
-    return rows, failed
+        key = _row_key(r["query"])
+        if key in rows or r.get("condition") != condition or r.get("seed") != seed:
+            bad += 1
+            continue
+        rows[key] = r["values"]
+    return rows, failed, bad
 
 
 def training_folder(folder, job):
@@ -150,9 +157,9 @@ def checkpoint_snapshot(train, report):
 def load_run(folder):
     job, report = read(folder/"job.json"), read(folder/"report.json")
     condition = job["condition"]
-    rows, failed = load_rows(folder, condition)
+    rows, failed, bad = load_rows(folder, condition, job.get("seed"))
     registration = folder/"evaluation"/condition/"registration.json"
-    out = dict(folder=str(folder), job=job, report=report, rows=rows, failed_rows=failed,
+    out = dict(folder=str(folder), job=job, report=report, rows=rows, failed_rows=failed, bad_rows=bad,
                queries=read(registration)["queries"] if registration.exists() else None,
                curves=read(folder/"figures"/"curves.json") if (folder/"figures"/"curves.json").exists() else None,
                cache_identity=(report.get("preflight") or {}).get("cache_identity"),
@@ -168,9 +175,11 @@ def load_run(folder):
 
 
 def load_d4(folder):
-    rows = {(r["trajectory_id"], r["start_tick"]): r for r in map(read, sorted((folder/"rows").glob("*.json")))}
-    longs = {r["trajectory_id"]: r for r in map(read, sorted((folder/"long").glob("*.json")))}
+    row_files, long_files = sorted((folder/"rows").glob("*.json")), sorted((folder/"long").glob("*.json"))
+    rows = {(r["trajectory_id"], r["start_tick"]): r for r in map(read, row_files)}
+    longs = {r["trajectory_id"]: r for r in map(read, long_files)}
     return dict(folder=str(folder), job=read(folder/"job.json"), report=read(folder/"report.json"), rows=rows, long=longs,
+                files=dict(windows=len(row_files), long_trajectories=len(long_files)),
                 source=read(folder/"source.json") if (folder/"source.json").exists() else None)
 
 
@@ -305,6 +314,10 @@ def scene_checks(cells, gap, v7_cal, addon_cal, imported):
             if by_id.get(str(tid)) != r["manifest_sha256"]:
                 problems.append(f"d4 {condition} seed {seed} trajectory {tid}")
                 break
+        for tid, r in job["long"].items():
+            if by_id.get(str(tid)) != r.get("manifest_sha256"):
+                problems.append(f"d4 long {condition} seed {seed} trajectory {tid}")
+                break
     if gap is not None and any(by_id.get(str(w["trajectory_id"])) != w["manifest_sha256"] for w in gap["windows"]):
         problems.append("spectral gap windows")
     out.append(dict(item="features", ok=not problems, detail=problems))
@@ -312,8 +325,14 @@ def scene_checks(cells, gap, v7_cal, addon_cal, imported):
         [r["sequence_sha256"] for (s, c), r in runs.items() if s == seed and c != "identity"])
         or any(r["sequence_sha256"] is None for (s, c), r in runs.items() if s == seed and c != "identity")]
     out.append(dict(item="training_query_sequence", ok=not bad, detail=bad))
+    incomplete = [f"{c} seed {s}" for (s, c), r in sorted(runs.items()) if r["queries"] is None or r["bad_rows"]
+                  or set(r["rows"]) != {_row_key(q) for q in r["queries"]}]
+    counts = lambda j: (j["report"].get("counts") or {})  # noqa: E731
+    incomplete += [f"d4 {c} seed {s}" for (s, c), j in sorted(d4s.items()) if
+                   counts(j).get("windows") != len(j["rows"]) or counts(j).get("windows") != j["files"]["windows"] or
+                   counts(j).get("long_trajectories") != len(j["long"]) or counts(j).get("long_trajectories") != j["files"]["long_trajectories"]]
     out.append(dict(item="evaluation_queries", ok=_same([r["queries"] for r in runs.values()]) and
-                    all(r["queries"] is not None for r in runs.values()), detail=[]))
+                    all(r["queries"] is not None for r in runs.values()) and not incomplete, detail=incomplete))
     sigma = [f"{c} seed {s}" for (s, c), r in sorted(runs.items()) if c in PO_CLASS and (
         v7_cal is None or r["snapshot"] is None or r["snapshot"]["model_config"]["graph"]["sigma_z"] != v7_cal["sigma_z"])]
     out.append(dict(item="sigma_z", ok=not sigma, detail=sigma))
@@ -337,7 +356,8 @@ def scene_checks(cells, gap, v7_cal, addon_cal, imported):
     for (s, c), r in sorted(runs.items()):
         reference = dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full", fixed_fourier="po_jepa_full",
                          transformer_consistency="matched_transformer").get(c)
-        if reference and (s, reference) in runs and r["initial_model_sha256"] != runs[(s, reference)]["initial_model_sha256"]:
+        mine, theirs = r["initial_model_sha256"], (runs.get((s, reference)) or {}).get("initial_model_sha256")
+        if reference and (s, reference) in runs and (not isinstance(mine, str) or not mine or mine != theirs):
             init.append(f"{c} seed {s}")
     out.append(dict(item="initial_weights", ok=not init, detail=init))
     eq = [f"{c} seed {s}" for (s, c), j in sorted(d4s.items())
@@ -406,6 +426,10 @@ def epsilon_hat(cell):
     return statistics.median(values) if values else None
 
 
+def _input_scale(name):
+    return name.split(":")[0] in INPUT_SCALE_D4
+
+
 def partitions(cells):
     out = {}
     for c in CONDITIONS:
@@ -413,6 +437,8 @@ def partitions(cells):
         seeds = {s: cell for (s, cc), cell in cells.items() if cc == c}
         eps = {s: epsilon_hat(cell) for s, cell in seeds.items()}
         entry["epsilon_hat"] = seed_stats(eps)
+        if c in AC:
+            entry["epsilon_hat"] = "not_comparable"
         for t, parts in d4.PARTITIONS:
             label, x = d4.partition_label(parts), d4.partition_x(t, parts)
             row = dict(T=t, partition=label, x=x)
@@ -423,12 +449,15 @@ def partitions(cells):
                 pd = macro(window_values(cell, f"pd_in:T={t:g}:{label}") or {})
                 slopes[s] = pd/(x*eps[s]) if pd is not None and eps[s] else None
             row["effective_slope"] = seed_stats(slopes)
+            if c in AC:
+                row["pd_in"] = row["effective_slope"] = "not_comparable"
             entry["partitions"].append(row)
         for name in d4.value_names():
+            stats = "not_comparable" if c in AC and _input_scale(name) else None
             if name.startswith("xpd_"):
-                entry["cross_grid"][name] = seed_stats({s: macro(window_values(cell, name) or {}) for s, cell in seeds.items()})
+                entry["cross_grid"][name] = stats or seed_stats({s: macro(window_values(cell, name) or {}) for s, cell in seeds.items()})
             if name.startswith("tcd_unequal_"):
-                entry["unequal"][name] = seed_stats({s: macro(window_values(cell, name) or {}) for s, cell in seeds.items()})
+                entry["unequal"][name] = stats or seed_stats({s: macro(window_values(cell, name) or {}) for s, cell in seeds.items()})
         out[c] = entry
     return out
 
@@ -444,7 +473,8 @@ def decomposition(cells):
 
 
 def long_horizon(cells):
-    return {c: {n: seed_stats({s: macro(window_values(cell, n) or {}) for (s, cc), cell in cells.items() if cc == c})
+    return {c: {n: "not_comparable" if c in AC and _input_scale(n) else
+                seed_stats({s: macro(window_values(cell, n) or {}) for (s, cc), cell in cells.items() if cc == c})
                 for n in d4.long_value_names()} for c in CONDITIONS}
 
 
@@ -604,6 +634,8 @@ def figures(summary, curves):
                 series, f"{scene}：同分布误差—{defect}（每个种子一个点）", "同分布未来误差 e_c", defect)
         series = []
         for c in CONDITIONS:
+            if c in AC:          # 输入尺度的量对 AC 不可比，不画进同一坐标系
+                continue
             rows = s["partitions"][c]["partitions"]
             points = sorted((r["x"], r["pd_in"]["mean"]) for r in rows if r["pd_in"]["mean"] is not None)
             if points:
