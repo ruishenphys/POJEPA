@@ -12,7 +12,7 @@ def main(argv=None):
     """只启动当前解释器的唯一运行实现；help没有缓存、权重或GPU访问。"""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate','sweep','transfer',
-                        'calibrate-addon','check-addon'))
+                        'calibrate-addon','check-addon','d4','spectral-gap'))
     parser.add_argument('--features-root',required=True)
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--output',type=Path,required=True)
@@ -48,6 +48,11 @@ def main(argv=None):
     if args.command=='sweep':parser.error('v7 不再 sweep：rho 固定为 1.0，只需 calibrate')
     if args.resume_from and args.output.resolve().is_relative_to(args.resume_from.resolve()):
         parser.error('续训新输出必须位于旧训练目录之外，不能写入原证据')
+    # S18（10 §3–§5、16 §5）：d4 读一个已完成任务的选中检查点；spectral-gap 每个场景一次，只在 CPU 上跑
+    if args.command=='d4' and (args.condition is None or args.training_run is None):parser.error('d4 需要 --condition 和 --training-run（被读的任务目录）')
+    if args.command=='spectral-gap' and (args.condition is not None or args.training_run is not None or args.seed!=1703):
+        parser.error('spectral-gap 每个场景只跑一次：不接受 --condition、--training-run，种子只用 1703')
+    if args.command=='spectral-gap' and args.device!='cpu':parser.error('spectral-gap 只在 CPU 上跑：--device cpu')
     root=Path(__file__).resolve().parent
     # 子进程固定使用本目录的 src，避免环境里以前 pip install -e 过的旧版本（如 code-v4）被导入。
     env=dict(os.environ)
@@ -64,6 +69,7 @@ def main(argv=None):
     if args.command=='transfer':child+=['--test-variant',args.test_variant]
     if args.training_run:child+=['--training-run',str(args.training_run.resolve())]
     if args.resume_from:child+=['--resume-from',str(args.resume_from.resolve())]
+    if args.command in ('d4','spectral-gap'):child[child.index('po_jepa.runtime.cli')]='po_jepa.runtime.addon.eval_cli'   # S18：这两个命令的子进程入口
     command=[sys.executable,'-B','-X','utf8',str(root/'tools/capture.py'),'--cwd',str(root),
         '--output',str(args.output.resolve()/'console'),'--',*child]
     return subprocess.run(command,check=False,env=env).returncode
