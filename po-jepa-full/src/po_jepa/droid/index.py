@@ -98,6 +98,10 @@ def _line(value: dict, *, sort_keys: bool) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, separators=(",", ":"), allow_nan=False)
 
 
+def _json_value(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=False, separators=(",", ":"), allow_nan=False)
+
+
 def _write_lines(path: Path, lines) -> None:
     """先写 `<名>.partial` 再换名（14 §2 第 5 条）；残留的 .partial 直接覆盖。"""
     temp = path.with_name(path.name + ".partial")
@@ -184,20 +188,28 @@ def object_url(data: DataConfig, name: str) -> str:
     return data.object_base.rstrip("/") + "/" + urllib.parse.quote(name[len(data.prefix):], safe="/")
 
 
+def _checked_body(get: Getter, url: str, item: dict) -> bytes:
+    body = get(url)
+    if len(body) != int(item["size"]):
+        raise ValueError(f"size {len(body)} != listed {item['size']}")
+    if _md5_base64(body) != item["md5Hash"]:
+        raise ValueError(f"MD5 {_md5_base64(body)} != listed {item['md5Hash']}")
+    return body
+
+
 def fetch_object(data: DataConfig, item: dict, *, get: Getter = http_get,
                  sleep: Callable[[float], None] = time.sleep) -> bytes:
     """下载一个对象，大小和 MD5 都等于列表里的值才返回；否则按重试规则重下。"""
-    name, url = item["name"], object_url(data, item["name"])
+    url = object_url(data, item["name"])
+    return with_retries(lambda: _checked_body(get, url, item), f"metadata object {item['name']}", sleep=sleep)
 
-    def attempt() -> bytes:
-        body = get(url)
-        if len(body) != int(item["size"]):
-            raise ValueError(f"size {len(body)} != listed {item['size']}")
-        if _md5_base64(body) != item["md5Hash"]:
-            raise ValueError(f"MD5 {_md5_base64(body)} != listed {item['md5Hash']}")
-        return body
 
-    return with_retries(attempt, f"metadata object {name}", sleep=sleep)
+def fetch_metadata_row(data: DataConfig, item: dict, *, get: Getter = http_get,
+                       sleep: Callable[[float], None] = time.sleep) -> dict:
+    """下载、核大小和 MD5、解析成一行元数据；三步在同一次尝试里，任一步失败都按重试规则整条重下（Codex S02 #1）。"""
+    url = object_url(data, item["name"])
+    return with_retries(lambda: parse_metadata(_checked_body(get, url, item), item),
+                        f"metadata object {item['name']}", sleep=sleep)
 
 
 def parse_metadata(body: bytes, item: dict) -> dict:
@@ -216,7 +228,7 @@ def fetch_metadata(data: DataConfig, listing: list[dict], *, get: Getter = http_
                    sleep: Callable[[float], None] = time.sleep, threads: int = METADATA_THREADS) -> list[dict]:
     """§2：并行下载全部元数据（按列表顺序返回）；任一对象重试用尽就整体报错。"""
     def one(item: dict) -> dict:
-        return parse_metadata(fetch_object(data, item, get=get, sleep=sleep), item)
+        return fetch_metadata_row(data, item, get=get, sleep=sleep)
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
         futures = [pool.submit(one, item) for item in listing]
@@ -265,12 +277,17 @@ def normalize(row: dict, data: DataConfig) -> dict:
         raise ValueError(f"{name}: {error}") from error
 
 
+def _plain_path(path: str) -> bool:
+    """没有空段、`.`、`..`：这样字符串前缀包含就等于目录包含（Codex S02 #2）。"""
+    return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
 def _normalize(row: dict, data: DataConfig) -> dict:
     name = row["_name"]
     if not name.startswith(data.prefix):
         raise ValueError(f"object name is not under prefix {data.prefix!r}")
     parts = name[len(data.prefix):].split("/")
-    if len(parts) < 3 or not all(parts):
+    if len(parts) < 3 or not _plain_path(name[len(data.prefix):]):
         raise ValueError("object name must be <prefix><lab>/<outcome>/…/metadata_<uuid>.json")
     lab, outcome, file_name = parts[0], parts[1], parts[-1]
     if outcome not in OUTCOMES:
@@ -285,9 +302,11 @@ def _normalize(row: dict, data: DataConfig) -> dict:
         raise ValueError(f"trajectory_length must be positive, got {steps}")
     folder = "/".join(parts[:-1])
     h5 = f"{lab}/{_require(row, 'hdf5_path', str, 'a string')}"
-    if not h5.startswith(folder + "/"):
+    if not h5.startswith(folder + "/") or not _plain_path(h5):
         raise ValueError(f"h5 {h5!r} is not inside the episode folder {folder!r}")
     left_mp4 = f"{lab}/{_require(row, data.camera, str, 'a string')}"
+    if not _plain_path(left_mp4):
+        raise ValueError(f"left_mp4 {left_mp4!r} has empty, '.' or '..' path segments")
     mp4_dir = folder + "/recordings/MP4/"
     left_file = left_mp4[len(mp4_dir):]
     if not left_mp4.startswith(mp4_dir) or "/" in left_file or not left_file.endswith(".mp4") or left_file == ".mp4":
@@ -433,10 +452,13 @@ def verify_sample(config: DroidConfig, data_root: Path | str, count: int, *, get
                                           for line in (directory/METADATA_FILE).read_text(encoding="utf-8").splitlines())}
     chosen = sorted(listing, key=lambda item: salted_hash(config.data.split_salt, "verify", item["name"]))[:count]
     for item in chosen:
-        fresh = parse_metadata(fetch_object(config.data, item, get=get, sleep=sleep), item)
+        fresh = fetch_metadata_row(config.data, item, get=get, sleep=sleep)
         stored = rows.get(item["name"])
-        if stored is None or list(fresh.items()) != list(stored.items()):
-            differing = sorted(k for k in set(fresh) | set(stored or {}) if (stored or {}).get(k) != fresh.get(k))
+        # 按 JSON 文本比较：区分 true/1、300/300.0，也区分键顺序（Codex S02 #3）
+        if stored is None or _line(fresh, sort_keys=False) != _line(stored, sort_keys=False):
+            differing = sorted(k for k in set(fresh) | set(stored or {})
+                               if k not in fresh or k not in (stored or {})
+                               or _json_value(fresh[k]) != _json_value(stored[k]))
             raise ValueError(f"{item['name']}: re-downloaded metadata differs from {METADATA_FILE} "
                              f"(fields {differing or 'key order'})")
     return {"checked": count, "first": chosen[0]["name"], "last": chosen[-1]["name"]}

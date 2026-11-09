@@ -313,6 +313,18 @@ def test_metadata_rows_keep_official_order_and_add_three_fields(bucket, tmp_path
         assert row["_md5"] == bucket.item(name)["md5Hash"]
 
 
+def test_metadata_parse_errors_are_retried(bucket):
+    """MD5 和大小都对、但 JSON 解析不了：和下载失败一样重试，用尽后报错写明对象名（Codex S02 #1）。"""
+    names = _fill(bucket, SEVEN)
+    for body in (b"{", b'{"a": 1, "a": 2}', b'{"a": NaN}', b"[1]"):
+        bucket.put(names[0], body)
+        bucket.object_gets.clear()
+        slept = []
+        with pytest.raises(RuntimeError, match="metadata object " + names[0].replace("+", "\\+") + ".*6 attempts"):
+            ix.fetch_metadata(_config(bucket).data, [bucket.item(names[0])], sleep=slept.append)
+        assert slept == [1, 2, 4, 8, 16] and bucket.object_gets == [names[0]] * 6
+
+
 def test_parse_metadata_rejects_bad_bodies():
     item = {"name": "n", "md5Hash": "m", "size": "1"}
     with pytest.raises(ValueError, match="not a JSON object"):
@@ -379,6 +391,11 @@ BAD_FIELDS = [
     ("h5 outside folder", _edit(hdf5_path="success/2023-07-07/Other/trajectory.h5"), "not inside the episode folder"),
     ("h5 sibling prefix", _edit(hdf5_path=lambda v: v["hdf5_path"].replace("/trajectory.h5", "x/trajectory.h5")),
      "not inside the episode folder"),
+    ("h5 dotdot", _edit(hdf5_path=lambda v: v["hdf5_path"].replace("/trajectory.h5", "/../outside.h5")),
+     "not inside the episode folder"),
+    ("h5 dot", _edit(hdf5_path=lambda v: v["hdf5_path"].replace("/trajectory.h5", "/./trajectory.h5")),
+     "not inside the episode folder"),
+    ("mp4 dot", _edit(left_mp4_path=lambda v: v["left_mp4_path"].replace("/MP4/", "/MP4/./")), "path segments"),
     ("mp4 not in MP4", _edit(left_mp4_path=lambda v: v["left_mp4_path"].replace("/MP4/", "/SVO/")), "recordings/MP4"),
     ("mp4 in subfolder", _edit(left_mp4_path=lambda v: v["left_mp4_path"].replace("/MP4/", "/MP4/x/")), "recordings/MP4"),
     ("mp4 suffix", _edit(left_mp4_path=lambda v: v["left_mp4_path"].replace(".mp4", ".svo")), "recordings/MP4"),
@@ -411,6 +428,8 @@ def test_normalize_rejects_bad_object_names():
     for bad, message in ((name.replace("/success/", "/maybe/"), "outcome folder 'maybe'"),
                          (PREFIX + "AUTOLab/metadata_x.json", "must be <prefix>"),
                          (name.replace("/2023-07-07/", "//"), "must be <prefix>"),
+                         (name.replace("/2023-07-07/", "/../"), "must be <prefix>"),
+                         (name.replace("/2023-07-07/", "/./"), "must be <prefix>"),
                          (name.replace(PREFIX, "robotics/droid_raw/1.0.0/"), "not under prefix")):
         with pytest.raises(ValueError, match=message):
             ix.normalize(_row(bad, dict(value, success=True)), DATA)
@@ -587,8 +606,13 @@ def test_verify_sample_detects_changed_rows(bucket, tmp_path):
     with pytest.raises(ValueError, match="does not match MANIFEST.json"):
         ix.verify_sample(cfg, tmp_path, 7)
     # 文件和清单一起改（索引自洽但和存储桶不同）→ 逐字段比较报错
+    assert '"success":true' in original and '"trajectory_length":300,' in original
     for edited, message in ((original.replace('"BAIR"', '"BAIX"', 1), "fields \\['building'\\]"),
-                            (_swap_first_two_keys(original), "key order")):
+                            (_swap_first_two_keys(original), "key order"),
+                            # 值相等但类型不同（Codex S02 #3）
+                            (original.replace('"success":true', '"success":1', 1), "fields \\['success'\\]"),
+                            (original.replace('"trajectory_length":300,', '"trajectory_length":300.0,', 1),
+                             "fields \\['trajectory_length'\\]")):
         path.write_text(edited, encoding="utf-8")
         manifest_path = directory/"MANIFEST.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
