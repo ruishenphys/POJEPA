@@ -42,9 +42,9 @@ def main():
     a = p.parse_args()
     path = ROOT/"DATASET.md"
     if a.write:
-        path.write_text(render(path.read_text()))
+        path.write_text(render(path.read_text(encoding="utf-8")), encoding="utf-8")
     elif a.check:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if render(text) != text:
             raise SystemExit("DATASET.md 的覆盖表与 variants.coverage() 不一致：运行 python tools/knob_coverage.py --write")
     else:

@@ -176,31 +176,49 @@ def test_plan_summaries_and_goal_actions(use):
 
 # —— 规划：用 identity 条件和假编码器走通一个回合 ——
 
-def _plan(tmp_path, system, *extra):
-    job = tmp_path/f"job-{system}"; job.mkdir()
+def _plan(tmp_path, system, *extra, ok=True):
+    job = tmp_path/f"job-{system}"; job.mkdir(exist_ok=True)
     (job/"job.json").write_text(json.dumps(dict(seed=1703, updates=2000, dataset=f"{system}-200", condition="identity")))
     out = tmp_path/f"{system}.json"
     env = {k: v for k, v in os.environ.items() if not k.startswith("PO_JEPA_")} | dict(OMP_NUM_THREADS="2")
     r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/plan_v7.py"), "--job", str(job), "--fake-encoder", "--device", "cpu",
                         "--episodes", "1", "--output", str(out), *extra], env=env, capture_output=True, text=True, cwd=ROOT)
+    if not ok:
+        return r
     assert r.returncode == 0, r.stderr[-3000:]
-    return json.loads(out.read_text())
+    return json.loads(out.read_text(encoding="utf-8"))
 
 
 def test_plan_runs_on_push_and_scores_the_block(tmp_path):
-    rep = _plan(tmp_path, "push", "--horizon", "4", "--replan", "2", "--samples", "16", "--iterations", "2",
+    rep = _plan(tmp_path, "push", "--horizon", "8", "--replan", "4", "--samples", "16", "--iterations", "2",
                 "--oracle-samples", "16")
     assert rep["state_summary"].startswith("方块位姿") and rep["dataset"] == "push-200"
     ep = rep["episodes"][0]
+    assert ep["goal_valid"] and ep["zero"] >= .15 and rep["goals"] == dict(valid=1, invalid=0, rule=rep["goals"]["rule"])
     assert all(np.isfinite(ep[k]) for k in ("zero", "model", "oracle", "random"))
     assert rep["model"]["mean_error_px"] is not None
 
 
+def test_plan_refuses_to_score_goals_that_never_pass_the_gap(tmp_path):
+    """Codex 审核 P2：push 时域 2 时 20 次重抽的目标都没推动方块（gap = 0），不能拿它评分。"""
+    r = _plan(tmp_path, "push", "--horizon", "2", "--replan", "2", "--samples", "4", "--iterations", "1", "--no-baselines", ok=False)
+    assert r.returncode != 0 and "目标都没达到门槛" in r.stderr
+
+
+def test_goal_gap_rule():
+    plan = _tool("plan_v7")
+    z = np.zeros(3)
+    assert plan.goal_far_enough(np.array([.15, 0., 0.]), z, False) and not plan.goal_far_enough(np.array([.149, 0., 0.]), z, False)
+    g = np.full(400, 1.); zf = g.copy(); zf[0] -= .05*20*1.01
+    zf2 = g.copy(); zf2[0] -= .5                                  # 差 0.5 = 2.5% 范数，不够
+    assert plan.goal_far_enough(g, zf, True) and not plan.goal_far_enough(g, zf2, True)
+
+
 def test_plan_runs_on_gray_scott(tmp_path):
-    rep = _plan(tmp_path, "gray_scott", "--horizon", "2", "--replan", "2", "--samples", "4", "--iterations", "1",
+    rep = _plan(tmp_path, "gray_scott", "--horizon", "8", "--replan", "8", "--samples", "4", "--iterations", "1",
                 "--no-baselines")
     assert rep["state_summary"].startswith("U、V") and rep["model"]["mean_error_px"] is None
-    assert np.isfinite(rep["episodes"][0]["model"])
+    assert rep["episodes"][0]["goal_valid"] and np.isfinite(rep["episodes"][0]["model"])
 
 
 # —— 评测协议 ——
@@ -251,7 +269,7 @@ def test_protocols_parse_and_applicability_follow_validate():
 def test_protocol_table_in_dataset_md_is_generated():
     r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/protocol_table.py"), "--check"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert protocols.table() in (ROOT/"DATASET.md").read_text()
+    assert protocols.table() in (ROOT/"DATASET.md").read_text(encoding="utf-8")
 
 
 # —— v8 任务表 ——
@@ -312,6 +330,9 @@ def test_v8_full_stage_has_all_scenes_and_probes():
 
 
 def test_v7_job_table_is_untouched():
-    """v7 正式实验和仿真补跑都读 make_v7_jobs：S21b 不改它（BASE_SCENES 仍是 5 个，TEST_VARIANTS 仍是 30 个）。"""
+    """v7 正式实验和仿真补跑都读 make_v7_jobs：S21b 不改它。核文件的 SHA-256（42f6d1f、87d09d9 上的同一份），不只核数量。"""
+    import hashlib
     v7 = _tool("make_v7_jobs")
+    assert hashlib.sha256((ROOT/"tools/make_v7_jobs.py").read_bytes()).hexdigest() == \
+        "e9a7ac907d8e2785634c5dd8b1adf812d2cf55fe17fa622494ec01abdee4e5d7"
     assert len(v7.BASE_SCENES) == 5 and "push" not in v7.TEST_VARIANTS and sum(map(len, v7.TEST_VARIANTS.values())) == 30

@@ -4,6 +4,7 @@
   CEM（交叉熵法）在 H 个 tick 的分段常数动作上搜索，代价 = JEPA 距离 d(Φ(z_now, u, 剩余时长), z_goal)；
   MPC：每次只执行前 --replan 个 tick（在真值仿真里执行），重新渲染、编码当前画面再规划剩下的。
 目标 = 从起点按一段随机动作（每 2 tick 换一次）走 H 个 tick 后的状态（保证可达，且与“不动”的结果拉开距离）。
+20 次重抽都达不到门槛的回合记为目标无效（报告的 goal_valid、goals），不进成功率和误差统计。
 同时给出三个参照（同一批回合）：
   zero   ：一直不动；
   random ：随机动作；
@@ -64,6 +65,13 @@ def goal_controls(system_name, state, horizon, goal_rng):
         size = goal_rng.uniform(.25, .5, n)
         return np.repeat(np.stack((size*np.cos(angle), size*np.sin(angle)), 1), 2, 0)[:horizon]
     return np.repeat(goal_rng.uniform(-.5, .5, (n, 2)), 2, 0)[:horizon]
+
+
+def goal_far_enough(g, zero_final, relative):
+    """目标门槛：与“不动”的终点差 ≥ 0.05 × 目标范数（场：advection_diffusion、gray_scott）或 ≥ 0.15（其他场景）。"""
+    import numpy as np
+    gap = np.linalg.norm(g-zero_final)
+    return bool(gap >= (.05*np.linalg.norm(g) if relative else .15))
 
 
 def _parse():
@@ -232,9 +240,10 @@ def main():
             gu = goal_actions(s0)
             goal_state, goal_frame = simulate(tid, s0, start, gu)
             g = summary_state(goal_state)
-            gap = np.linalg.norm(g-zero_final)
-            if gap >= (.05*np.linalg.norm(g) if relative_gap else .15):
+            valid = goal_far_enough(g, zero_final, relative_gap)
+            if valid:
                 break
+        # S21b（Codex 审核）：20 次都没达到门槛的目标记为无效，不进成功率和误差统计（规划照常跑，随机流消耗不变）
         z_goal = encode(goal_frame, tid); g_oracle = oracle_state(goal_state)
         result = {}
         for planner in ("model",) if a.no_baselines else ("model", "oracle", "random"):
@@ -257,13 +266,18 @@ def main():
             err = float(np.linalg.norm(summary_state(state)-g))
             result[planner] = err
         zero_err = float(np.linalg.norm(zero_final-g))
-        rows.append(dict(trajectory_id=tid, start_tick=start, zero=zero_err, **result))
+        rows.append(dict(trajectory_id=tid, start_tick=start, goal_valid=bool(valid), zero=zero_err, **result))
         shown = "  ".join(f"{k} {val:.3f}" for k, val in result.items())
-        print(f"[{condition} {spec.tag}] 回合 {ep+1}/{a.episodes}：{shown}  zero {zero_err:.3f}  {time.perf_counter()-started:.0f}s", flush=True)
+        print(f"[{condition} {spec.tag}] 回合 {ep+1}/{a.episodes}：{shown}  zero {zero_err:.3f}" + ("" if valid else "  （目标无效）") +
+              f"  {time.perf_counter()-started:.0f}s", flush=True)
+
+    scored = [r for r in rows if r["goal_valid"]]
+    if not scored:
+        raise SystemExit(f"{a.episodes} 个回合的目标都没达到门槛（与“不动”差得不够远）：时域 --horizon {a.horizon} 太短？")
 
     scale = 1. if relative_gap else (48. if spec.system in ("double_well", "multi_particle", "landscape", "push") else 27.)
     def stats(name):
-        e = np.array([r[name] for r in rows]); z = np.array([r["zero"] for r in rows])
+        e = np.array([r[name] for r in scored]); z = np.array([r["zero"] for r in scored])
         ok = (e <= a.success*np.maximum(z, 1e-9))
         return dict(success_rate=float(ok.mean()), mean_error=float(e.mean()),
                     mean_error_px=None if relative_gap else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
@@ -274,10 +288,12 @@ def main():
                   cem=dict(samples=a.samples, oracle_samples=a.oracle_samples, iterations=a.iterations, elites=a.elites), success_rule=f"误差 ≤ {a.success} × 不动时的误差",
                   model=stats("model"), oracle=None if a.no_baselines else stats("oracle"),
                   random=None if a.no_baselines else stats("random"),
-                  zero=dict(mean_error=float(np.mean([r["zero"] for r in rows]))), episodes=rows,
+                  zero=dict(mean_error=float(np.mean([r["zero"] for r in scored]))), episodes=rows,
+                  goals=dict(valid=len(scored), invalid=len(rows)-len(scored),
+                             rule="与“不动”的差 ≥ 0.05 × 目标范数（场）或 ≥ 0.15（其他）；20 次重抽都不够的回合不计分"),
                   encoder="fake" if a.fake_encoder else "vjepa2-vitg", scientific_conclusions_verified=False)
     a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False))
+    a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({k: report[k] for k in ("condition", "dataset", "model", "oracle", "random", "zero")}, ensure_ascii=False, indent=1))
 
 

@@ -75,7 +75,7 @@ def test_where_each_new_knob_applies():
 def test_dataset_md_coverage_table_is_generated_from_code():
     spec = importlib.util.spec_from_file_location("knob_coverage", ROOT/"tools"/"knob_coverage.py")
     tool = importlib.util.module_from_spec(spec); spec.loader.exec_module(tool)
-    text = (ROOT/"DATASET.md").read_text()
+    text = (ROOT/"DATASET.md").read_text(encoding="utf-8")
     assert tool.render(text) == text, "运行 python tools/knob_coverage.py --write"
     assert "| 观察 | `movers` | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | 5 |" in text
 
