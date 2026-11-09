@@ -125,6 +125,36 @@ def run_job(features, output, device, condition, *, resume_from=None, training_r
     return report
 
 
+def load_for_evaluation(condition, training_run, device):
+    """只评测不训练的任务（transfer、S25c 长时程滚动）共用的载入：按当前数据集（训练用的基础场景）现建模型，
+    核 training_run 的条件/数据集/种子和预登记（源码、配置、查询序列）与当前一致，载入验证集选中的 checkpoint。
+    identity 没有 checkpoint。返回 (model, loss, selected, registration)；selected 是 None 或训练报告的 best。"""
+    from .workflow import verify_bundle, verify_selection, read
+    base = data.datasets.active()
+    registration, _, _ = comparison.preregister()
+    registration["delivery_manifest_sha256"] = verify_bundle()
+    selected = None
+    model, loss = comparison.build_condition(condition, device)
+    if condition != "identity":
+        old = _job_dir(training_run)
+        job0 = read(old/"job.json")
+        if job0["condition"] != condition or job0["dataset"] != base.tag or job0["seed"] != checks.model_seed():
+            raise ValueError("training run 的条件/数据集/种子与本次参数不一致")
+        if read(old/"preregistration.json") != registration:
+            raise ValueError("training run 的预登记与当前代码/配置不一致")
+        root = old/"training"/condition
+        if not (root/"COMPLETE.json").exists() and job0.get("training_run"):
+            root = _job_dir(job0["training_run"])/"training"/condition
+        train_report = read(root/"report.json")
+        verify_selection(root, train_report)
+        selected = train_report["best"]
+        optimizer = comparison.make_optimizer(model)
+        evaluation.load_selected_checkpoint(condition, selected, model=model, optimizer=optimizer, config=loss,
+                                            expected_provenance=selected["checkpoint_provenance"], root=root)
+        del optimizer
+    return model, loss, selected, registration
+
+
 def transfer_job(features, output, device, condition, *, training_run, test_variant):
     """v7 可调数据集的分布外评测：用基础场景上训练好的模型（training_run 是它的任务目录），
     不再训练，直接在“换了调节项”的测试集上评测（features 是 encode_v7.py --variant … --splits test 的输出）。
@@ -144,29 +174,12 @@ def transfer_job(features, output, device, condition, *, training_run, test_vari
                                           variants.format(base.system, variants.parse(base.system, text)))
     if test_spec == base:
         raise ValueError("--test-variant 与训练用的数据集相同；这不是分布外评测")
+    if test_spec.knobs.horizon != base.knobs.horizon:
+        # S25c：transfer 只评起点 ≤ 20、时长 ≤ 12 的窗口，长时程缓存的前 33 帧和基础测试集相同，评出来一样；长时程用 tools/long_rollout.py
+        raise ValueError("--test-variant 不能改 horizon：长时程测试集用 tools/long_rollout.py 评测")
     features, output = Path(features), Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    registration, _, _ = comparison.preregister()
-    registration["delivery_manifest_sha256"] = verify_bundle()
-    selected, root = None, None
-    model, loss = comparison.build_condition(condition, device)
-    if condition != "identity":
-        old = _job_dir(training_run)
-        job0 = read(old/"job.json")
-        if job0["condition"] != condition or job0["dataset"] != base.tag or job0["seed"] != checks.model_seed():
-            raise ValueError("training run 的条件/数据集/种子与本次参数不一致")
-        if read(old/"preregistration.json") != registration:
-            raise ValueError("training run 的预登记与当前代码/配置不一致")
-        root = old/"training"/condition
-        if not (root/"COMPLETE.json").exists() and job0.get("training_run"):
-            root = _job_dir(job0["training_run"])/"training"/condition
-        train_report = read(root/"report.json")
-        verify_selection(root, train_report)
-        selected = train_report["best"]
-        optimizer = comparison.make_optimizer(model)
-        evaluation.load_selected_checkpoint(condition, selected, model=model, optimizer=optimizer, config=loss,
-                                            expected_provenance=selected["checkpoint_provenance"], root=root)
-        del optimizer
+    model, loss, selected, registration = load_for_evaluation(condition, training_run, device)
     job = dict(kind="transfer", condition=condition, dataset=test_spec.tag, train_dataset=base.tag,
                test_variant=test_spec.variant, seed=checks.model_seed(), updates=checks.v7_updates(),
                training_run=str(training_run) if training_run else None)

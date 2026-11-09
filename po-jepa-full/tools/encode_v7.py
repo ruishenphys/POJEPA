@@ -11,6 +11,9 @@
   # 全部分片完成后汇总（几秒，不用 GPU）
   python tools/encode_v7.py finalize --system van_der_pol --trajectories 2000 --output ../features-v7/van_der_pol-2000
 
+S25c 长时程测试集（--variant 带 horizon=64/128）：只能 --splits test（只用来评测，tools/long_rollout.py），整条 65/129 帧都存
+（float16 每条约 47/93 MB，每类 200 条约 9/19 GB）；按 --batch 33 分批，所以前 33 帧和主实验缓存同一批送进编码器。
+
 中途断了直接重跑同一条命令：已完成（有 COMPLETE.json）的轨迹会跳过，未完成的残留会被清掉重做。
 """
 import argparse
@@ -56,9 +59,10 @@ def main():
     from po_jepa.runtime import cache
 
     spec = datasets.active()
-    if spec.knobs.horizon != systems.TICKS:
-        # S24a：长时程（horizon > 32）只登记了数据生成；缓存格式、清单（33 帧）和评测窗口怎么接在第 6 阶段定，不静默截断
-        raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程数据集：编码和缓存还没接（S24a 只做数据生成，第 6 阶段接入）")
+    frames_per_trajectory = spec.knobs.horizon+1     # S25c：33 帧；长时程 65、129 帧（整条都存）
+    if spec.knobs.horizon != systems.TICKS and _splits(args.splits) != ("test",):
+        # S25c：长时程测试集只用来评测（tools/long_rollout.py），只编码测试段；训练和验证仍用 33 帧的主实验缓存
+        raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程测试集：只能 --splits test（只用来评测，见 tools/long_rollout.py）")
     if spec.knobs.changes_timing():
         # S24b：帧数、帧时刻、tick 内部切换的动作都不是缓存格式（33 帧、每 tick 一帧、TrajectoryControls）能表示的
         raise SystemExit(f"{spec.scene} 带时间采样调节项（fps/jitter/exposure/switch_offset）：编码和缓存还没接（S24b 只做数据生成，第 6 阶段接入）")
@@ -117,6 +121,8 @@ def main():
             shutil.rmtree(folder)       # 上次中断留下的半成品
         folder.mkdir()
         states, frames = system.frames(tid)
+        if frames.shape[0] != frames_per_trajectory:
+            raise ValueError(f"trajectory {tid}: {frames.shape[0]} frames, expected {frames_per_trajectory}")
         raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder)
         stored = raw.astype(dtype)
         if not np.isfinite(stored).all():
@@ -136,7 +142,7 @@ def main():
             controls=dict(starts_ticks=controls.starts_ticks.tolist(), ends_ticks=controls.ends_ticks.tolist(),
                           values=controls.values.tolist(), units="simulation_position_per_second"),
             frames=[dict(tick=t, time_seconds=t*.25, image_sha256=hashlib.sha256(frames[t].tobytes()).hexdigest())
-                    for t in range(33)],
+                    for t in range(frames_per_trajectory)],
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,

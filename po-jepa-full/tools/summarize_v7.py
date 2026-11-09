@@ -174,7 +174,7 @@ def main():
             series_l, f"{dataset}（{updates} 步）训练 JEPA 损失（第一个种子，滑动平均）", "更新步数", "JEPA loss", log_y=True))
 
     summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across,
-                   transfer=transfer_drops(groups), planning=planning_reports(a.results),
+                   transfer=transfer_drops(groups), planning=planning_reports(a.results), long=long_reports(a.results),
                    problems=problems, missing=missing, duplicates=duplicates, scientific_conclusions_verified=False)
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
@@ -220,6 +220,55 @@ def planning_reports(root):
     return rows
 
 
+def long_reports(root):
+    """S25c tools/long_rollout.py 的结果（kind = long_rollout）：每个 (长时程测试集, 条件) 跨种子平均；
+    full − 对照按同编号轨迹配对（先每个种子内逐条相减取平均，再跨种子平均）。"""
+    reports = []
+    for path in sorted(Path(root).rglob("*.json")):
+        if path.stat().st_size > 50_000_000:
+            continue
+        try:
+            r = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(r, dict) and r.get("kind") == "long_rollout":
+            reports.append(dict(r, file=str(path)))
+    by = defaultdict(dict)                     # (测试集, 步数) -> (条件, 种子) -> 报告
+    duplicates = []
+    for r in reports:
+        key, sub = (r["dataset"], r["updates"]), (r["condition"], r["seed"])
+        if sub in by[key]:
+            duplicates.append(r["file"]); continue
+        by[key][sub] = r
+    rows, comparisons = [], []
+    for (dataset, updates), group in sorted(by.items()):
+        times = group[next(iter(group))]["definitions"]["direct_times"]
+        for c in CONDITIONS:
+            seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
+            if seeds:
+                rows.append(dict(dataset=dataset, updates=updates, condition=c, seeds=len(seeds), times=times,
+                                 direct=[_mean([r["means"][f"long_direct:T={t:g}"] for r in seeds]) for t in times],
+                                 composed=[_mean([r["means"][f"long_composed:T={t:g}"] for r in seeds]) for t in times]))
+        for ref in REFERENCES:
+            diffs = []
+            for (cc, seed), r in sorted(group.items()):
+                other = group.get((ref, seed))
+                if cc != "po_jepa_full" or other is None:
+                    continue
+                theirs = {row["trajectory_id"]: row["values"] for row in other["rows"]}
+                t = times[-1]
+                d = [row["values"][f"long_composed:T={t:g}"]-theirs[row["trajectory_id"]][f"long_composed:T={t:g}"]
+                     for row in r["rows"] if row["trajectory_id"] in theirs]
+                if d:
+                    diffs.append(dict(seed=seed, mean=sum(d)/len(d), trajectories=len(d), full_better=sum(x < 0 for x in d)))
+            if diffs:
+                ms = [x["mean"] for x in diffs]
+                comparisons.append(dict(dataset=dataset, updates=updates, comparison=f"po_jepa_full − {ref}", T=times[-1],
+                                        seeds=len(diffs), mean=_mean(ms), seed_std=statistics.stdev(ms) if len(ms) > 1 else None,
+                                        per_seed=diffs))
+    return dict(rows=rows, comparisons=comparisons, duplicates=duplicates)
+
+
 def _f(x, digits=5):
     return "—" if x is None else f"{x:.{digits}f}" if abs(x) >= 1e-3 or x == 0 else f"{x:.2e}"
 
@@ -251,6 +300,18 @@ def _markdown(s):
                   "| 场景 | 训练数据集 | 条件 | 种子 | 回合 | 模型规划 | 真值规划（上界） | 随机 | 模型规划误差（像素） |", "|---|---|---|---|---|---|---|---|---|"]
         lines += [f"| {r['dataset']} | {r['train_dataset']} | {r['condition']} | {r['seed']} | {r['episodes']} | {_f(r['model_success'], 2)} | "
                   f"{_f(r['oracle_success'], 2)} | {_f(r['random_success'], 2)} | {_f(r['model_error_px'], 1)} |" for r in s["planning"]]
+    if s["long"]["rows"]:
+        lines += ["", "## 长时程滚动（起点 tick 0，跨种子平均；直接 = 一次预测，8 步滚动 = 每 8 个 tick 一段）", ""]
+        times = s["long"]["rows"][0]["times"]
+        lines += ["| 测试集 | 步数 | 条件 | 种子 | " + " | ".join(f"直接 T={t:g}" for t in times) + " | " +
+                  " | ".join(f"8 步滚动 T={t:g}" for t in times) + " |", "|---|---|---|---|" + "---|"*(2*len(times))]
+        lines += [f"| {r['dataset']} | {r['updates']} | {r['condition']} | {r['seeds']} | " + " | ".join(_f(x) for x in r["direct"]) +
+                  " | " + " | ".join(_f(x) for x in r["composed"]) + " |" for r in s["long"]["rows"] if r["times"] == times]
+        if s["long"]["comparisons"]:
+            lines += ["", "| 测试集 | 步数 | 比较（8 步滚动，最长 T） | T | 种子 | 平均差 | 种子间 SD | 每个种子里 full 更好的轨迹 |",
+                      "|---|---|---|---|---|---|---|---|"]
+            lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['T']:g} | {c['seeds']} | {_f(c['mean'])} | {_f(c['seed_std'])} | "
+                      + ", ".join(f"{x['full_better']}/{x['trajectories']}" for x in c["per_seed"]) + " |" for c in s["long"]["comparisons"]]
     if s["missing"]:
         lines += ["", "## 缺失任务", ""] + [f"- {m['dataset']} {m['updates']} 步 种子 {m['seed']}：{m['condition']}" for m in s["missing"]]
     if s["duplicates"]:

@@ -5,6 +5,7 @@
   python tools/make_v8_jobs.py --stage full     > jobs-v8-full.txt       # 正式：各 2000 条、10000 步、3 个种子
   python tools/make_v8_jobs.py --stage variants > jobs-v8-variants.txt   # 分布外评测（评测协议的标准档）+ 规划（full 之后）
   python tools/make_v8_jobs.py --stage strength > jobs-v8-strength.txt   # 强度曲线（轻档、重档；variants 之后）
+  python tools/make_v8_jobs.py --stage long     > jobs-v8-long.txt       # 长时程滚动（16–64 步；full 之后，S25c）
 
 和 v7 的区别（S21b）：
 - 场景是 po_jepa.protocols.SCENES：v7 的 5 个加 gray_scott、push。
@@ -17,6 +18,9 @@
 S25a：五个二阶场景（protocols.SECOND_ORDER_SCENES）能排了，但要显式写 --scenes（默认仍是 7 个一阶场景，任务表不变）。
 它们现在按单帧复制（dup）编码，特征里看不到速度，只适合当“看不到速度时有多差”的对照；两帧（pair）编码等 S22 探针结果
 在 S25b 接，接好以后并进默认场景。排了二阶场景时，输出的第一行注释会写明这一点。
+
+S25c：--stage long 排长时程测试集（<场景>~horizon=128 的测试段，每类 200 条 × 129 帧，只编码测试段）的编码、汇总和
+tools/long_rollout.py 滚动评测（3 个种子 × 各条件；模型是 full 阶段在基础场景上训练好的，不再训练）。
 """
 import argparse
 from pathlib import Path
@@ -32,6 +36,7 @@ SEEDS = (1703, 1704, 1705)
 # S25a：二阶场景每个 tick 本机 CPU 实测 wave 约 12 ms，其余 ≤ 3 ms（pendulum 0.8、bouncing_balls 2.6、cart_pole 2.0、
 # spring_chain 0.1；double_well 3.9 作对照），只有 wave 降到 32（docs/segments/S25a.md §4）
 ORACLE_SAMPLES = {"gray_scott": 16, "push": 32, "wave": 32}
+LONG_HORIZON = 128   # S25c：长时程测试集的 horizon（variants.HORIZONS 的最大值）
 
 
 def split_scene(scene):
@@ -41,7 +46,7 @@ def split_scene(scene):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength"), required=True)
+    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=",".join(CONDITIONS), help="分布外评测和规划评哪些条件")
@@ -81,6 +86,31 @@ def main():
     def ds(scene):
         system, knobs = split_scene(scene)
         return f"--system {system}" + (f" --variant {knobs}" if knobs else "") + f" --trajectories {n}"
+
+    if a.stage == "long":
+        long = f"horizon={LONG_HORIZON}"
+        print("# 前提：--stage full 的 A–D 段已完成（模型在基础场景上训练好），本文件只做评测，不再训练。")
+        print(f"# 长时程测试集：<场景>~{long} 的测试段（每条 {LONG_HORIZON+1} 帧，float16 每条约 93 MB），"
+              "前 33 帧和主实验测试段逐位相同；指标见 src/po_jepa/runtime/long_rollout.py。")
+        print(f"# ===== L1 编码长时程测试集（GPU，{len(scenes)*a.shards} 条；只编码测试段）=====")
+        for s in scenes:
+            for i in range(a.shards):
+                print(f"python tools/encode_v7.py encode --system {split_scene(s)[0]} --variant {protocols.merged(s, long)} "
+                      f"--trajectories {n} --splits test {enc} --output {feats(s, long)} --device cuda:0 --shard {i}/{a.shards}")
+        print("# ===== L2 汇总编码（CPU）=====")
+        for s in scenes:
+            print(f"python tools/encode_v7.py finalize --system {split_scene(s)[0]} --variant {protocols.merged(s, long)} "
+                  f"--trajectories {n} --splits test --output {feats(s, long)}")
+        print(f"# ===== L3 长时程滚动（GPU，{len(scenes)*len(seeds)*len(conditions)} 条，互不依赖）=====")
+        for s in scenes:
+            for seed in seeds:
+                for c in conditions:
+                    extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
+                    print(f"python tools/long_rollout.py --job {root}/{name(s)}/seed{seed}/{c} --features {feats(s, long)} "
+                          f"--horizon {LONG_HORIZON} --output {root}/long/{name(s)}/seed{seed}/{c}.json --device cuda:0{extra}")
+        print("# ===== L4 汇总（CPU）=====")
+        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        return
 
     if a.stage in ("variants", "strength"):
         levels = ("标准",) if a.stage == "variants" else ("轻", "重")
