@@ -120,7 +120,7 @@ def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int, model_device: 
 | `src/po_jepa/runtime/addon/check_addon.py`、`entry.py` | `run.py check-addon`；`calibrate-addon`、`check-addon` 的子进程入口（S17） | 16 §5 |
 | `tools/import_v7_calibration.py` | 导入 v7 标定，写 `configs/calibration/IMPORTED.json`（S17） | 16 §3.1 |
 | `tools/addon_preflight.py`、`tools/make_addon_jobs.py` | 补跑开跑前的核对；补跑任务文件（S17） | 16 §5、§7、§12 |
-| `补跑说明.md` | 给机哥的补跑说明（S17；不进 MANIFEST） | 16 §9 |
+| `ADDON_RUN_GUIDE.md`（原名 `补跑说明.md`） | 给机哥的补跑说明（S17；不进 MANIFEST） | 16 §9 |
 | `src/po_jepa/runtime/addon/v7load.py` | 读 v7 检查点（放宽来源核对）（S18a） | 10 §4 |
 | `src/po_jepa/runtime/addon/d4.py`、`long_window.py`、`spectral_gap.py`、`encoder_identity.py` | D4 评测和几项核对（S18a） | 10 §3–§6 |
 | `src/po_jepa/runtime/addon/eval_cli.py` | `run.py d4`、`run.py spectral-gap` 的子进程入口（S18a） | 10 §3–§5 |

@@ -12,7 +12,7 @@
 
 ## 一、准备（只做一次）
 
-1. **等 v7 跑完。** v7 的 `jobs-full.txt` 和 `jobs-variants.txt` 都要打印过“全部完成。”。补跑要读 v7 的 `features-v7/`、`results-v7/`、`po-jepa/configs/calibration/`，还有 v7 试跑用的 v6 双势阱特征目录（v7 交接说明里 `V6=` 写的那个绝对路径，在你原来的 v6 工作目录里），这些都不要删、不要改。
+1. **等 v7 跑完。** v7 的 `jobs-full.txt` 和 `jobs-variants.txt` 都要打印过“全部完成。”。补跑要读 v7 的 `features-v7/`、`results-v7/`、`po-jepa/configs/calibration/`，还有 v7 试跑用的 v6 双势阱特征目录（v7 的 HANDOFF.md（原《交接说明.md》）里 `V6=` 写的那个绝对路径，在你原来的 v6 工作目录里），这些都不要删、不要改。
 2. **环境和 v7 相同**，先激活：
 
    ```bash
@@ -41,7 +41,7 @@
 
 ```bash
 cd full-model/po-jepa-full
-V6=<v6 特征目录的绝对路径>        # 和 v7 交接说明里的 V6= 那一行完全相同
+V6=<v6 特征目录的绝对路径>        # 和 v7 HANDOFF.md 里的 V6= 那一行完全相同
 grep -- '--system double_well ' ../../po-jepa/jobs-pilot.txt | grep -m1 -o -- '--features-root [^ ]*'   # 应打印 --features-root 和同一个路径
 python tools/make_addon_jobs.py --stage pilot --v6-features "$V6" > jobs-addon-pilot.txt
 python tools/run_jobs.py jobs-addon-pilot.txt --gpus 0,1
@@ -49,7 +49,7 @@ python tools/run_jobs.py jobs-addon-pilot.txt --gpus 0,1
 
 第二条命令会自动把任务分给两张卡，一段段跑完：先导入 v7 的标定并核对 v7 的产物（A0），再补跑标定（C）、检查（C2），然后训练和评测（D、D4），最后汇总（E）。屏幕上显示每条任务的开始、完成和用时，每条任务的详细输出存在 `../../logs-addon/jobs-addon-pilot/`。试跑用的是 v7 **试跑**的结果，5 个场景都跑。
 
-`--v6-features` 要给 **v7 试跑时 `make_v7_jobs.py --stage pilot --v6-features "$V6"` 用的同一个绝对路径**（试跑的双势阱读 v6 的特征，补跑必须读同一份）：`V6=` 照抄 v7 交接说明里那一行；记不清的话，上面的 `grep` 会从 v7 的 `jobs-pilot.txt` 里双势阱那几行的 `--features-root` 把它找出来，两者必须相同。**不要用 `po-jepa/features/` 或 `full-model/features/`**：git 克隆下来的这两个 `features/` 只有提交进仓库的说明文件（`report.json`、`COMPLETE.json`、`registration.json`、`0000/manifest.json`），没有任何 `raw_z.npy`，不是特征。不给这个参数会报“试跑必须给 --v6-features”，写成相对路径会报“要写绝对路径”；给错了目录，A0 的 preflight 会报错停下（只有说明文件的目录报的是 `缺 COMPLETE.json、manifest.json 或 raw_z.npy`），不会白跑。v7 交接说明里对 `$V6` 做的几项检查（`report.json` 的 SHA、200 个轨迹目录、`raw_z.npy`）这里不用手动重做，A0 的 preflight 会做，而且更严。
+`--v6-features` 要给 **v7 试跑时 `make_v7_jobs.py --stage pilot --v6-features "$V6"` 用的同一个绝对路径**（试跑的双势阱读 v6 的特征，补跑必须读同一份）：`V6=` 照抄 v7 HANDOFF.md 里那一行；记不清的话，上面的 `grep` 会从 v7 的 `jobs-pilot.txt` 里双势阱那几行的 `--features-root` 把它找出来，两者必须相同。**不要用 `po-jepa/features/`**：git 克隆下来的这个 `features/` 只有提交进仓库的说明文件（`report.json`、`COMPLETE.json`、`registration.json`、`0000/manifest.json`），没有任何 `raw_z.npy`，不是特征。不给这个参数会报“试跑必须给 --v6-features”，写成相对路径会报“要写绝对路径”；给错了目录，A0 的 preflight 会报错停下（只有说明文件的目录报的是 `缺 COMPLETE.json、manifest.json 或 raw_z.npy`），不会白跑。v7 HANDOFF.md 里对 `$V6` 做的几项检查（`report.json` 的 SHA、200 个轨迹目录、`raw_z.npy`）这里不用手动重做，A0 的 preflight 会做，而且更严。
 
 跑的时间长，建议放在 `tmux` 或 `screen` 里，断开 SSH 也不会停。
 

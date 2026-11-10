@@ -25,7 +25,7 @@
 3. 没有放宽任何已有检查（报错条件、容差、类型检查）。
 4. 新增的每个报错都有一条触发它的测试。
 5. 所有写文件的地方先写临时文件再换名；JSON 用 `cache._write_json`（双树对照脚本的父进程不能导入任何一棵树的 `po_jepa`，用一个行为相同的小函数）。
-6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md`、`补跑说明.md` 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 和 `SOURCE_MAP.json` 一起提交（改了 `SOURCE_MAP` 登记的模块而不重算，`test_bundle_core_math_matches_source_map` 会失败）；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
+6. 改了进清单的文件（后缀 `.py .yaml .md .json .toml .tex`，`docs/`、`.vscode/`、`README.md`、`ADDON_RUN_GUIDE.md`（补跑说明） 以外），就在 `po-jepa-full/` 下重跑 `tools/refresh_manifests.py`，新的 `MANIFEST.json` 和 `SOURCE_MAP.json` 一起提交（改了 `SOURCE_MAP` 登记的模块而不重算，`test_bundle_core_math_matches_source_map` 会失败）；在新目录里真的调用一次 `workflow.verify_bundle()` 和 `cache.verify_fixed_protocol()` 并通过（07 §5.1）。
 
 ## 3. 分段验收
 

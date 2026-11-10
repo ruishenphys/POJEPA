@@ -172,7 +172,7 @@ python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/vjepa2_ac 
   logs-addon/<任务文件名>/                   # 补跑的日志
 ```
 
-## 9. 给机哥的补充说明（草稿，代码合并后定稿为 po-jepa-full/补跑说明.md）
+## 9. 给机哥的补充说明（草稿，代码合并后定稿为 po-jepa-full/ADDON_RUN_GUIDE.md，原名补跑说明.md）
 
 环境和 v7 相同，不用装新包。顺序：
 

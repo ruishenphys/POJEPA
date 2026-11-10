@@ -1,10 +1,10 @@
 # po-jepa-full
 
-完整模型的主干：仿真补跑和 DROID 实验共用这一份代码。放在仓库的 `full-model` 分支上，和根目录的 v7 代码互不影响。
+完整模型的主干：仿真补跑和 DROID 实验共用这一份代码。放在仓库的 `full-model` 分支上；v7 的代码在 `v7` 分支（2026-11-10 起本分支根目录不再放 v7 副本）。
 
 ## 现在的状态
 
-**设计规格已全部写完，代码按 [15-workflow.md](docs/design/15-workflow.md) 分段开始写**（Jerry 2026-11-08 授权规格写完即开工）。代码写好以前，仓库根目录的 v7 代码是唯一能跑的版本，机哥从 2026-11-09 起用它做正式运行，期间 v7 不做任何改动。
+**设计规格已全部写完，代码按 [15-workflow.md](docs/design/15-workflow.md) 分段写，进度和缺口见仓库根目录的 [FULL_MODEL_STATUS.md](../FULL_MODEL_STATUS.md)。** 现在能跑正式实验的是 `v7` 分支（v7.1）；给机哥的补跑说明是 [ADDON_RUN_GUIDE.md](ADDON_RUN_GUIDE.md)。
 
 ## 先读哪些
 
