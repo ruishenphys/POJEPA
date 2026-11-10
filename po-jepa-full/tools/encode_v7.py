@@ -18,6 +18,11 @@ S25d 时间采样测试集（--variant 带 fps/jitter/exposure/switch_offset）�
 不能和 horizon≠32 一起用；帧数 = 32·fps/4 + 1（17/33/65/129），manifest 的 frames 记每帧的实际时刻 time_ticks（timing.frame_times），
 编码器的时刻参数取实际时刻；switch_offset > 0 时下达动作是 SubtickControls，controls 记 starts_subticks/ends_subticks。
 
+S25e 空间采样测试集（--variant 带 resolution/zoom/pan/drift）：也只能 --splits test（只用来评测，tools/space_eval.py），
+不能和 horizon≠32、时间采样一起用；每条 33 帧（每 tick 一帧），画面是 R×R（R = resolution），按原生分辨率编码
+（po_jepa.native_encoder：预处理输出边长 R、编码器输入 [B,3,R,R]，不缩放回 256），特征 [33,(R/16)²,1408]，manifest 的 grid 是
+[R/16,R/16]、多一个 space 记录，预处理记录和摘要是原生分辨率版（runtime/space_cache.py），所以 cache.read_window 不收。
+
 中途断了直接重跑同一条命令：已完成（有 COMPLETE.json）的轨迹会跳过，未完成的残留会被清掉重做。
 """
 import argparse
@@ -60,7 +65,7 @@ def main():
     import numpy as np
     import torch
     from po_jepa import datasets, simulation, systems, timing, vjepa
-    from po_jepa.runtime import cache
+    from po_jepa.runtime import cache, space_cache
 
     spec = datasets.active()
     timed = spec.knobs.changes_timing()              # S25d：时间采样测试集
@@ -73,9 +78,15 @@ def main():
     if timed and _splits(args.splits) != ("test",):
         # S25d：时间采样测试集只用来评测（tools/timing_eval.py），只编码测试段；模型在 4 fps 的基础场景上训练
         raise SystemExit(f"{spec.scene} 带时间采样调节项：只能 --splits test（只用来评测，见 tools/timing_eval.py）")
-    if spec.knobs.changes_space():
-        # S24c：分辨率不是 256、画布外有 SURROUND，缓存格式（[33,256,256,3] 画面、16×16 特征）和 V-JEPA 2 的输入尺寸都要在第 6 阶段定
-        raise SystemExit(f"{spec.scene} 带空间采样调节项（resolution/zoom/pan/drift）：编码和缓存还没接（S24c 只做数据生成，第 6 阶段接入）")
+    spaced = spec.knobs.changes_space()              # S25e：空间采样测试集
+    if spaced and timed:
+        raise SystemExit(f"{spec.scene}：空间采样调节项（resolution/zoom/pan/drift）不能和时间采样调节项一起编码（两者组合没接）")
+    if spaced and spec.knobs.horizon != systems.TICKS:
+        raise SystemExit(f"{spec.scene}：空间采样调节项（resolution/zoom/pan/drift）只接 horizon=32（长时程加空间采样没接）")
+    if spaced and _splits(args.splits) != ("test",):
+        # S25e：空间采样测试集只用来评测（tools/space_eval.py），只编码测试段；模型在 256、相机不动的基础场景上训练
+        raise SystemExit(f"{spec.scene} 带空间采样调节项：只能 --splits test（只用来评测，见 tools/space_eval.py）")
+    resolution = spec.knobs.resolution
     out = args.output.resolve()
 
     if args.mode == "finalize":
@@ -91,8 +102,10 @@ def main():
     device = torch.device(args.device)
 
     if args.fake_encoder:
-        encoder, load_report, role = _fake_encoder(torch), dict(sha256=None, encoder_key=None, strict=None,
-                                                                missing_keys=[], unexpected_keys=[]), "synthetic_development_only"
+        from po_jepa import native_encoder
+        encoder = native_encoder.fake_encoder() if spaced else _fake_encoder(torch)
+        load_report, role = dict(sha256=None, encoder_key=None, strict=None,
+                                   missing_keys=[], unexpected_keys=[]), "synthetic_development_only"
     else:
         if args.upstream_root is None or args.checkpoint is None:
             raise SystemExit("encode 需要 --upstream-root（vjepa2 仓库，提交 %s）和 --checkpoint" % vjepa.UPSTREAM_COMMIT)
@@ -102,8 +115,13 @@ def main():
         loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
             args.checkpoint, cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder",
             ("module.", "backbone."), True, (), ()))
-        frozen = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
-                                          autocast_dtype=None)
+        if spaced:     # S25e：同一个冻结编码器按原生分辨率编码（[B,3,R,R] → [B,(R/16)²,1408]）
+            from po_jepa import native_encoder
+            frozen = native_encoder.NativeFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
+                                                       autocast_dtype=None, resolution=resolution)
+        else:
+            frozen = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
+                                              autocast_dtype=None)
         encoder = frozen
         r = loaded.report
         load_report = dict(path=str(r.path), sha256=r.sha256, encoder_key=r.encoder_key, strict=r.strict,
@@ -113,7 +131,8 @@ def main():
 
     generator_sources = {name: cache.file_sha(ROOT/name) for name in
                          ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/new_systems.py", "src/po_jepa/second_order.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
-                          "src/po_jepa/datasets.py", "tools/encode_v7.py")+(("src/po_jepa/timing.py",) if timed else ())}
+                          "src/po_jepa/datasets.py", "tools/encode_v7.py")+(("src/po_jepa/timing.py",) if timed else ())
+                         +(("src/po_jepa/timing.py", "src/po_jepa/camera.py", "src/po_jepa/native_encoder.py") if spaced else ())}
     environment = dict(python=sys.version.split()[0], torch=torch.__version__, cuda_runtime=torch.version.cuda,
                        numpy=np.__version__, platform=platform.platform(), encoder_device=str(device),
                        device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
@@ -132,7 +151,10 @@ def main():
             raise ValueError(f"trajectory {tid}: {frames.shape[0]} frames, expected {frames_per_trajectory}")
         # S25d：每帧的实际时刻（tick）；不带时间采样时就是 0…H
         ticks = timing.frame_times(tid) if timed else np.arange(frames_per_trajectory, dtype=np.float64)
-        raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None)
+        if spaced and frames.shape[1:] != (resolution, resolution, 3):
+            raise ValueError(f"trajectory {tid}: frames {frames.shape[1:]}, expected {resolution}x{resolution}")
+        raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None,
+                                 resolution if spaced else None)
         stored = raw.astype(dtype)
         if not np.isfinite(stored).all():
             raise ValueError(f"trajectory {tid}: features overflow {args.dtype}")
@@ -146,8 +168,8 @@ def main():
             trajectory_id=tid, split=spec.split_for(tid), shape=list(stored.shape), dtype=args.dtype,
             feature_file="raw_z.npy", feature_sha256=cache.file_sha(folder/"raw_z.npy"),
             states_file="states.npy", states_sha256=cache.file_sha(folder/"states.npy"),
-            grid=[16, 16], token_order="row_major", observation_variant="canonical",
-            preprocess_sha256=cache.v7_preprocess_sha256(),
+            grid=[resolution//16]*2 if spaced else [16, 16], token_order="row_major", observation_variant="canonical",
+            preprocess_sha256=space_cache.preprocess_sha256(resolution) if spaced else cache.v7_preprocess_sha256(),
             controls=_controls_record(controls, systems),
             frames=([dict(frame=k, time_ticks=float(ticks[k]), time_seconds=float(ticks[k])*.25,
                           image_sha256=hashlib.sha256(frames[k].tobytes()).hexdigest()) for k in range(frames_per_trajectory)]
@@ -156,11 +178,13 @@ def main():
                      for t in range(frames_per_trajectory)]),
             **({"timing": dict(fps=spec.knobs.fps, jitter=spec.knobs.jitter, exposure=spec.knobs.exposure,
                                switch_offset=spec.knobs.switch_offset)} if timed else {}),
+            **({"space": space_cache.space_record(spec)} if spaced else {}),
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,
                             encoder_load_report=load_report, upstream_commit=vjepa.UPSTREAM_COMMIT,
-                            preprocess=cache._v7_preprocess_record(), generator_source_sha256=generator_sources,
+                            preprocess=space_cache.preprocess_record(resolution) if spaced else cache._v7_preprocess_record(),
+                            generator_source_sha256=generator_sources,
                             environment=environment,
                             preprocess_rule="reset_same_trajectory_generator_state_before_each_single_frame"))
         cache._write_json(folder/"manifest.json", manifest)
@@ -183,9 +207,10 @@ def _controls_record(controls, systems):
                 values=controls.values.tolist(), units="simulation_position_per_second")
 
 
-def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None):
+def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None, resolution=None):
     """按 v3 规则：每帧前把同一条轨迹的预处理 generator 重置到同一初始状态，再单帧预处理并编码。
-    ticks：每帧的时刻（tick，S25d 时间采样时不是 0…L−1）；编码器只把它当元数据（vjepa._encode 不用它算特征）。"""
+    ticks：每帧的时刻（tick，S25d 时间采样时不是 0…L−1）；编码器只把它当元数据（vjepa._encode 不用它算特征）。
+    resolution：S25e 空间采样时的原生分辨率 R（预处理输出 R×R，native_encoder.preprocess_native）；None = v7 的 256。"""
     rgb = torch.from_numpy(frames)
     if fake:
         x = rgb.permute(0, 3, 1, 2).float()/255.
@@ -195,7 +220,11 @@ def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch
     pre = []
     for t in range(rgb.shape[0]):
         g = torch.Generator(device="cpu").manual_seed(seed)
-        pre.append(vjepa.preprocess_rgb(rgb[t:t+1], spec=cache.preprocess_spec(), generator=g))
+        if resolution is None:
+            pre.append(vjepa.preprocess_rgb(rgb[t:t+1], spec=cache.preprocess_spec(), generator=g))
+        else:
+            from po_jepa import native_encoder
+            pre.append(native_encoder.preprocess_native(rgb[t:t+1], resolution=resolution, spec=cache.preprocess_spec(), generator=g))
     pre = torch.cat(pre)
     out = []
     for s in range(0, pre.shape[0], batch):

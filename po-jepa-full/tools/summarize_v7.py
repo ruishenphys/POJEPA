@@ -175,7 +175,7 @@ def main():
 
     summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across,
                    transfer=transfer_drops(groups), planning=planning_reports(a.results), long=long_reports(a.results),
-                   timing=timing_reports(a.results),
+                   timing=timing_reports(a.results), space=space_reports(a.results),
                    problems=problems, missing=missing, duplicates=duplicates, scientific_conclusions_verified=False)
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
@@ -324,6 +324,81 @@ def timing_reports(root):
     return dict(rows=rows, comparisons=comparisons, duplicates=duplicates)
 
 
+def space_reports(root):
+    """S25e tools/space_eval.py 的结果（kind = space_eval）：每个 (空间采样测试集, 条件) 跨种子平均（按时长 T）：
+    空间采样测试集上的直接预测、基础测试集同一窗口上的直接预测、两者之差（gap）；
+    full − 对照按同一窗口（轨迹、起点、时长）配对，分别比 direct 和 gap（先每个种子内逐窗口相减取平均，再跨种子平均）。
+    配对要求两份报告的窗口集合完全相同、每个窗口的缓存来源（空间采样和基础测试集的 manifest SHA）相同，否则不比、记进 mismatched
+    （不静默取交集：缺行会让比较偏向剩下的窗口）。行里另给跨种子 SD。"""
+    reports = []
+    for path in sorted(Path(root).rglob("*.json")):
+        if path.stat().st_size > 50_000_000:
+            continue
+        try:
+            r = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(r, dict) and r.get("kind") == "space_eval":
+            reports.append(dict(r, file=str(path)))
+    by = defaultdict(dict)                     # (测试集, 步数) -> (条件, 种子) -> 报告
+    duplicates = []
+    for r in reports:
+        key, sub = (r["dataset"], r["updates"]), (r["condition"], r["seed"])
+        if sub in by[key]:
+            duplicates.append(r["file"]); continue
+        by[key][sub] = r
+    rows, comparisons, mismatched = [], [], []
+
+    def mean_of(seeds, key):
+        xs = [r["means"][key] for r in seeds if key in r["means"]]
+        return _mean(xs) if len(xs) == len(seeds) else None
+
+    def sd_of(seeds, key):
+        xs = [r["means"][key] for r in seeds if key in r["means"]]
+        return statistics.stdev(xs) if len(xs) == len(seeds) and len(xs) > 1 else None
+
+    def windows(r):
+        return {(w["trajectory_id"], w["start_tick"], w["duration"]): w for w in r["rows"]}
+
+    for (dataset, updates), group in sorted(by.items()):
+        durations = group[next(iter(group))]["definitions"]["durations"]
+        for c in CONDITIONS:
+            seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
+            if seeds:
+                rows.append(dict(dataset=dataset, updates=updates, condition=c, seeds=len(seeds), durations=durations,
+                                 **{k: [mean_of(seeds, f"{k}:T={t}") for t in durations] for k in ("direct", "base_direct", "gap")},
+                                 **{f"{k}_sd": [sd_of(seeds, f"{k}:T={t}") for t in durations] for k in ("direct", "gap")}))
+        for ref in REFERENCES:
+            ok = {}
+            for (cc, seed), r in sorted(group.items()):
+                other = group.get((ref, seed))
+                if cc != "po_jepa_full" or other is None:
+                    continue
+                mine, theirs = windows(r), windows(other)
+                same = mine.keys() == theirs.keys() and len(mine) == len(r["rows"]) and len(theirs) == len(other["rows"]) and all(
+                    (mine[k].get("manifest_sha256"), mine[k].get("base_manifest_sha256"))
+                    == (theirs[k].get("manifest_sha256"), theirs[k].get("base_manifest_sha256")) for k in mine)
+                if same:
+                    ok[seed] = (mine, theirs)
+                else:
+                    mismatched.append(dict(dataset=dataset, updates=updates, seed=seed, comparison=f"po_jepa_full − {ref}",
+                                           files=[r["file"], other["file"]]))
+            for metric in ("direct", "gap"):
+                for t in durations:
+                    diffs = []
+                    for seed, (mine, theirs) in sorted(ok.items()):
+                        d = [w["values"][f"{metric}:T={t}"]-theirs[k]["values"][f"{metric}:T={t}"]
+                             for k, w in sorted(mine.items()) if w["duration"] == t]
+                        if d:
+                            diffs.append(dict(seed=seed, mean=sum(d)/len(d), windows=len(d), full_better=sum(x < 0 for x in d)))
+                    if diffs:
+                        ms = [x["mean"] for x in diffs]
+                        comparisons.append(dict(dataset=dataset, updates=updates, comparison=f"po_jepa_full − {ref}", metric=metric,
+                                                T=t, seeds=len(diffs), mean=_mean(ms),
+                                                seed_std=statistics.stdev(ms) if len(ms) > 1 else None, per_seed=diffs))
+    return dict(rows=rows, comparisons=comparisons, duplicates=duplicates, mismatched=mismatched)
+
+
 def _f(x, digits=5):
     return "—" if x is None else f"{x:.{digits}f}" if abs(x) >= 1e-3 or x == 0 else f"{x:.2e}"
 
@@ -387,6 +462,24 @@ def _markdown(s):
                       "|---|---|---|---|---|---|---|---|"]
             lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['frames']} | {c['seeds']} | {_f(c['mean'])} | {_f(c['seed_std'])} | "
                       + ", ".join(f"{x['full_better']}/{x['windows']}" for x in c["per_seed"]) + " |" for c in timing["comparisons"]]
+    space = s.get("space") or dict(rows=[], comparisons=[])
+    if space["rows"]:
+        lines += ["", "## 空间采样（主实验测试窗口，跨种子平均；每格 = 空间采样测试集上的直接预测 / 基础测试集同一窗口 / 两者之差）", ""]
+        durations = space["rows"][0]["durations"]
+        lines += ["| 测试集 | 步数 | 条件 | 种子 | " + " | ".join(f"T={t}" for t in durations) + " |", "|---|---|---|---|" + "---|"*len(durations)]
+        for r in (r for r in space["rows"] if r["durations"] == durations):
+            cells = ["—" if r["direct"][i] is None else f"{_f(r['direct'][i])} / {_f(r['base_direct'][i])} / {_f(r['gap'][i])}"
+                     for i in range(len(durations))]
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {r['seeds']} | " + " | ".join(cells) + " |")
+        if space["comparisons"]:
+            lines += ["", "| 测试集 | 步数 | 比较 | 量 | T | 种子 | 平均差 | 种子间 SD | 每个种子里 full 更好的窗口 |",
+                      "|---|---|---|---|---|---|---|---|---|"]
+            lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['metric']} | {c['T']} | {c['seeds']} | {_f(c['mean'])} | "
+                      f"{_f(c['seed_std'])} | " + ", ".join(f"{x['full_better']}/{x['windows']}" for x in c["per_seed"]) + " |"
+                      for c in space["comparisons"]]
+        if space.get("mismatched"):
+            lines += ["", "窗口集合或缓存来源对不上、没有配对的比较："] + [
+                f"- {m['dataset']} 种子 {m['seed']}：{m['comparison']}（{', '.join(m['files'])}）" for m in space["mismatched"]]
     if s["missing"]:
         lines += ["", "## 缺失任务", ""] + [f"- {m['dataset']} {m['updates']} 步 种子 {m['seed']}：{m['condition']}" for m in s["missing"]]
     if s["duplicates"]:

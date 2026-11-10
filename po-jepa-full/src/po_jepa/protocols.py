@@ -26,6 +26,9 @@ SECOND_ORDER_SCENES = ("pendulum", "bouncing_balls", "wave", "cart_pole", "sprin
 ALL_SCENES = SCENES+SECOND_ORDER_SCENES
 # S25d：时间采样测试集（S24b 的四个调节项；不进 P1–P13 的协议表，按帧评测走 runtime/timing_eval.py、tools/timing_eval.py）
 TIMING_TESTS = ("fps=2", "fps=8", "fps=16", "jitter=0.4", "exposure=1", "switch_offset=0.5")
+# S25e：空间采样测试集（S24c 的四个调节项；同样不进协议表，评测走 runtime/space_eval.py、tools/space_eval.py）。
+# 相机三项都在 zoom=0.75 上叠：pan、drift 的效果相对 zoom=0.75 单独一项来读
+SPACE_TESTS = ("resolution=192", "resolution=320", "resolution=384", "zoom=0.75", "pan=1,zoom=0.75", "drift=0.5,pan=1,zoom=0.75")
 
 
 @dataclass(frozen=True)

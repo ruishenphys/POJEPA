@@ -180,6 +180,9 @@ def transfer_job(features, output, device, condition, *, training_run, test_vari
     if test_spec.knobs.changes_timing():
         # S25d：时间采样测试集的帧数、帧时刻、动作边界不是 33 帧缓存（cache.read_window）的格式；按帧评测用 tools/timing_eval.py
         raise ValueError("--test-variant 不能带时间采样调节项（fps/jitter/exposure/switch_offset）：时间采样测试集用 tools/timing_eval.py 评测")
+    if test_spec.knobs.changes_space():
+        # S25e：空间采样测试集的特征网格是 (R/16)×(R/16)、预处理是原生分辨率版，不是 cache.read_window 的格式；评测用 tools/space_eval.py
+        raise ValueError("--test-variant 不能带空间采样调节项（resolution/zoom/pan/drift）：空间采样测试集用 tools/space_eval.py 评测")
     features, output = Path(features), Path(output)
     output.mkdir(parents=True, exist_ok=False)
     model, loss, selected, registration = load_for_evaluation(condition, training_run, device)

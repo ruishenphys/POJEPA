@@ -7,6 +7,7 @@
   python tools/make_v8_jobs.py --stage strength > jobs-v8-strength.txt   # 强度曲线（轻档、重档；variants 之后）
   python tools/make_v8_jobs.py --stage long     > jobs-v8-long.txt       # 长时程滚动（16–64 步；full 之后，S25c）
   python tools/make_v8_jobs.py --stage timing   > jobs-v8-timing.txt     # 时间采样按帧评测（帧率、抖动、曝光、切换；full 之后，S25d）
+  python tools/make_v8_jobs.py --stage space    > jobs-v8-space.txt      # 空间采样评测（分辨率、缩小、平移、漂移；full 之后，S25e）
 
 和 v7 的区别（S21b）：
 - 场景是 po_jepa.protocols.SCENES：v7 的 5 个加 gray_scott、push。
@@ -25,6 +26,9 @@ tools/long_rollout.py 滚动评测（3 个种子 × 各条件；模型是 full �
 
 S25d：--stage timing 排时间采样测试集（<场景>~<po_jepa.protocols.TIMING_TESTS 之一> 的测试段，每类 200 条，只编码测试段）的
 编码、汇总和 tools/timing_eval.py 按帧评测（3 个种子 × 各条件；同样只评测）。
+
+S25e：--stage space 排空间采样测试集（<场景>~<po_jepa.protocols.SPACE_TESTS 之一> 的测试段，每类 200 条，只编码测试段，
+按原生分辨率编码）的编码、汇总和 tools/space_eval.py 评测（3 个种子 × 各条件；同一组窗口在基础测试集上配对；同样只评测）。
 """
 import argparse
 from pathlib import Path
@@ -50,7 +54,7 @@ def split_scene(scene):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing"), required=True)
+    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=",".join(CONDITIONS), help="分布外评测和规划评哪些条件")
@@ -138,6 +142,31 @@ def main():
                     print(f"python tools/timing_eval.py --job {root}/{name(s)}/seed{seed}/{c} --test-variant {t} --features {feats(s, t)} "
                           f"--output {root}/timing/{name(s, t)}/seed{seed}/{c}.json --device cuda:0{extra}")
         print("# ===== T4 汇总（CPU）=====")
+        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        return
+
+    if a.stage == "space":
+        tests = [(s, t) for s in scenes for t in protocols.SPACE_TESTS]
+        print("# 前提：--stage full 的 A–D 段已完成（模型在 256、相机不动的基础场景上训练好，基础特征在 --features 下），本文件只做评测，不再训练。")
+        print(f"# 空间采样测试集：{', '.join(protocols.SPACE_TESTS)}；每条 33 帧，按原生分辨率编码，特征网格 = resolution/16"
+              "（384 时 24×24，float16 每条约 53 MB）；指标见 src/po_jepa/runtime/space_eval.py。")
+        print(f"# ===== S1 编码空间采样测试集（GPU，{len(tests)*a.shards} 条；只编码测试段）=====")
+        for s, t in tests:
+            for i in range(a.shards):
+                print(f"python tools/encode_v7.py encode --system {split_scene(s)[0]} --variant {protocols.merged(s, t)} "
+                      f"--trajectories {n} --splits test {enc} --output {feats(s, t)} --device cuda:0 --shard {i}/{a.shards}")
+        print("# ===== S2 汇总编码（CPU）=====")
+        for s, t in tests:
+            print(f"python tools/encode_v7.py finalize --system {split_scene(s)[0]} --variant {protocols.merged(s, t)} "
+                  f"--trajectories {n} --splits test --output {feats(s, t)}")
+        print(f"# ===== S3 评测（GPU，{len(tests)*len(seeds)*len(conditions)} 条，互不依赖）=====")
+        for s, t in tests:
+            for seed in seeds:
+                for c in conditions:
+                    extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
+                    print(f"python tools/space_eval.py --job {root}/{name(s)}/seed{seed}/{c} --test-variant {t} --features {feats(s, t)} "
+                          f"--base-features {feats(s)} --output {root}/space/{name(s, t)}/seed{seed}/{c}.json --device cuda:0{extra}")
+        print("# ===== S4 汇总（CPU）=====")
         print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
         return
 
