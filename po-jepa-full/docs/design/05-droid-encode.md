@@ -58,6 +58,15 @@ s5 文件里第 3j 行和主特征第 j 行是同一帧，但编码时的块不�
 
 约 400 条 × (约 110 + 2 × 37) 行 ≈ 7.5 万帧。
 
+S06b 补充（实现时定，见 `docs/segments/S06b.md` §4）：
+- 代码在 `src/po_jepa/droid/encode_extra.py`，命令行 `python -m po_jepa.droid.encode … --shard test-extra`；读取用 `features.ExtraFeatureReader`（逐行核 SHA）。
+- “没通过检查”同 S06a：两种动作源都没通过才跳过（特征只和画面有关）；评测按 06 §3 只用 `passed_realized` 的附加回合，是这里编的子集。
+- 每条回合 MP4 只解码一次（主特征位置和 s5 位置的并集），同一帧在 `frame_sha256` 和 `frame_sha256_s5` 里的 SHA 必须相同。
+- s5 的编码器和预处理就是主特征的（v7 `preprocess_rgb` + `FrozenFrameEncoder`）；r192、r320 用 `preprocess_square(·, R)` 和同一个已载入编码器的 `native_encoder.NativeFrameEncoder`（S25e）。
+- 清单 `features/test_extra/MANIFEST.<配置名>.json`，每条回合记三种文件的特征 JSON SHA、文件 SHA、行数；跳过的回合记片名和原因；完成记录 `features/test_extra/_complete/<配置名>.json`。
+- 和主特征逐位相同的计数（`main_comparison`，按帧号配对）只在该片主特征于本配置下已完成时才算，否则记 `main_manifest_sha256: null`。
+- §7 第二项：`--check-mp4` 另把第 0 帧按 192、320 各编一次，形状和有限性都对才返回 0。
+
 ## 5. 读特征
 
 `features.FeatureReader(root, manifest)`：

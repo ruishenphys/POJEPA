@@ -8,13 +8,14 @@
   `FrozenFrameEncoder`（单帧复制两份凑 tubelet，float32，不开 autocast）。每次送 `batch_frames`（32）帧，按行序连续切块。
 - `preprocess_square(rgb, size)`：同样的切片 [0:720, 154:1126]、双线性缩到 size×size、同一组均值方差；size = 256 时和
   v7 `preprocess_rgb` 逐位相同（tests/test_droid_encode.py）。主特征的假编码器路径用它（CPU 测试没有上游代码）；
-  192、320 的测试附加编码（§4）在 S06b 用它。
+  192、320 的测试附加编码（§4）在 S06b（`encode_extra.py`）用它。
 - 重新解码 MP4（04 §2），逐帧核 RGB 的 SHA 等于准备文件的 `frame_sha256`（§2 第 1 条），不同就报错。
 - 跳过规则（§3）、片清单、完成记录、`--delete-raw`（03 §4）见各函数。
 
 命令行：`python -m po_jepa.droid.encode --config … --data-root … --shard <片名> [--delete-raw] [--device cuda]
 [--upstream-root …] [--checkpoint …] [--fake-encoder]`；上游代码和权重默认在数据根的 `upstream/vjepa2` 和
-`checkpoints/<encode.checkpoint_file>`（12 §1）。`--check-mp4 <路径>` 做 05 §7 第一项核对（GPU 机器上，合并前）。
+`checkpoints/<encode.checkpoint_file>`（12 §1）。`--check-mp4 <路径>` 做 05 §7 的两项核对（GPU 机器上，合并前）。
+`--shard test-extra` 是测试附加任务 `encode/test-extra`（§4，S06b，`encode_extra.py`）。
 """
 
 from __future__ import annotations
@@ -121,9 +122,10 @@ class Encoder:
     device: str
 
 
-def fake_encoder() -> Encoder:
+def fake_encoder(size: int = MAIN_SIZE) -> Encoder:
     """§6：确定性随机 16×16 图块投影（固定种子 0 的 [768, 1408] 矩阵 / 16，再 layer_norm，同 v7 encode_v7 的思路）。
-    任意 16 的倍数边长 S 都得到 (S/16)² 个 token。只供 CPU 流程测试：清单里权重 SHA 为 None、`synthetic_development_only`。"""
+    任意 16 的倍数边长 S 都得到 (S/16)² 个 token。只供 CPU 流程测试：清单里权重 SHA 为 None、`synthetic_development_only`。
+    `size` 是预处理的输出边长（主特征 256；S06b 的 r192、r320 用 192、320），预处理 SHA 是 `square_preprocess_sha256(size)`。"""
     weight = torch.randn(3*PATCH*PATCH, ft.WIDTH, generator=torch.Generator().manual_seed(0))/16.
 
     def encode(x: torch.Tensor) -> torch.Tensor:
@@ -132,20 +134,32 @@ def fake_encoder() -> Encoder:
         patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(b, (h//PATCH)*(w//PATCH), -1)
         return torch.nn.functional.layer_norm(patches @ weight, (ft.WIDTH,))
 
-    return Encoder(encode, lambda frame: preprocess_square(torch.from_numpy(np.ascontiguousarray(frame))[None],
-                                                           MAIN_SIZE),
-                   SYNTHETIC_ROLE, None, square_preprocess_sha256(MAIN_SIZE),
+    return Encoder(encode, lambda frame: preprocess_square(torch.from_numpy(np.ascontiguousarray(frame))[None], size),
+                   SYNTHETIC_ROLE, None, square_preprocess_sha256(size),
                    {"kind": "fake random patch projection (seed 0)"}, "cpu")
 
 
-def real_encoder(upstream_root: Path, checkpoint: Path, device: str) -> Encoder:
-    """§1：上游 vjepa2@204698b 的 `vit_giant_xformers`，权重 SHA 必须等于 `cache.CHECKPOINT_SHA`（不对就报错）。"""
+def load_frozen(upstream_root: Path, checkpoint: Path) -> vjepa.LoadedEncoder:
+    """§1：上游 vjepa2@204698b 的 `vit_giant_xformers`，权重 SHA 必须等于 `cache.CHECKPOINT_SHA`（不对就报错）。
+    主特征和 S06b 的附加编码共用同一个已载入的编码器。"""
     arch = vjepa.EncoderArchitectureSpec(*ARCHITECTURE_ARGS)
     build = vjepa.build_encoder_architecture(upstream_root=Path(upstream_root), architecture=arch,
                                              initialization_seed=0)
-    loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
+    return vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
         Path(checkpoint), cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder", ("module.", "backbone."), True,
         (), ()))
+
+
+def load_report(loaded: vjepa.LoadedEncoder) -> dict:
+    r = loaded.report
+    return {"path": str(r.path), "sha256": r.sha256, "encoder_key": r.encoder_key, "strict": r.strict,
+            "missing_keys": list(r.missing_keys), "unexpected_keys": list(r.unexpected_keys)}
+
+
+def real_encoder(upstream_root: Path | None, checkpoint: Path | None, device: str, *,
+                 loaded: vjepa.LoadedEncoder | None = None) -> Encoder:
+    """§1：256 输入的真实编码器（v7 `preprocess_rgb` + `FrozenFrameEncoder`）。`loaded` 给了就不再载入。"""
+    loaded = loaded if loaded is not None else load_frozen(upstream_root, checkpoint)
     frozen = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=torch.device(device),
                                       autocast_dtype=None)
 
@@ -153,11 +167,8 @@ def real_encoder(upstream_root: Path, checkpoint: Path, device: str) -> Encoder:
         times = torch.arange(x.shape[0], dtype=torch.float64)      # 只是元数据，编码器不用它
         return frozen.encode_target(x, target_time_seconds=times).raw_z.detach().cpu().to(torch.float32)
 
-    r = loaded.report
-    report = {"path": str(r.path), "sha256": r.sha256, "encoder_key": r.encoder_key, "strict": r.strict,
-              "missing_keys": list(r.missing_keys), "unexpected_keys": list(r.unexpected_keys)}
-    return Encoder(encode, preprocess_v7, REAL_ROLE, cache.CHECKPOINT_SHA, cache.v7_preprocess_sha256(), report,
-                   str(frozen.encoder_device))
+    return Encoder(encode, preprocess_v7, REAL_ROLE, cache.CHECKPOINT_SHA, cache.v7_preprocess_sha256(),
+                   load_report(loaded), str(frozen.encoder_device))
 
 
 def encode_frames(encoder: Encoder, frames: torch.Tensor, batch_frames: int) -> np.ndarray:
@@ -426,32 +437,42 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DROID 1.0.1 encoding (docs/design/05): one shard")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--data-root", required=True, type=Path)
-    parser.add_argument("--shard", help="train-000 … , val, id_test, ood_test (02 §6)")
+    parser.add_argument("--shard", help="train-000 … , val, id_test, ood_test (02 §6), or test-extra (§4, S06b)")
     parser.add_argument("--delete-raw", action="store_true", help="training shards only (03 §4)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--upstream-root", type=Path, help="default <data-root>/upstream/vjepa2")
     parser.add_argument("--checkpoint", type=Path, help="default <data-root>/checkpoints/<encode.checkpoint_file>")
     parser.add_argument("--fake-encoder", action="store_true",
                         help="CPU flow tests only: random patch projection, features marked synthetic_development_only")
-    parser.add_argument("--check-mp4", type=Path, help="05 §7: compare encode_frames with a direct encoder call")
+    parser.add_argument("--check-mp4", type=Path, help="05 §7: compare encode_frames with a direct encoder call, "
+                        "and encode one frame at each extra resolution")
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    from po_jepa.droid import encode_extra as ex     # S06b；放在这里避免循环导入
     if args.fake_encoder:
         encoder = fake_encoder()
+        extra = lambda: ex.fake_encoders(config)                                       # noqa: E731
     else:
-        encoder = real_encoder(args.upstream_root or args.data_root/"upstream"/"vjepa2",
-                               args.checkpoint or args.data_root/"checkpoints"/config.encode.checkpoint_file,
-                               args.device)
+        loaded = load_frozen(args.upstream_root or args.data_root/"upstream"/"vjepa2",
+                             args.checkpoint or args.data_root/"checkpoints"/config.encode.checkpoint_file)
+        encoder = real_encoder(None, None, args.device, loaded=loaded)
+        extra = lambda: ex.real_encoders(config, args.device, loaded=loaded, main=encoder)  # noqa: E731
     if args.check_mp4:
         result = check_real(encoder, args.check_mp4, config.encode.batch_frames)
+        result["extra_resolutions"] = ex.check_extra(extra(), config, args.check_mp4)
         print(json.dumps(result, indent=2))
-        return 0 if result["preprocess_square_equals_v7"] and result["encode_frames_equals_direct"] else 1
+        return 0 if (result["preprocess_square_equals_v7"] and result["encode_frames_equals_direct"]
+                     and all(r["ok"] for r in result["extra_resolutions"].values())) else 1
     if not args.shard:
         parser.error("--shard is required")
-    result = run_encode(config, args.data_root, args.shard, encoder, delete_raw=args.delete_raw)
+    if args.shard == ex.JOB:
+        if args.delete_raw:
+            parser.error("--delete-raw is only for training shards")
+        result = ex.run_test_extra(config, args.data_root, extra())
+    else:
+        result = run_encode(config, args.data_root, args.shard, encoder, delete_raw=args.delete_raw)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

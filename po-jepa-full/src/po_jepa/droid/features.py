@@ -7,6 +7,9 @@
 `feature_manifest_sha256`）= SHA-256（按片名排序，把每片清单的 SHA 十六进制串依次连接）。
 
 `FeatureReader` 只读需要的行（`np.load(mmap_mode="r")`），每读一行核这一行的 SHA，转成 float32 的 torch 张量。
+测试附加（§4，S06b）：`features/test_extra/<uuid>.<kind>.{npy,json}`（kind = s5、r192、r320），清单
+`features/test_extra/MANIFEST.<配置名>.json`、完成记录 `features/test_extra/_complete/<配置名>.json`，读取用
+`ExtraFeatureReader`（同样逐行核 SHA）。
 本模块只管文件格式，不跑编码器（编码在 `encode.py`）。
 """
 
@@ -36,6 +39,10 @@ STORAGE_DTYPE = "float16"
 FLOAT16_MAX = 65504.0                   # 05 §2 第 3 条：转之前最大绝对值必须 < 65504
 TOKENS = 256                            # 16×16 网格
 WIDTH = 1408                            # ViT-g 的特征维数
+EXTRA_DIR = "test_extra"                # §4：`encode/test-extra` 的输出目录（S06b）
+EXTRA_SCHEMA = "droid_test_extra_features_v1"
+EXTRA_MANIFEST_SCHEMA = "droid_test_extra_manifest_v1"
+EXTRA_COMPLETE_SCHEMA = "droid_test_extra_complete_v1"
 
 
 # ---------------------------------------------------------------- 路径
@@ -230,15 +237,119 @@ class FeatureReader:
     def rows(self, uuid: str, rows: Sequence[int]) -> torch.Tensor:
         """第 `rows` 行（每行 [N, 1408]）→ float32 [len(rows), N, 1408]；每一行先核 SHA。"""
         npy, record = self._episode(uuid)
-        out = []
-        for r in rows:
-            r = int(r)
-            if not 0 <= r < npy.shape[0]:
-                raise IndexError(f"episode {uuid}: row {r} outside [0, {npy.shape[0]})")
-            row = np.array(npy[r])
-            if hashlib.sha256(row.tobytes()).hexdigest() != record["row_sha256"][r]:
-                raise ValueError(f"episode {uuid}: row {r} does not match its SHA (the feature file was changed)")
-            out.append(row)
-        if not out:
-            return torch.zeros((0, *npy.shape[1:]), dtype=torch.float32)
-        return torch.from_numpy(np.stack(out).astype(np.float32))
+        return checked_rows(npy, record, rows, f"episode {uuid}")
+
+
+def checked_rows(npy: np.ndarray, record: dict, rows: Sequence[int], label: str) -> torch.Tensor:
+    """读 `npy` 的第 `rows` 行，每一行先核 `record["row_sha256"]`（float16 字节），转成 float32 的 CPU 张量。"""
+    out = []
+    for r in rows:
+        r = int(r)
+        if not 0 <= r < npy.shape[0]:
+            raise IndexError(f"{label}: row {r} outside [0, {npy.shape[0]})")
+        row = np.array(npy[r])
+        if hashlib.sha256(row.tobytes()).hexdigest() != record["row_sha256"][r]:
+            raise ValueError(f"{label}: row {r} does not match its SHA (the feature file was changed)")
+        out.append(row)
+    if not out:
+        return torch.zeros((0, *npy.shape[1:]), dtype=torch.float32)
+    return torch.from_numpy(np.stack(out).astype(np.float32))
+
+
+# ---------------------------------------------------------------- 测试附加（§4，S06b）
+
+def extra_dir(data_root: Path | str) -> Path:
+    return features_dir(data_root)/EXTRA_DIR
+
+
+def extra_paths(data_root: Path | str, uuid: str, kind: str) -> tuple[Path, Path]:
+    """(`test_extra/<uuid>.<kind>.npy`, `test_extra/<uuid>.<kind>.json`)，kind 是 s5、r192、r320。"""
+    base = extra_dir(data_root)
+    return base/f"{uuid}.{kind}.npy", base/f"{uuid}.{kind}.json"
+
+
+def extra_manifest_path(data_root: Path | str, config: DroidConfig) -> Path:
+    return extra_dir(data_root)/f"{MANIFEST_PREFIX}{config.name}.json"
+
+
+def extra_complete_path(data_root: Path | str, config: DroidConfig) -> Path:
+    return extra_dir(data_root)/COMPLETE_DIR/f"{config.name}.json"
+
+
+def read_extra_record(json_path: Path, uuid: str, kind: str) -> dict:
+    record = read_json(json_path)
+    if record.get("schema") != EXTRA_SCHEMA:
+        raise ValueError(f"{json_path}: schema is not {EXTRA_SCHEMA!r}")
+    if record.get("uuid") != uuid or record.get("kind") != kind:
+        raise ValueError(f"{json_path}: uuid/kind {record.get('uuid')!r}/{record.get('kind')!r} != {uuid!r}/{kind!r}")
+    return record
+
+
+def read_extra_manifest(data_root: Path | str, config: DroidConfig) -> tuple[dict, str]:
+    """读本配置的测试附加完成记录和清单（同 `read_manifest`）。返回 (清单, 清单 SHA)。"""
+    done = extra_complete_path(data_root, config)
+    if not done.is_file():
+        raise ValueError(f"encode/test-extra has not completed for config {config.name!r} ({done} is missing)")
+    complete = read_json(done)
+    if complete.get("schema") != EXTRA_COMPLETE_SCHEMA or complete.get("config_sha256") != config.config_sha256:
+        raise ValueError(f"{done} was not written by encode/test-extra under this config")
+    path = extra_manifest_path(data_root, config)
+    sha = cache.file_sha(path)
+    if sha != complete.get("manifest_sha256"):
+        raise ValueError(f"{path} changed after encode/test-extra completed")
+    manifest = read_json(path)
+    if manifest.get("schema") != EXTRA_MANIFEST_SCHEMA or manifest.get("config_sha256") != config.config_sha256:
+        raise ValueError(f"{path} is not this config's test-extra manifest")
+    return manifest, sha
+
+
+class ExtraFeatureReader:
+    """`ExtraFeatureReader(data_root, manifest)`：`manifest` 是 `read_extra_manifest` 的第一项。
+
+    `rows(uuid, kind, 行号)` 和 `FeatureReader.rows` 一样：第一次打开时核特征 JSON 的 SHA 等于清单、`.npy` 的 dtype
+    和形状等于 JSON，每读一行核这一行的 SHA。s5 的行号是 s5 文件自己的（第 j 行 = 第 5j 帧），不和主特征混用（§4）。
+    """
+
+    def __init__(self, data_root: Path | str, manifest: dict) -> None:
+        if manifest.get("schema") != EXTRA_MANIFEST_SCHEMA:
+            raise ValueError("not a test-extra manifest")
+        self.data_root = Path(data_root)
+        self._entries = {}
+        for entry in manifest["episodes"]:
+            if entry["uuid"] in self._entries:
+                raise ValueError(f"episode {entry['uuid']} appears twice in the test-extra manifest")
+            self._entries[entry["uuid"]] = entry
+        self._open: dict[tuple[str, str], tuple[np.ndarray, dict]] = {}
+
+    def __contains__(self, uuid: str) -> bool:
+        return uuid in self._entries
+
+    def uuids(self) -> list[str]:
+        return list(self._entries)
+
+    def shard(self, uuid: str) -> str:
+        return self._entries[uuid]["shard"]
+
+    def record(self, uuid: str, kind: str) -> dict:
+        return self._file(uuid, kind)[1]
+
+    def _file(self, uuid: str, kind: str) -> tuple[np.ndarray, dict]:
+        key = (uuid, kind)
+        if key not in self._open:
+            if uuid not in self._entries:
+                raise KeyError(f"episode {uuid} is not in the test-extra manifest")
+            files = self._entries[uuid]["files"]
+            if kind not in files:
+                raise KeyError(f"episode {uuid} has no {kind!r} features (has {sorted(files)})")
+            npy_path, json_path = extra_paths(self.data_root, uuid, kind)
+            if cache.file_sha(json_path) != files[kind]["feature_json_sha256"]:
+                raise ValueError(f"{json_path} does not match the test-extra manifest")
+            record = read_extra_record(json_path, uuid, kind)
+            npy = np.load(npy_path, mmap_mode="r", allow_pickle=False)
+            check_stored(npy, record, str(npy_path))
+            self._open[key] = (npy, record)
+        return self._open[key]
+
+    def rows(self, uuid: str, kind: str, rows: Sequence[int]) -> torch.Tensor:
+        npy, record = self._file(uuid, kind)
+        return checked_rows(npy, record, rows, f"episode {uuid} {kind}")
