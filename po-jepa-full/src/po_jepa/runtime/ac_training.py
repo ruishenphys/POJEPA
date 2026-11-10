@@ -8,8 +8,10 @@
   学习率曲线与 PO-JEPA 同形（预热 5%、余弦降到峰值的 10%），峰值：官方规模微调 1e-4，缩小版从头 4.25e-4（官方峰值）；
 - 官方规模在 CUDA 上用 bf16 autocast（官方 dtype: bfloat16），缩小版 float32。
 与 PO-JEPA 的信息差别：AC 训练时看到片段内全部中间帧（官方做法），PO-JEPA 只用起点和终点。这让基线更强，报告里注明。
+DROID（S08b，09 §6.2）：`train_step(…, states=…)` 在 `state_input: true_state` 时收真实状态 [B, 9, 7]，teacher forcing
+用 states[:, :-1]，第 n 步自回归用 states[:, :n+1]（和官方 train.py 相同，训练时用真实状态）；动作是官方物理单位
+（DROID 片段批 `droid.batches.make_ac_clip_batch`）。规格快照一律 `ac_baseline.spec_snapshot`，v7 的逐字节不变。
 """
-from dataclasses import asdict
 import hashlib
 import io
 import os
@@ -92,19 +94,35 @@ def _lr(condition, loss_config, completed):
     return training.scheduled_lr(loss_config, completed)*PEAK_LR[condition]/training.BASE_LR
 
 
-def train_step(condition, model, optimizer, clips, actions, loss_config: LossConfig, completed: int):
-    """官方 teacher forcing + 2 步自回归；返回与其他条件同格式的 TrainingStepResult。"""
+def _clip_states(model, clips, states):
+    if not model.true_state:
+        if states is not None:
+            raise ValueError("learned_constant AC takes no states")
+        return None
+    b, t = clips.shape[:2]
+    if (not isinstance(states, torch.Tensor) or states.shape != (b, t, 7) or states.device != clips.device
+            or not states.is_floating_point() or not torch.isfinite(states).all()):
+        raise ValueError("true_state AC needs finite states [B, clip frames, 7] on the clip device")
+    return states
+
+
+def train_step(condition, model, optimizer, clips, actions, loss_config: LossConfig, completed: int, states=None):
+    """官方 teacher forcing + 2 步自回归；返回与其他条件同格式的 TrainingStepResult。
+    `states`：true_state 时真实状态 [B, 9, 7]（S08b），learned_constant 时必须为 None（v7）。"""
+    states = _clip_states(model, clips, states)
     model.train()
     optimizer.zero_grad(set_to_none=True)
     e = clips.shape[-1]
     autocast = clips.device.type == "cuda" and condition == "vjepa2_ac"
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
         h = F.layer_norm(clips, (e,))
-        z_tf = model.predict_frames(h[:, :-1], actions, 16, 16)                         # 预测第 1..8 帧
+        z_tf = model.predict_frames(h[:, :-1], actions, 16, 16,
+                                    None if states is None else states[:, :-1])          # 预测第 1..8 帧
         jloss = (z_tf.float()-h[:, 1:]).abs().mean()
         frames = [h[:, 0], z_tf[:, 0]]
         for n in range(1, AUTO_STEPS):
-            nxt = model.predict_frames(torch.stack(frames, 1), actions[:, :n+1], 16, 16)[:, -1]
+            nxt = model.predict_frames(torch.stack(frames, 1), actions[:, :n+1], 16, 16,
+                                       None if states is None else states[:, :n+1])[:, -1]
             frames.append(nxt)
         z_ar = torch.stack(frames[1:], 1)
         sloss = (z_ar.float()-h[:, 1:AUTO_STEPS+1]).abs().mean()
@@ -135,7 +153,7 @@ def save_checkpoint(condition, path, model, optimizer, completed, sampling, prov
     path = Path(path)
     if path.exists(): raise FileExistsError(path)
     device = next(model.parameters()).device
-    payload = dict(schema=SCHEMA, condition=condition, spec=asdict(model.spec), info=info,
+    payload = dict(schema=SCHEMA, condition=condition, spec=ac_baseline.spec_snapshot(model.spec), info=info,
                    model_state=training._cpu_tree(dict(model.state_dict())),
                    optimizer_state=training._cpu_tree(optimizer.state_dict()), provenance=provenance,
                    completed_steps=completed, sampling_state=training._sampling(sampling), model_training=model.training,
@@ -155,7 +173,7 @@ def load_checkpoint(condition, path, expected_sha, model, optimizer, expected_pr
     if hashlib.sha256(raw).hexdigest() != expected_sha:
         raise ValueError("checkpoint SHA mismatch before loading")
     payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
-    if (payload["schema"] != SCHEMA or payload["condition"] != condition or payload["spec"] != asdict(model.spec)
+    if (payload["schema"] != SCHEMA or payload["condition"] != condition or payload["spec"] != ac_baseline.spec_snapshot(model.spec)
             or not training._same_native(payload["provenance"], expected_provenance)):
         raise ValueError("AC checkpoint condition/spec/provenance mismatch")
     device = next(model.parameters()).device

@@ -265,3 +265,7 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 - 登记对不上时退出 2；FAILED.json 存在而不带 `--retry` 时不开始。
 - 日志行覆盖 1…U 不重不漏；续跑后去掉的行正好是末步大于检查点步数的那些。
 - S08b：v7 原有测试全过；`TransformerSpec`、`ACSpec` 的 v7 快照逐字节不变；`spec_snapshot` 去掉默认的 `state_input`；`true_state` 模式下 AC 的训练步和一份按官方 `train.py` 逻辑手写的参照逐位相同（假的小规格）；`compute_new_pose` 和官方函数逐位相同；三个求谱后端在 CPU 上（cuda 跳过）结果一致。
+
+## 9. S08b 实现补注（2026-11-10）
+
+代码和验收单见 `docs/segments/S08b.md`。实现时定的（不改口径）：官方规模按结构字段判断（v7 时与 `spec == OFFICIAL` 相同）；物理动作在 CPU float64 上由 `tick_actions` × scale + offset 算出（`ac_baseline.physical_tick_actions`），状态积分用它；`droid.ac.bind` 的起点 τ 离整数 ≤ 1e-9 个周期取整、越出 [0, 窗口时长] 报错；`ac_steps`（`droid.ac.ac_steps` → `ACPredictor.small_steps`）在 learned_constant 模式下忽略状态；`cpu_threads` 的份数是 `GraphSpectrum.eig_threads`（S09 工厂按 `resources.train.cpus` 设）；`check/env` 的一致标准用 `spectral_backends.agreement`。§8 “true_state 训练步和官方 train.py 参照逐位相同”实际是两项损失和除 `predictor_embed.bias` 外的全部参数逐位相同，这一项因官方先摊平各帧再过 Linear、求和顺序不同差约 1.5e-7（相对），改成摊平会动 v7 的数，不改。

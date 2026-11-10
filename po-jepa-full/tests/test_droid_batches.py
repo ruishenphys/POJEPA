@@ -201,26 +201,18 @@ def test_training_batch_values_and_v7_checks(root, setup):
     assert (batch.transfer.target.height, batch.transfer.target.width) == (8, 8)
     model = droid_model()
     training._batch(batch, model)
-    _tf_checks(batch, model)
+    _tf_checks(batch)
 
 
-def _tf_checks(batch, model, monkeypatch=None):
-    """`comparison._tf_batch` 的全部检查。S08b 之前 `baselines.validate_inputs` 的最后一句只许 2 维动作（09 §6.1 才放宽），
-    这里只容忍那一条（它是函数的最后一句，前面的检查都已通过），其余照常。"""
-    from po_jepa import baselines
-    original = baselines.validate_inputs
-
-    def tolerant(*args, **kwargs):
-        try:
-            original(*args, **kwargs)
-        except ValueError as error:
-            if str(error) != "F05 requires two control channels":
-                raise
-    baselines.validate_inputs = tolerant
-    try:
-        comparison._tf_batch(batch, model)
-    finally:
-        baselines.validate_inputs = original
+def _tf_checks(batch):
+    """`comparison._tf_batch` 的全部检查，用 7 维的 Transformer 和 Koopman（S08b 放宽 `baselines.validate_inputs` 之后，
+    S07 时只容忍“只许 2 维动作”那一句的那层包装已去掉，07 §3、09 §6.1）；2 维的 Transformer 必须被拒。"""
+    from po_jepa.baselines import TokenTransformer, TransformerSpec
+    from po_jepa.koopman import KoopmanConfig, KoopmanPredictor
+    comparison._tf_batch(batch, TokenTransformer(TransformerSpec(action_dim=7, feedforward=32)))
+    comparison._tf_batch(batch, KoopmanPredictor(KoopmanConfig(modes=4, action_dim=7)))
+    with pytest.raises(ValueError, match="two control channels"):
+        comparison._tf_batch(batch, TokenTransformer(TransformerSpec(feedforward=32)))
 
 
 def test_po_jepa_train_step_runs_on_a_droid_batch(setup):

@@ -240,8 +240,9 @@ def _tf_batch(batch, model):
     if not isinstance(batch, training.TrainingBatch):
         raise TypeError("explicit TrainingBatch required")
     from po_jepa.baselines import validate_inputs
+    spec = getattr(model, "spec", None) or model.config     # Transformer 的 TransformerSpec；Koopman 的 KoopmanConfig（S08b）
     validate_inputs(batch.raw_z, batch.controls, batch.duration, batch.transfer.source,
-                    model.encoder_dim, model.p_in.weight.device)
+                    model.encoder_dim, model.p_in.weight.device, action_dim=spec.action_dim)
     _temporal_raw_contract(batch.raw_target, "raw_target")
     batch.transfer.__post_init__()
     if batch.raw_target.shape != batch.raw_z.shape or batch.raw_target.device != batch.raw_z.device:

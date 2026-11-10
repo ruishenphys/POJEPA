@@ -2,6 +2,7 @@
 
 Transformer 结构为固定 baseline 实现选择；只用当前 raw Z、已知控制、
 查询时长和坐标。raw 输出不额外归一化，JEPA 距离由共同损失定义。
+S08b（09 §6.1）：动作维 m 允许 2（v7）或 7（DROID），动作 token = Linear(m+2, 宽)；m = 2 时构造和随机数消耗不变。
 """
 from dataclasses import dataclass
 
@@ -34,13 +35,13 @@ class TransformerSpec:
             raise ValueError("positive integer dimensions required")
         if type(self.residual) is not bool:
             raise ValueError("residual must be bool")
-        if self.action_dim != 2 or self.width % self.heads or self.dropout != 0. or self.layer_norm_epsilon != 1e-5:
-            raise ValueError("F05 requires two actions, divisible heads, zero dropout and fixed LayerNorm epsilon")
+        if self.action_dim not in (2, 7) or self.width % self.heads or self.dropout != 0. or self.layer_norm_epsilon != 1e-5:
+            raise ValueError("F05 requires two (v7) or seven (DROID) actions, divisible heads, zero dropout and fixed LayerNorm epsilon")
 
 
 def validate_inputs(raw: Tensor, controls: ActionSegments, duration: Tensor,
-                    grid: GridSpec, encoder_dim: int, device) -> None:
-    """核有限 FP32 [B,N,E]、实际网格与时间/控制，padding 不作有效命令。"""
+                    grid: GridSpec, encoder_dim: int, device, *, action_dim: int = 2) -> None:
+    """核有限 FP32 [B,N,E]、实际网格与时间/控制，padding 不作有效命令；控制通道数必须等于 action_dim（默认 2，v7）。"""
     if (not isinstance(raw, Tensor) or raw.layout != torch.strided or raw.is_nested or raw.is_meta
         or raw.dtype != torch.float32 or raw.ndim != 3 or min(raw.shape) <= 0
         or raw.shape[-1] != encoder_dim or raw.device != device or not torch.isfinite(raw).all()):
@@ -53,8 +54,9 @@ def validate_inputs(raw: Tensor, controls: ActionSegments, duration: Tensor,
     validate_action_segments(controls, query_duration=duration)
     if controls.u_values.shape[0] != raw.shape[0] or controls.u_values.device != device:
         raise ValueError("control B/device must match raw")
-    if controls.control_spec.action_dim != 2:
-        raise ValueError("F05 requires two control channels")
+    if controls.control_spec.action_dim != action_dim:
+        raise ValueError("F05 requires two control channels" if action_dim == 2
+                         else f"control channels must equal action_dim = {action_dim}")
 
 
 class TokenTransformer(nn.Module):
@@ -72,7 +74,7 @@ class TokenTransformer(nn.Module):
         self.p_in = nn.Linear(spec.encoder_dim, spec.width)
         self.grid_embed = nn.Linear(2, spec.width, bias=False)
         self.duration_embed = nn.Linear(1, spec.width, bias=False)
-        self.action_embed = nn.Linear(4, spec.width)
+        self.action_embed = nn.Linear(spec.action_dim+2, spec.width)   # m = 2 时就是 v7 的 Linear(4, 宽)
         layer = nn.TransformerEncoderLayer(spec.width, spec.heads, spec.feedforward,
             dropout=spec.dropout, activation="gelu", layer_norm_eps=spec.layer_norm_epsilon,
             batch_first=True, norm_first=False)
@@ -95,7 +97,8 @@ class TokenTransformer(nn.Module):
 
     def forward(self, raw: Tensor, controls: ActionSegments, duration: Tensor, grid: GridSpec) -> Tensor:
         """输入[B,N,E]→同形raw；CPU64时长为控制周期，坐标为已知CPU64[N,2]。"""
-        validate_inputs(raw, controls, duration, grid, self.encoder_dim, self.p_in.weight.device)
+        validate_inputs(raw, controls, duration, grid, self.encoder_dim, self.p_in.weight.device,
+                        action_dim=self.spec.action_dim)
         actions, valid = self.action_tokens(controls, duration)
         time = duration.to(raw)
         if not torch.isfinite(time).all() or torch.any((duration > 0) & (time.detach().cpu().double() == 0)):
@@ -113,14 +116,16 @@ class TokenTransformer(nn.Module):
 
 class IdentityPredictor(nn.Module):
     """不训练的当前特征参照；忽略合法控制不代表对未来预测正确。"""
-    def __init__(self, encoder_dim: int = 1408):
-        """不创建任何参数或优化器；E只用于核验输入。"""
+    def __init__(self, encoder_dim: int = 1408, action_dim: int = 2):
+        """不创建任何参数或优化器；E 和动作维只用于核验输入（DROID 传 action_dim=7，09 §6.1）。"""
         super().__init__()
-        self.encoder_dim = encoder_dim
+        if action_dim not in (2, 7):
+            raise ValueError("identity takes two (v7) or seven (DROID) control channels")
+        self.encoder_dim, self.action_dim = encoder_dim, action_dim
 
     def forward(self, raw, controls, duration, grid):
         """返回同一个当前raw对象；仍核可见输入合同，不读取任何目标。"""
         if not isinstance(raw, Tensor):
             raise TypeError("raw must be a Tensor")
-        validate_inputs(raw, controls, duration, grid, self.encoder_dim, raw.device)
+        validate_inputs(raw, controls, duration, grid, self.encoder_dim, raw.device, action_dim=self.action_dim)
         return raw

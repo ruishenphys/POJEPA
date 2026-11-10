@@ -16,6 +16,14 @@
 - 输入输出与官方 normalize_reps 一致：上下文先做无仿射 LayerNorm，预测再做一次 LayerNorm。
 
 训练（runtime/ac_training.py）照官方 app/vjepa_droid/train.py：9 帧片段（8 次转移）teacher forcing + 2 步自回归，L1。
+
+DROID（S08b，docs/design/09-droid-training.md §6.2）另有 7 维动作和“官方输入”模式，v7 的 2 维替换模式逐位不变：
+- action_dim = 7：保留官方的 action_encoder（Linear(7, 宽)，官方规模从权重载入），动作 token 吃官方物理单位
+  （每个 tick 的时间平均 × control_spec.scale + offset，01 §5.4）；
+- state_input = "true_state"（要求 7 维）：保留官方的 state_encoder，状态 token = state_encoder(真实本体状态)；
+  前向时起点状态由调用者给（[B, 7] 物理单位），第 k+1 帧的状态 = compute_new_pose(第 k 帧, 第 k 个物理动作)，
+  CPU float64 上算、转模型精度送入；"learned_constant" 是 v7 的可学习常向量；
+- 7 维时时长放宽到任意正数：非整数 t 取相邻两步的线性插值 (1 − r)·ẑ_⌊t⌋ + r·ẑ_⌊t⌋+1（半整数就是 v7 的平均）。
 """
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -30,6 +38,8 @@ from .geometry import GridSpec
 from .third_party import vjepa2_ac
 
 AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small")
+STATE_INPUTS = ("learned_constant", "true_state")
+SCALE_FIELDS = ("encoder_dim", "width", "depth", "heads", "mlp_ratio")
 OFFICIAL_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt"
 
 
@@ -41,13 +51,30 @@ class ACSpec:
     heads: int = 16
     mlp_ratio: float = 4.0
     action_dim: int = 2
+    state_input: str = "learned_constant"    # S08b：取默认值时不进 spec_snapshot，v7 快照逐字节不变
 
     def __post_init__(self):
         if self.width % self.heads or (self.width//self.heads)//3//2 < 1:
             raise ValueError("head_dim too small for 3-axis RoPE")
-        if self.action_dim != 2:
-            raise ValueError("v7 systems use two control channels")
+        if self.action_dim not in (2, 7):
+            raise ValueError("AC takes two (v7) or seven (DROID) control channels")
+        if self.state_input not in STATE_INPUTS:
+            raise ValueError(f"state_input must be one of {STATE_INPUTS}")
+        if self.state_input == "true_state" and self.action_dim != 7:
+            raise ValueError("state_input true_state needs the 7-dimensional DROID actions")
 
+
+def spec_snapshot(spec: ACSpec) -> dict:
+    """asdict(spec) 去掉取默认值的 state_input（09 §6.2）：v7 的规格快照和加字段之前逐字节相同。"""
+    out = asdict(spec)
+    if out["state_input"] == "learned_constant":
+        del out["state_input"]
+    return out
+
+
+def is_official_scale(spec: ACSpec) -> bool:
+    """官方规模 = 结构字段（SCALE_FIELDS）等于 OFFICIAL 的；动作维和状态输入不算结构（v7 时两者相同，结果与 spec == OFFICIAL 一致）。"""
+    return all(getattr(spec, k) == getattr(OFFICIAL, k) for k in SCALE_FIELDS)
 
 OFFICIAL = ACSpec()
 SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=3.5)   # 2026-11-08：MLP 224，对齐 token 写法 PO 参数 227617（原 2.0 对齐模态写法）
@@ -71,18 +98,31 @@ class ACPredictor(nn.Module):
             predictor_embed_dim=spec.width, depth=spec.depth, num_heads=spec.heads, mlp_ratio=spec.mlp_ratio,
             qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6),
             is_frame_causal=False, use_rope=True, action_embed_dim=7, use_silu=False, wide_silu=True)
-        del core.state_encoder, core.extrinsics_encoder
-        core.action_encoder = nn.Linear(spec.action_dim, spec.width)
-        vjepa2_ac.trunc_normal_(core.action_encoder.weight, std=core.init_std)
-        nn.init.zeros_(core.action_encoder.bias)
+        del core.extrinsics_encoder
+        if spec.state_input == "learned_constant":
+            del core.state_encoder
+        if spec.action_dim == 2:   # v7：换成新的 Linear(2, 宽)，构造顺序与随机数消耗不变
+            core.action_encoder = nn.Linear(spec.action_dim, spec.width)
+            vjepa2_ac.trunc_normal_(core.action_encoder.weight, std=core.init_std)
+            nn.init.zeros_(core.action_encoder.bias)
         core.attn_mask = None
         self.core = core
-        self.state_token = nn.Parameter(torch.zeros(spec.width))
+        if spec.state_input == "learned_constant":
+            self.state_token = nn.Parameter(torch.zeros(spec.width))
+
+    @property
+    def true_state(self) -> bool:
+        return self.spec.state_input == "true_state"
+
+    def replaced_encoders(self) -> tuple[str, ...]:
+        """官方权重里不载入的编码器（09 §6.2）：extrinsics 总是；2 维时 action_encoder；learned_constant 时 state_encoder。"""
+        return tuple(name for name, swapped in (("action_encoder", self.spec.action_dim == 2),
+                                                ("state_encoder", not self.true_state), ("extrinsics_encoder", True)) if swapped)
 
     # ---- 官方权重 ----
     def load_official(self, state: dict) -> dict:
-        """从 vjepa2-ac-vitg.pt 的 predictor 状态载入；除被替换的动作/状态/外参编码器外，键必须一一对应。"""
-        if self.spec != OFFICIAL:
+        """从 vjepa2-ac-vitg.pt 的 predictor 状态载入；除被替换的编码器（replaced_encoders）外，键必须一一对应、形状相同。"""
+        if not is_official_scale(self.spec):
             raise ValueError("only the official-scale spec can load official weights")
         cleaned = {}
         for key, value in state.items():
@@ -90,9 +130,11 @@ class ACPredictor(nn.Module):
                 if key.startswith(prefix):
                     key = key[len(prefix):]
             cleaned[key] = value
-        replaced = {k for k in cleaned if k.split(".")[0] in ("action_encoder", "state_encoder", "extrinsics_encoder")}
+        swapped = self.replaced_encoders()
+        replaced = {k for k in cleaned if k.split(".")[0] in swapped}
         own = self.core.state_dict()
-        missing = sorted(set(own)-set(cleaned)-{"action_encoder.weight", "action_encoder.bias"})
+        fresh = {k for k in own if k.split(".")[0] in swapped}   # 2 维时新建的 action_encoder
+        missing = sorted(set(own)-set(cleaned)-fresh)
         unexpected = sorted(set(cleaned)-set(own)-replaced)
         if missing or unexpected:
             raise RuntimeError(f"official AC checkpoint key mismatch: missing={missing[:5]} unexpected={unexpected[:5]}")
@@ -100,19 +142,33 @@ class ACPredictor(nn.Module):
         if bad:
             raise RuntimeError(f"official AC checkpoint shape mismatch: {bad[:5]}")
         self.core.load_state_dict({k: v for k, v in cleaned.items() if k not in replaced}, strict=False)
-        with torch.no_grad():
-            self.state_token.copy_(cleaned["state_encoder.bias"].to(self.state_token))
-        return dict(loaded=len(cleaned)-len(replaced), replaced=sorted(replaced),
-                    note="action_encoder 7→2 随机初始化；state token 用官方 state_encoder.bias 初始化")
+        if not self.true_state:
+            with torch.no_grad():
+                self.state_token.copy_(cleaned["state_encoder.bias"].to(self.state_token))
+        if self.spec.action_dim == 2:
+            note = "action_encoder 7→2 随机初始化；state token 用官方 state_encoder.bias 初始化"   # v7 原文
+        elif self.true_state:
+            note = "action_encoder、state_encoder 载入官方权重（7 维官方输入）；extrinsics_encoder 不用"
+        else:
+            note = "action_encoder 载入官方权重（7 维）；state token 用官方 state_encoder.bias 初始化"
+        return dict(loaded=len(cleaned)-len(replaced), replaced=sorted(replaced), note=note)
 
     # ---- 前向 ----
-    def predict_frames(self, context: Tensor, actions: Tensor, height: int, width: int) -> Tensor:
-        """context [B,T,N,E]（已 LN）、actions [B,T,2] → 每个位置的下一帧预测 [B,T,N,E]（已 LN）。"""
+    def predict_frames(self, context: Tensor, actions: Tensor, height: int, width: int, states: Tensor | None = None) -> Tensor:
+        """context [B,T,N,E]（已 LN）、actions [B,T,m] → 每个位置的下一帧预测 [B,T,N,E]（已 LN）。
+        true_state 时 states [B,T,7]（模型精度，物理单位）给每帧的状态 token；learned_constant 时 states 必须为 None。"""
         core = self.core
         b, t, n, e = context.shape
         x = core.predictor_embed(context)
         a = core.action_encoder(actions)[:, :, None]
-        s = self.state_token.to(x.dtype).expand(b, t, 1, -1)
+        if self.true_state:
+            if states is None or states.shape != (b, t, 7):
+                raise ValueError("true_state AC needs states [B, T, 7] matching the context frames")
+            s = core.state_encoder(states)[:, :, None]
+        else:
+            if states is not None:
+                raise ValueError("learned_constant AC takes no states")
+            s = self.state_token.to(x.dtype).expand(b, t, 1, -1)
         x = torch.cat([a, s, x], dim=2).flatten(1, 2)
         mask = vjepa2_ac.build_action_block_causal_attention_mask(t, height, width, add_tokens=2).to(x.device)
         for block in core.predictor_blocks:
@@ -121,38 +177,87 @@ class ACPredictor(nn.Module):
         x = core.predictor_proj(core.predictor_norm(x))
         return F.layer_norm(x, (e,))
 
-    def rollout(self, z0: Tensor, actions: Tensor, height: int, width: int) -> Tensor:
-        """z0 [B,N,E]（已 LN），actions [B,K,2] → K 步自回归预测 [B,K,N,E]。"""
+    def rollout(self, z0: Tensor, actions: Tensor, height: int, width: int, states: Tensor | None = None) -> Tensor:
+        """z0 [B,N,E]（已 LN），actions [B,K,m] → K 步自回归预测 [B,K,N,E]。true_state 时 states [B,K,7] 是第 0…K−1 帧的状态。"""
         frames = [z0]
         for k in range(actions.shape[1]):
-            out = self.predict_frames(torch.stack(frames, 1), actions[:, :k+1], height, width)
+            out = self.predict_frames(torch.stack(frames, 1), actions[:, :k+1], height, width,
+                                      None if states is None else states[:, :k+1])
             frames.append(out[:, -1])
         return torch.stack(frames[1:], 1)
 
-    def forward(self, raw: Tensor, controls: ActionSegments, duration: Tensor, grid: GridSpec) -> Tensor:
+    def _autocast(self, raw: Tensor):
+        # 官方规模在 GPU 上用 bf16（与官方训练 dtype 一致）；输出转回 float32 交给共同的 JEPA 距离
+        return torch.autocast("cuda", dtype=torch.bfloat16, enabled=raw.device.type == "cuda" and is_official_scale(self.spec))
+
+    def _check_start_state(self, start_state, batch: int) -> Tensor | None:
+        if not self.true_state:
+            if start_state is not None:
+                raise ValueError("learned_constant AC takes no start_state")
+            return None
+        if (not isinstance(start_state, Tensor) or start_state.shape != (batch, 7) or start_state.dtype != torch.float64
+                or start_state.device.type != "cpu" or not torch.isfinite(start_state).all()):
+            raise ValueError("true_state AC needs start_state as finite CPU float64 [B, 7] (physical units)")
+        return start_state
+
+    def forward(self, raw: Tensor, controls: ActionSegments, duration: Tensor, grid: GridSpec, *,
+                start_state: Tensor | None = None) -> Tensor:
         if raw.ndim != 3 or raw.shape[1] != grid.height*grid.width or raw.shape[2] != self.encoder_dim:
             raise ValueError("raw must be [B, grid tokens, encoder_dim]")
         validate_action_segments(controls, query_duration=duration)
         if controls.u_values.shape[0] != raw.shape[0] or duration.shape != (raw.shape[0],):
             raise ValueError("controls/duration batch must match raw")
+        if controls.control_spec.action_dim != self.spec.action_dim:
+            raise ValueError("control channels must match the AC action_dim")
+        state0 = self._check_start_state(start_state, raw.shape[0])
         d = duration.detach().cpu().double()
-        if torch.any(d <= 0) or torch.any((d*2) != (d*2).round()):
+        if torch.any(d <= 0) or not torch.isfinite(d).all():
+            raise ValueError("V-JEPA 2-AC rollout needs positive finite control cycles")
+        if self.spec.action_dim == 2 and torch.any((d*2) != (d*2).round()):
             raise ValueError("V-JEPA 2-AC rollout needs positive integer or half-integer control cycles")
         steps = int(math.ceil(float(d.max())))
-        actions = tick_actions(controls, steps).to(raw)
+        if self.spec.action_dim == 2:
+            actions, states = tick_actions(controls, steps).to(raw), None
+        else:
+            physical = physical_tick_actions(controls, steps)                          # CPU float64 [B,K,7]
+            actions = physical.to(raw)
+            states = None if state0 is None else integrate_states(state0, physical[:, :-1]).to(raw)
         z0 = F.layer_norm(raw, (self.encoder_dim,))
-        # 官方规模在 GPU 上用 bf16（与官方训练 dtype 一致）；输出转回 float32 交给共同的 JEPA 距离
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=raw.device.type == "cuda" and self.spec == OFFICIAL):
-            preds = self.rollout(z0, actions, grid.height, grid.width).float()
+        with self._autocast(raw):
+            preds = self.rollout(z0, actions, grid.height, grid.width, states).float()
         rows = []
         for i, value in enumerate(d.tolist()):
             k = int(math.floor(value))
             if value == k:
                 rows.append(preds[i, k-1])
-            else:   # 半整数：相邻两步平均（只用于 TCD 的半程查询）
-                lower = z0[i] if k == 0 else preds[i, k-1]
+                continue
+            lower = z0[i] if k == 0 else preds[i, k-1]
+            if self.spec.action_dim == 2:   # 半整数：相邻两步平均（只用于 TCD 的半程查询）
                 rows.append(.5*(lower+preds[i, k]))
+            else:                           # 7 维：线性插值，r = t − ⌊t⌋（半整数时就是 v7 的平均）
+                r = value-k
+                rows.append((1-r)*lower+r*preds[i, k])
         return torch.stack(rows)
+
+    def small_steps(self, raw: Tensor, actions: Tensor, start_state: Tensor | None, grid: GridSpec) -> Tensor:
+        """原始帧率评测的小步前向（10 §8.4，S11b 的 ac_steps）：raw [B,N,E]，actions 物理单位 CPU float64 [B,n,7]
+        （每个小步的位姿差，不除以 δ），start_state 是这次调用起点的状态 CPU float64 [B,7]（learned_constant 时 None）。
+        连续 n 个小步自回归，状态按 compute_new_pose 积分；返回第 n 步的预测 [B,N,E] float32（已 LN）。"""
+        if self.spec.action_dim != 7:
+            raise ValueError("small steps are a DROID (7-dimensional) forward")
+        if raw.ndim != 3 or raw.shape[1] != grid.height*grid.width or raw.shape[2] != self.encoder_dim:
+            raise ValueError("raw must be [B, grid tokens, encoder_dim]")
+        b = raw.shape[0]
+        if (not isinstance(actions, Tensor) or actions.dtype != torch.float64 or actions.device.type != "cpu"
+                or actions.ndim != 3 or actions.shape[0] != b or actions.shape[1] < 1 or actions.shape[2] != 7
+                or not torch.isfinite(actions).all()):
+            raise ValueError("small-step actions must be finite CPU float64 [B, n>=1, 7] (physical units)")
+        state0 = self._check_start_state(start_state, b)
+        states = None if state0 is None else integrate_states(state0, actions[:, :-1]).to(raw)
+        z0 = F.layer_norm(raw, (self.encoder_dim,))
+        with self._autocast(raw):
+            preds = self.rollout(z0, actions.to(raw), grid.height, grid.width, states).float()
+        return preds[:, -1]
 
 
 def tick_actions(controls: ActionSegments, steps: int) -> Tensor:
@@ -169,11 +274,32 @@ def tick_actions(controls: ActionSegments, steps: int) -> Tensor:
     return torch.einsum("bkj,bjm->bkm", weight.to(u), u)
 
 
+def physical_tick_actions(controls: ActionSegments, steps: int) -> Tensor:
+    """7 维的动作 token（01 §5.4）：每个 tick 的时间平均 × scale + offset → 官方物理单位，CPU float64 [B, steps, m]。"""
+    spec = controls.control_spec
+    u = tick_actions(controls, steps).detach().to("cpu", torch.float64)
+    scale = torch.tensor(spec.scale, dtype=torch.float64)
+    offset = torch.tensor(spec.offset, dtype=torch.float64)
+    return u*scale+offset
+
+
+def integrate_states(start_state: Tensor, actions: Tensor) -> Tensor:
+    """第 0…n 帧的状态（09 §6.2）：s_0 = start_state，s_{k+1} = compute_new_pose(s_k, a_k)；CPU float64。
+    start_state [B,7]，actions [B,n,7]（物理单位）→ [B, n+1, 7]。"""
+    from .droid.poses import compute_new_pose
+    state = start_state.to("cpu", torch.float64)[:, None]
+    out = [state]
+    for k in range(actions.shape[1]):
+        state = compute_new_pose(state, actions[:, k:k+1].to("cpu", torch.float64))
+        out.append(state)
+    return torch.cat(out, 1)
+
+
 def parameter_count(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
 def describe(condition: str) -> dict:
     spec = spec_for(condition)
-    return dict(condition=condition, spec=asdict(spec), init="official_checkpoint" if condition == "vjepa2_ac" else "scratch",
+    return dict(condition=condition, spec=spec_snapshot(spec), init="official_checkpoint" if condition == "vjepa2_ac" else "scratch",
                 checkpoint_url=OFFICIAL_CHECKPOINT_URL if condition == "vjepa2_ac" else None)

@@ -258,13 +258,18 @@ def test_transformer_and_koopman_families(tmp_path, stubs):
 
 
 def test_ac_family_snapshot():
-    """AC 只核快照（不建模型）：schema、条件、spec 等于 ac_baseline.spec_for。"""
+    """AC 只核快照（不建模型）：schema、条件、spec 等于 ac_baseline.spec_for 的快照。
+    S08b：v7 检查点里的 spec 是加 state_input 字段之前的 asdict，等于现在的 `spec_snapshot`（09 §6.2）；
+    带上 state_input 的快照不是 v7 写的，也要拒。"""
     spec = ac_baseline.spec_for("vjepa2_ac_small")
     model = SimpleNamespace(spec=spec)
-    payload = dict(schema=v7load.AC_SCHEMA, condition="vjepa2_ac_small", spec=asdict(spec), info=dict(x=1))
+    snapshot = ac_baseline.spec_snapshot(spec)
+    assert snapshot == dict(encoder_dim=1408, width=64, depth=1, heads=4, mlp_ratio=3.5, action_dim=2)
+    payload = dict(schema=v7load.AC_SCHEMA, condition="vjepa2_ac_small", spec=snapshot, info=dict(x=1))
     assert v7load._payload_family("vjepa2_ac_small", payload, model, e06_config()) == dict(
-        schema=v7load.AC_SCHEMA, condition="vjepa2_ac_small", spec=asdict(spec), info=dict(x=1))
-    for change in (dict(schema="other"), dict(condition="vjepa2_ac"), dict(spec=dict(asdict(spec), depth=spec.depth+1))):
+        schema=v7load.AC_SCHEMA, condition="vjepa2_ac_small", spec=snapshot, info=dict(x=1))
+    for change in (dict(schema="other"), dict(condition="vjepa2_ac"), dict(spec=dict(snapshot, depth=spec.depth+1)),
+                   dict(spec=asdict(spec))):
         with pytest.raises(ValueError, match="schema/condition/spec"):
             v7load._payload_family("vjepa2_ac_small", dict(payload, **change), model, e06_config())
 

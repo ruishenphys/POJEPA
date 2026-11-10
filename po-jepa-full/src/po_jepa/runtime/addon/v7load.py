@@ -103,9 +103,9 @@ def _payload_family(condition, payload, model, loss_config):
         return dict(schema=TRANSFORMER_SCHEMA, config=payload["config"], loss_config=payload["loss_config"])
     if comparison.is_ac(condition):
         from po_jepa import ac_baseline
-        spec = asdict(ac_baseline.spec_for(condition))
+        spec = ac_baseline.spec_snapshot(ac_baseline.spec_for(condition))
         if (payload.get("schema") != AC_SCHEMA or payload.get("condition") != condition
-                or payload.get("spec") != spec or spec != asdict(model.spec)):
+                or payload.get("spec") != spec or spec != ac_baseline.spec_snapshot(model.spec)):
             raise ValueError(f"{condition} checkpoint schema/condition/spec differs from ac_baseline.spec_for")
         return dict(schema=AC_SCHEMA, condition=condition, spec=payload["spec"], info=payload.get("info"))
     raise ValueError(f"condition {condition} has no checkpoint")

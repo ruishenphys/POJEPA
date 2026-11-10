@@ -109,7 +109,12 @@ class GraphSpectrum(nn.Module):
 
     q [16,64] 与两个标量带宽为 float32 持久 buffer，无可训练参数。
     每次重新构图，不缓存 X/W；Q 专属种子与模型全局 RNG 分离。
+    `eig_backend`、`eig_threads` 是普通类属性（S08b，09 §6.3）：不是配置字段、不是 buffer，不进 `_model_config` 快照和
+    state_dict；默认 cpu_batched 走 v7 原来的 eigh。DROID 的条件工厂在实例上改写。
     """
+
+    eig_backend: str = "cpu_batched"
+    eig_threads: int | None = None
 
     def __init__(self, config: GraphConfig) -> None:
         """专属 CPU double 正态→薄 QR→符号规范→float32 Q。
@@ -256,7 +261,12 @@ class GraphSpectrum(nn.Module):
             model_device = torch.device("cuda", index)
         with torch.no_grad():
             matrix = laplacian.detach()
-            values, vectors = torch.linalg.eigh(matrix, UPLO="L")
+            if self.eig_backend == "cpu_batched":   # v7 原来那一行（默认）
+                values, vectors = torch.linalg.eigh(matrix, UPLO="L")
+            else:                                   # 09 §6.3 求谱后端（S08b）
+                from . import spectral_backends
+                values, vectors = spectral_backends.eigh(matrix, self.eig_backend, threads=self.eig_threads,
+                                                         device=model_device)
             if not torch.isfinite(values).all() or not torch.isfinite(vectors).all():
                 raise ValueError("eigensolver must return finite eigenpairs")
             if torch.any(values < -atol) or torch.any(values > 2+atol+2*rtol):
