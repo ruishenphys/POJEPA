@@ -34,6 +34,15 @@ S25f：--stage readout 排 tools/state_readout.py 的探针拟合（每个场景
 读出和 VPT、反事实预测（3 个种子 × 各条件），以及 tools/modal_spectrum.py 的模态频率对照（只排线性场景
 advection_diffusion、spring_chain、wave 里在 --scenes 中的，只排 PO-JEPA 条件）。要用 --stage full 的主实验缓存和模型、
 --stage long 的长时程缓存，本文件不编码、不训练。
+
+S26a：ICML 计划的 N1 基线和 N2 消融就是仿真补跑的 5 个条件（ADDON_CONDITIONS：po_jepa_time_only、po_jepa_space_only、
+transformer_consistency、fixed_fourier、koopman；08-conditions.md）。它们默认不进 v8 任务表（Jerry 2026-11-10 定：可选）：
+  python tools/make_v8_jobs.py --stage addon       > jobs-v8-addon.txt        # full 的 A–C 段之后：补跑标定、检查、训练+评测
+  python tools/make_v8_jobs.py --stage addon-pilot > jobs-v8-addon-pilot.txt  # 同上，pilot 规模（pilot 的 A–C 段之后）
+补跑标定用本目录 run.py calibrate 写的基础标定（--base-calibration local），和 v8 的 v7 条件同一份 σ_z、λ。
+训练好以后，variants、strength、long、timing、space、readout 各阶段用 --conditions 选这 5 个条件即可评测（目录结构和 v7 条件相同）。
+注意：v8 和“v7 场景上的仿真补跑”（make_addon_jobs.py，导入 v7 标定）不能在同一份工作树里跑——两者的基础标定文件同名
+（configs/calibration/<场景>-<条数>-u<步数>.yaml），补跑标定也同名。local 模式遇到导入的 v7 标定会直接报错。
 """
 import argparse
 from pathlib import Path
@@ -43,6 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
 from po_jepa import protocols, variants  # noqa: E402
 
 CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
+# S26a：和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）；这里不导入 torch
+ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
 SEEDS = (1703, 1704, 1705)
 # 规划的真值参照（oracle）每次 CEM 的样本数：真值仿真在 CPU 上逐个跑，新场景每个 tick 贵得多
 # （gray_scott 约 60 ms、push 约 30 ms，粒子类约 3 ms），默认 64 会让 identity 那条规划任务占着 GPU 跑几个小时（S21b 实测）
@@ -60,10 +71,11 @@ def split_scene(scene):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space", "readout"), required=True)
+    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space", "readout", "addon", "addon-pilot"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
-    p.add_argument("--conditions", default=",".join(CONDITIONS), help="分布外评测和规划评哪些条件")
+    p.add_argument("--conditions", default=",".join(CONDITIONS),
+                   help="variants、strength、long、timing、space、readout 评哪些条件；可以加补跑的 5 个（S26a，要先跑 --stage addon）")
     p.add_argument("--shards", type=int, default=4, help="每个场景的编码切成几片（每片一张卡）")
     p.add_argument("--features", default="../features-v8")
     p.add_argument("--results", default="../results-v8")
@@ -80,11 +92,14 @@ def main():
     if ids and not set(ids) <= set(protocols.BY_ID):
         raise SystemExit(f"没有这些协议：{sorted(set(ids)-set(protocols.BY_ID))}")
     conditions = [c for c in a.conditions.split(",") if c]
-    if not set(conditions) <= set(CONDITIONS):
-        raise SystemExit(f"没有这些条件：{sorted(set(conditions)-set(CONDITIONS))}")
-    n, updates = (200, 2000) if a.stage == "pilot" else (2000, 10000)
-    seeds = SEEDS[:1] if a.stage == "pilot" else SEEDS
-    root = f"{a.results}/{'pilot' if a.stage == 'pilot' else 'full'}"
+    if not set(conditions) <= {*CONDITIONS, *ADDON_CONDITIONS}:
+        raise SystemExit(f"没有这些条件：{sorted(set(conditions)-{*CONDITIONS, *ADDON_CONDITIONS})}")
+    if a.stage in ("pilot", "full", "addon", "addon-pilot") and a.conditions != ",".join(CONDITIONS):
+        raise SystemExit(f"--conditions 只用于 variants、strength、long、timing、space、readout；{a.stage} 的条件是固定的")
+    pilot = a.stage in ("pilot", "addon-pilot")
+    n, updates = (200, 2000) if pilot else (2000, 10000)
+    seeds = SEEDS[:1] if pilot else SEEDS
+    root = f"{a.results}/{'pilot' if pilot else 'full'}"
     second = [s for s in scenes if s in protocols.SECOND_ORDER_SCENES]
     if second:
         print(f"# 注意：二阶场景 {','.join(second)} 按单帧复制（dup）编码，特征里看不到速度（pair 编码等 S22 探针结果，S25b 接）。")
@@ -100,6 +115,29 @@ def main():
     def ds(scene):
         system, knobs = split_scene(scene)
         return f"--system {system}" + (f" --variant {knobs}" if knobs else "") + f" --trajectories {n}"
+
+    if a.stage in ("addon", "addon-pilot"):
+        base = "pilot" if pilot else "full"
+        print(f"# S26a 补跑条件（N1 基线、N2 消融）：{', '.join(ADDON_CONDITIONS)}。")
+        print(f"# 前提：--stage {base} 的 A–C 段已在本工作树完成（特征编好、run.py calibrate 写了基础标定）；"
+              "不能和 make_addon_jobs.py（v7 场景的补跑）共用一份工作树。")
+        print(f"# ===== AC 补跑标定（GPU，每个场景 1 条，共 {len(scenes)} 条；transformer_consistency、fixed_fourier 的 λ）=====")
+        for s in scenes:
+            print(f"python run.py calibrate-addon {ds(s)} --updates {updates} --features-root {feats(s)} --base-calibration local "
+                  f"--device cuda:0 --output {root}/calibrate-addon-{name(s)}")
+        probe = scenes[min(1, len(scenes)-1)]
+        print("# ===== AC2 检查（GPU，AC 段完成后跑 1 条；每种 GPU 型号做一次）=====")
+        print(f"python run.py check-addon {ds(probe)} --updates {updates} --features-root {feats(probe)} --base-calibration local "
+              f"--device cuda:0 --output {root}/check-addon")
+        print(f"# ===== AD 训练+评测（GPU，AC 段对应场景完成后；{len(scenes)*len(seeds)*len(ADDON_CONDITIONS)} 条，互不依赖）=====")
+        for s in scenes:
+            for seed in seeds:
+                for c in ADDON_CONDITIONS:
+                    print(f"python run.py run {ds(s)} --updates {updates} --seed {seed} --condition {c} "
+                          f"--features-root {feats(s)} --device cuda:0 --output {root}/{name(s)}/seed{seed}/{c}")
+        print("# ===== AE 汇总（CPU，AD 段完成后；和 v7 条件同一张表）=====")
+        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        return
 
     if a.stage == "long":
         long = f"horizon={LONG_HORIZON}"
@@ -184,6 +222,11 @@ def main():
         print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
         return
 
+    if a.stage == "space" and "koopman" in conditions:
+        # S26a：koopman 的基底是 16×16 的，换网格时要求网格坐标等于 16→G 重采样的目标坐标（koopman.grid_basis）；空间采样的
+        # 原生网格 12×12、20×20、24×24 是 regular_grid(G, G)，对不上（20、24 边缘差 0.006–0.010），评测会直接报错。
+        # 08 §5.3 给 DROID 原生分辨率写了放宽规则（S11 才实现），仿真空间采样要不要照用另定。
+        raise SystemExit("koopman 还不能评空间采样（原生网格和 16×16 基底的重采样坐标对不上，见 08 §5.3），--conditions 里去掉 koopman")
     if a.stage == "space":
         tests = [(s, t) for s in scenes for t in protocols.SPACE_TESTS]
         print("# 前提：--stage full 的 A–D 段已完成（模型在 256、相机不动的基础场景上训练好，基础特征在 --features 下），本文件只做评测，不再训练。")

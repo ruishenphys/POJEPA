@@ -8,6 +8,7 @@
 核对项（不通过就在报告里标红，不静默合并）：
 - 同一 (数据集, 种子) 下所有条件的预登记（源码、配置、查询序列）SHA 必须一致；
 - po_jepa_full 与 po_jepa_no_consistency 的初始权重 SHA 必须一致（唯一差别是一致性项）。
+- S26a：补跑条件的初始权重按 08 §1.3 核（time_only、space_only、fixed_fourier 等于 po_jepa_full，transformer_consistency 等于 matched_transformer）。
 """
 import argparse
 from collections import defaultdict
@@ -21,8 +22,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/"src"))
 from po_jepa.runtime import plots  # noqa: E402
 
-CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
+V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
+# S26a：v8 任务表 --stage addon 的补跑条件（N1 基线、N2 消融），和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）。
+# 它们和 v7 条件进同一张表；某个 (数据集, 步数, 种子) 一个补跑条件都没有时不算缺失（补跑是可选的）。
+ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
+CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
 REFERENCES = CONDITIONS[1:]
+# 08 §1.3：同一数据集、同一种子下补跑条件的初始权重必须和这个 v7 条件相同（koopman 没有对照）
+INITIAL_SAME_AS = dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full", fixed_fourier="po_jepa_full",
+                       transformer_consistency="matched_transformer")
 POINT_METRICS = ("future_jepa_distance", "tcd_normalized", "delta_act")
 PAIR_METRICS = ("scd_normalized",)
 
@@ -118,6 +126,9 @@ def main():
         f, n = by_c.get("po_jepa_full"), by_c.get("po_jepa_no_consistency")
         if f and n and f["report"]["initial_model_sha256"] != n["report"]["initial_model_sha256"]:
             problems.append(dict(dataset=dataset, updates=updates, seed=seed, problem="full 与 no-consistency 初始权重不同"))
+        for c, ref in INITIAL_SAME_AS.items():
+            if c in by_c and ref in by_c and by_c[c]["report"]["initial_model_sha256"] != by_c[ref]["report"]["initial_model_sha256"]:
+                problems.append(dict(dataset=dataset, updates=updates, seed=seed, problem=f"{c} 与 {ref} 初始权重不同（08 §1.3）"))
         for c, j in by_c.items():
             table.append(dict(dataset=dataset, updates=updates, seed=seed, condition=c, **condition_means(j),
                               best_step=(j["report"].get("best") or {}).get("step"),
@@ -128,7 +139,7 @@ def main():
                     comparisons.append(dict(dataset=dataset, updates=updates, seed=seed, reference=ref,
                                             future=paired(f, by_c[ref]), delta_act=paired(f, by_c[ref], "delta_act")))
     missing = [dict(dataset=d, updates=u, seed=s, condition=c) for (d, u, s), by_c in sorted(groups.items())
-               for c in CONDITIONS if c not in by_c]
+               for c in (CONDITIONS if set(by_c) & set(ADDON_CONDITIONS) else V7_CONDITIONS) if c not in by_c]
 
     # 跨种子
     across = []

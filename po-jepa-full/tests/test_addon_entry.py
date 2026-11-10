@@ -90,7 +90,8 @@ def test_calibrate_addon_writes_yaml_and_records(small, tmp_path, one_thread):
         assert set(entry_value) == calibration.ENTRY_KEYS and entry_value["rho"] == 1.0
         assert entry_value["source"] == "calibrate-addon：JEPA 预训练 3 步后，2 批梯度范数的中位数；calibrate-van_der_pol"
         record = json.loads((output/f"calibration-{condition}.json").read_text(encoding="utf-8"))
-        assert set(record) == V7_KEYS|{"condition", "v7_calibration_sha256", "addon_calibration_file"}
+        assert set(record) == V7_KEYS|{"condition", "v7_calibration_sha256", "addon_calibration_file", "base_calibration"}
+        assert record["base_calibration"] == "v7-import"
         assert record["condition"] == condition and len(record["per_batch"]) == 2 and len(record["pretrain_history"]) == 3
         assert [r["step"] for r in record["pretrain_history"]] == [1, 2, 3] and len(record["initial_state"]["per_batch"]) == 2
         rows = record["per_batch"]
@@ -318,7 +319,8 @@ def test_check_addon_timed_guards(v7, monkeypatch):
 # ---------- 入口 ----------
 
 def args(command, tmp_path, **changes):
-    values = dict(command=command, features_root=tmp_path/"features", device="cuda:0", output=tmp_path/"out"/"run", seed=1703)
+    values = dict(command=command, features_root=tmp_path/"features", device="cuda:0", output=tmp_path/"out"/"run", seed=1703,
+                  base_calibration="v7-import")
     values.update(changes)
     return Namespace(**values)
 
@@ -329,8 +331,8 @@ def stubs(v7, monkeypatch):
     monkeypatch.setattr(w, "verify_bundle", lambda: "fictional-bundle")
     monkeypatch.setattr(w.environment, "verify_versions", lambda: dict(fictional=True))
 
-    def fake_calibrate(features, output, device):
-        calls.append(("calibrate", device.type))
+    def fake_calibrate(features, output, device, base):
+        calls.append(("calibrate", device.type, base))
         path = calibration.addon_calibration_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fictional: 1\n", encoding="utf-8")
@@ -349,9 +351,9 @@ def test_entry_calibrate_addon_completes(stubs, tmp_path):
     assert entry.execute(args("calibrate-addon", tmp_path, device="cpu")) == 0
     done = json.loads((tmp_path/"out/run/COMPLETE.json").read_text(encoding="utf-8"))
     path = calibration.addon_calibration_path()
-    assert done == dict(command="calibrate-addon", manifest_sha256="fictional-bundle", addon_calibration_file=str(path),
+    assert done == dict(command="calibrate-addon", manifest_sha256="fictional-bundle", base_calibration="v7-import", addon_calibration_file=str(path),
                         addon_calibration_sha256=cache.file_sha(path), scientific_conclusions_verified=False)
-    assert stubs == [("calibrate", "cpu")] and not (tmp_path/"out/run/environment.json").exists()
+    assert stubs == [("calibrate", "cpu", "v7-import")] and not (tmp_path/"out/run/environment.json").exists()
 
 
 def test_entry_check_addon_completes(stubs, tmp_path):
@@ -359,7 +361,7 @@ def test_entry_check_addon_completes(stubs, tmp_path):
     run = tmp_path/"out/run"
     assert json.loads((run/"environment.json").read_text()) == dict(fictional=True)
     done = json.loads((run/"COMPLETE.json").read_text(encoding="utf-8"))
-    assert done == dict(command="check-addon", manifest_sha256="fictional-bundle", check_sha256=cache.file_sha(run/"check-addon.json"),
+    assert done == dict(command="check-addon", manifest_sha256="fictional-bundle", base_calibration="v7-import", check_sha256=cache.file_sha(run/"check-addon.json"),
                         real_device=dict(device="cuda:0"), scientific_conclusions_verified=False)
     assert stubs == [("addon",), ("check", "cuda:0")]
 
@@ -381,7 +383,7 @@ def test_entry_failures(stubs, tmp_path, monkeypatch):
 
 
 def test_entry_failure_in_work_and_bundle_change(stubs, v7, tmp_path, monkeypatch):
-    monkeypatch.setattr(calibrate, "calibrate_addon", lambda *a: (_ for _ in ()).throw(RuntimeError("fictional work failure")))
+    monkeypatch.setattr(calibrate, "calibrate_addon", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fictional work failure")))
     with pytest.raises(RuntimeError):
         entry.execute(args("calibrate-addon", tmp_path, device="cpu", output=tmp_path/"c/run"))
     assert json.loads((tmp_path/"c/run/FAILED.json").read_text())["stage"] == "calibrate-addon"

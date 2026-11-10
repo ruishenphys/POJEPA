@@ -22,6 +22,9 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, choices=(1703,), default=1703, help="只用种子 1703（三个种子共用一组 λ，和 v7 的 calibrate 相同）")
+    parser.add_argument("--base-calibration", choices=("v7-import", "local"), default="v7-import",
+                        help="S26a：基础标定的来源。v7-import（默认）：tools/import_v7_calibration.py 导入的 v7 标定；"
+                             "local：本目录 run.py calibrate 写的（v8 任务表 --stage addon）")
     args = parser.parse_args(argv)
     from ..checks import SEED_ENV
     os.environ[SEED_ENV] = str(args.seed)
@@ -46,10 +49,10 @@ def execute(args):
             cache._write_json(output/"environment.json", environment.verify_versions())
         stage = "calibration"
         workflow.require_calibrated_weights(swept=False)
-        calibrate.require_imported_v7_calibration()
+        calibrate.require_base_calibration(args.base_calibration)
         if args.command == "calibrate-addon":
             stage = "calibrate-addon"
-            calibrate.calibrate_addon(Path(args.features_root), output, device)
+            calibrate.calibrate_addon(Path(args.features_root), output, device, base=args.base_calibration)
             path = calibration.addon_calibration_path()
             extra = dict(addon_calibration_file=calibrate._relative(path), addon_calibration_sha256=cache.file_sha(path))
         else:
@@ -60,7 +63,7 @@ def execute(args):
             extra = dict(check_sha256=cache.file_sha(output/"check-addon.json"), real_device=report["hardware"])
         if workflow.verify_bundle() != bundle:
             raise ValueError("source bundle changed during run")
-        cache._write_json(output/"COMPLETE.json", dict(command=args.command, manifest_sha256=bundle, **extra,
+        cache._write_json(output/"COMPLETE.json", dict(command=args.command, manifest_sha256=bundle, base_calibration=args.base_calibration, **extra,
                                                        scientific_conclusions_verified=False))
         return 0
     except Exception as error:

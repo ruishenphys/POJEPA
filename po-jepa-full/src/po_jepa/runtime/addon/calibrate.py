@@ -50,6 +50,47 @@ def require_imported_v7_calibration() -> str:
     return digest
 
 
+# S26a：补跑标定所依据的基础标定（σ_z、λ）从哪来。v7-import：v7 树（0ac45fe）的标定由 tools/import_v7_calibration.py 导入
+# （16 §3.1，补跑在 v7 的 5 个场景上，默认）；local：本目录自己的 run.py calibrate 写的（v8 任务表的 --stage addon：
+# 补跑条件和 v8 的 v7 条件用同一份标定，场景含 gray_scott、push 等 v7 没有的）。
+BASE_CALIBRATIONS = ("v7-import", "local")
+LOCAL_HEADER = "# v7 标定（run.py calibrate 自动写入，勿手改）："   # workflow.write_v7_calibration 的首行前缀
+
+
+def require_local_calibration() -> str:
+    """S26a：local 模式的基础标定是本目录 run.py calibrate 写的那份：首行是 workflow.write_v7_calibration 的表头
+    （数据集 tag 和步数都对得上），sigma_z、time_weight、space_weight 是有限正数，且不是导入的 v7 标定
+    （IMPORTED.json 里有这个文件名的记录就拒绝：同一个文件不能两种来源混用）。返回这个文件的 SHA。"""
+    path = check.v7_calibration_path()
+    if not path.exists():
+        raise ValueError(f"缺少基础标定 {path}：local 模式要先在本目录跑 python run.py calibrate（v8 任务表的 C 段）")
+    record = path.parent/IMPORT_RECORD
+    if record.exists() and path.name in read(record).get("files", {}):
+        raise ValueError(f"{path.name} 是从 v7 导入的（{IMPORT_RECORD} 有记录），不是本目录 run.py calibrate 写的：local 模式不收；"
+                         "v7 场景的补跑用 --base-calibration v7-import，v8 的补跑请在另一份工作树里跑")
+    text = path.read_text(encoding="utf-8")
+    header = f"{LOCAL_HEADER}{data.datasets.active().tag}，{check.v7_updates()} 步"
+    if text.split("\n", 1)[0] != header:
+        raise ValueError(f"{path.name} 的首行不是 run.py calibrate 写的表头（应为 {header!r}）：local 模式只收本目录 calibrate 的输出")
+    value = yaml.safe_load(text)
+    if type(value) is not dict:
+        raise ValueError(f"{path.name} 不是 YAML 映射")
+    for name in ("sigma_z", "time_weight", "space_weight"):
+        number = value.get(name)
+        if type(number) not in (int, float) or not math.isfinite(number) or number <= 0:
+            raise ValueError(f"{path.name} 的 {name} 必须是有限正数，现在是 {number!r}（run.py calibrate 没跑完？）")
+    return cache.file_sha(path)
+
+
+def require_base_calibration(base: str) -> str:
+    """S26a：按来源核基础标定，返回它的 SHA。v7-import 就是 require_imported_v7_calibration（行为不变）。"""
+    if base == "v7-import":
+        return require_imported_v7_calibration()
+    if base == "local":
+        return require_local_calibration()
+    raise ValueError(f"base calibration must be one of {BASE_CALIBRATIONS}, got {base!r}")
+
+
 def _jepa_only(condition, device):
     """16 §3.2 第 2 步，S10b §4.1：返回 (模型, 两个权重为 0 的损失配置)。"""
     if condition == "fixed_fourier":
@@ -143,15 +184,16 @@ def _publish(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def calibrate_addon(features, output, device) -> dict:
-    """16 §3.2：output 是已建好的空目录。依次标定 CALIBRATED_CONDITIONS，全部完成后写记录和补跑标定文件，返回写入的内容。"""
+def calibrate_addon(features, output, device, base="v7-import") -> dict:
+    """16 §3.2：output 是已建好的空目录。依次标定 CALIBRATED_CONDITIONS，全部完成后写记录和补跑标定文件，返回写入的内容。
+    base（S26a）是基础标定的来源（BASE_CALIBRATIONS）；记录里的 v7_calibration_* 指的就是这份基础标定，另记 base_calibration。"""
     path = calibration.addon_calibration_path()
     if path.exists():
         raise ValueError(f"补跑标定文件已存在：{path}。它可能已被训练任务用过，不覆盖；确实要重标定请先告诉 Jerry")
     v7_file = check.v7_calibration_path()
-    v7_sha = require_imported_v7_calibration()
+    v7_sha = require_base_calibration(base)
     results = {c: calibrate_condition(c, Path(features), device) for c in calibration.CALIBRATED_CONDITIONS}
-    if require_imported_v7_calibration() != v7_sha:
+    if require_base_calibration(base) != v7_sha:
         raise ValueError("v7 calibration file changed during calibrate-addon")
     protocol = check.load_protocol()
     source = (f"calibrate-addon：JEPA 预训练 {protocol['calibration']['pretrain_updates']} 步后，"
@@ -165,7 +207,7 @@ def calibrate_addon(features, output, device) -> dict:
         raise ValueError("add-on calibration YAML does not round-trip")
     for c, r in results.items():
         cache._write_json(output/f"calibration-{c}.json", dict(r, v7_calibration_file=_relative(v7_file),
-            v7_calibration_sha256=v7_sha, addon_calibration_file=_relative(path), v4_overlay_sha256_after=cache.file_sha(OVERLAY)))
+            v7_calibration_sha256=v7_sha, base_calibration=base, addon_calibration_file=_relative(path), v4_overlay_sha256_after=cache.file_sha(OVERLAY)))
     _publish(path, text)
     try:
         for c in calibration.CALIBRATED_CONDITIONS:      # 训练任务读这个文件时的核对（S10b §4.2）必须通过
