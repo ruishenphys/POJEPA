@@ -661,3 +661,22 @@ def _summarize():
     spec = importlib.util.spec_from_file_location("summarize_v7", ROOT/"tools/summarize_v7.py")
     s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
     return s
+
+
+@pytest.mark.parametrize("all_missing", [False, True])
+def test_summarize_long_first_report_without_definitions(tmp_path, all_missing):
+    """S25-fix1 修改（Codex 复审 P3-1）：按文件顺序第一份报告缺 definitions 时原来整个汇总 KeyError；
+    现在取其余报告的定义，缺定义的那一对记进 incomplete；全都缺时这一组整体记进 incomplete。"""
+    s = _summarize()
+    full, ref = _long_report("po_jepa_full", 1703, .1), _long_report("identity", 1703, .3)
+    del full["definitions"]
+    if all_missing:
+        del ref["definitions"]
+    (tmp_path/"a.json").write_text(json.dumps(full)); (tmp_path/"b.json").write_text(json.dumps(ref))
+    out = s.long_reports(tmp_path)
+    assert not out["comparisons"]
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == ("全部比较" if all_missing else "po_jepa_full − identity")
+    assert any("definitions" in p for x in inc["per_seed"] for p in x["problems"])
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
+    assert "⚠ 长时程" in md

@@ -764,3 +764,23 @@ def test_summarize_timing_seed_sd(tmp_path):
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
                           timing=out, missing=[], duplicates=[]))
     assert "跨种子 SD" in md and "1.41421" in md
+
+
+@pytest.mark.parametrize("all_missing", [False, True])
+def test_summarize_timing_first_report_without_definitions(tmp_path, all_missing):
+    """S25-fix1 修改（Codex 复审 P3-1）：按文件顺序第一份报告缺 definitions 时原来整个汇总 KeyError；
+    现在取其余报告的定义，缺定义的那一对记进 incomplete；全都缺时这一组整体记进 incomplete。"""
+    s = _summarize()
+    full = _timing_report("po_jepa_full", 1703, [1., 1., 1., 100.])
+    ref = _timing_report("matched_transformer", 1703, [2., 2., 2., 2.])
+    del full["definitions"]
+    if all_missing:
+        del ref["definitions"]
+    (tmp_path/"a.json").write_text(json.dumps(full)); (tmp_path/"b.json").write_text(json.dumps(ref))
+    out = s.timing_reports(tmp_path)
+    assert not out["comparisons"]
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == ("全部比较" if all_missing else "po_jepa_full − matched_transformer")
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
+                          timing=out, missing=[], duplicates=[]))
+    assert "⚠ 时间采样" in md

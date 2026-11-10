@@ -257,6 +257,22 @@ def pairing_problems(mine, other, key_of, row_fields):
     return a, b, problems
 
 
+def _group_steps(group, key):
+    """S25-fix1 修改（Codex 复审 P3-1）：一组报告的评测定义（definitions[key]）取第一份有合法定义的报告，
+    原来直接索引按文件顺序的第一份，它缺 definitions 时整个汇总 KeyError（第二份缺时才进 incomplete，结果依赖文件顺序）。
+    都没有时返回 None，调用方把这组记进 incomplete。缺定义的报告在配对时由 pairing_problems 报出。"""
+    for r in group.values():
+        d = r.get("definitions")
+        if isinstance(d, dict) and isinstance(d.get(key), list) and d[key]:
+            return d[key]
+    return None
+
+
+def _no_definitions(dataset, updates, group, key):
+    return dict(dataset=dataset, updates=updates, comparison="全部比较",
+                per_seed=[dict(seed=seed, problems=[f"报告缺 definitions.{key}"]) for (_, seed) in sorted(group)])
+
+
 def long_reports(root):
     """S25c tools/long_rollout.py 的结果（kind = long_rollout）：每个 (长时程测试集, 条件) 跨种子平均；
     full − 对照按同编号轨迹配对（先每个种子内逐条相减取平均，再跨种子平均）。配对前用 pairing_problems 核两份报告
@@ -281,7 +297,9 @@ def long_reports(root):
         by[key][sub] = r
     rows, comparisons, incomplete = [], [], []
     for (dataset, updates), group in sorted(by.items()):
-        times = group[next(iter(group))]["definitions"]["direct_times"]
+        times = _group_steps(group, "direct_times")
+        if times is None:
+            incomplete.append(_no_definitions(dataset, updates, group, "direct_times")); continue
         for c in CONDITIONS:
             seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
             if seeds:
@@ -345,7 +363,9 @@ def timing_reports(root):
         return statistics.stdev(xs) if len(xs) == len(seeds) > 1 else None
 
     for (dataset, updates), group in sorted(by.items()):
-        steps = group[next(iter(group))]["definitions"]["frame_steps"]
+        steps = _group_steps(group, "frame_steps")
+        if steps is None:
+            incomplete.append(_no_definitions(dataset, updates, group, "frame_steps")); continue
         for c in CONDITIONS:
             seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
             if seeds:
