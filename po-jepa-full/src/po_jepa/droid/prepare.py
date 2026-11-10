@@ -45,7 +45,7 @@ SCHEMA = "droid_prepared_v1"
 COMPLETE_SCHEMA = "droid_prepare_complete_v1"
 SCALE_SCHEMA = "droid_action_scale_v1"
 STATS_SCHEMA = "droid_prepare_stats_v1"
-STATS_COMPLETE_SCHEMA = "droid_prepare_stats_complete_v1"
+STATS_COMPLETE_SCHEMA = "droid_prepare_stats_complete_v2"   # v2（F1）：加 use_failures
 WORKERS = 8                             # §5：8 个进程并行
 MAX_FAILED_RATIO = 0.03                 # §6 第 3 条：任一片失败比例超过 3% 时任务失败（Jerry 2026-11-10 定，原 1%）
 INTERVAL_QUANTILES = (0.01, 0.5, 0.99)  # §6 第 3 条
@@ -645,13 +645,15 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
             if not path.is_file():
                 raise ValueError(f"{path} is missing: with data.use_failures false, prepare/stats reuses the files "
                                  f"written by the main configuration's prepare/stats; run that first")
+        _check_main_completed(root, splits_sha, scale_path, window_paths)
         scale = _read_json(scale_path)
         if scale.get("schema") != SCALE_SCHEMA or scale.get("pool", {}).get("splits_sha256") != splits_sha:
             raise ValueError(f"{scale_path} was not written from this data root's splits.json")
         for split, path in window_paths.items():
             content = _read_json(path)
-            if content.get("schema") != wn.SCHEMA or content.get("splits_sha256") != splits_sha:
-                raise ValueError(f"{path} was not written from this data root's splits.json")
+            if (content.get("schema") != wn.SCHEMA or content.get("splits_sha256") != splits_sha
+                    or content.get("split") != split):
+                raise ValueError(f"{path} was not written as the {split} windows from this data root's splits.json")
             for u, sha in content["prepared_sha256"].items():
                 if json_sha.get(u, sha) != sha:
                     raise ValueError(f"{path}: prepared {u} changed after the windows were frozen")
@@ -660,6 +662,7 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
         "config": config.name,
         "config_sha256": config.config_sha256,
         "splits_sha256": splits_sha,
+        "use_failures": config.data.use_failures,
         "action_scale_sha256": cache.file_sha(scale_path),
         "windows_sha256": {split: cache.file_sha(path) for split, path in window_paths.items()},
         "stats_sha256": cache.file_sha(stats_path),
@@ -669,6 +672,32 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
     done.with_name(done.name + PARTIAL_SUFFIX).unlink(missing_ok=True)
     cache._write_json(done, record)
     return record
+
+
+def _check_main_completed(root: Path, splits_sha: str, scale_path: Path, window_paths: dict[str, Path]) -> None:
+    """`use_failures: false` 复用共用文件之前（§6 第 1 条）：同一数据根下至少有一个主配置（`use_failures: true`）的
+    `prepare/stats` 已完成、记的是本数据根的 splits.json，且每个这样的完成记录登记的动作尺度和三份窗口的 SHA
+    都等于现在的文件。主配置写完共用文件但没写完成记录、或完成后共用文件被改动或互换，都报错。"""
+    mains = []
+    for path in sorted((root/COMPLETE_DIR).glob("stats-*.json")):
+        record = _read_json(path)
+        if (record.get("schema") == STATS_COMPLETE_SCHEMA and record.get("use_failures") is True
+                and record.get("splits_sha256") == splits_sha):
+            mains.append((path, record))
+    if not mains:
+        raise ValueError(f"no main configuration (data.use_failures true) has completed prepare/stats on this data "
+                         f"root's splits.json (no such record in {root/COMPLETE_DIR}): with data.use_failures false, "
+                         f"prepare/stats reuses the files written by the main configuration's prepare/stats; "
+                         f"run that first")
+    current = {"action_scale": cache.file_sha(scale_path),
+               **{f"windows/{split}": cache.file_sha(path) for split, path in window_paths.items()}}
+    for path, record in mains:
+        recorded = {"action_scale": record.get("action_scale_sha256"),
+                    **{f"windows/{split}": (record.get("windows_sha256") or {}).get(split) for split in window_paths}}
+        changed = sorted(k for k in current if recorded[k] != current[k])
+        if changed:
+            raise ValueError(f"shared files {changed} differ from what main configuration record {path} completed "
+                             f"with (changed after the main prepare/stats)")
 
 
 def _write_or_same(path: Path, body: bytes) -> None:

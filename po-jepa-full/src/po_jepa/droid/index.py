@@ -160,7 +160,11 @@ def list_objects(data: DataConfig, glob: str, fields: str, *, get: Getter = http
     while True:
         url = list_url(data, token, glob, fields)
         body = with_retries(lambda: _list_page(get(url), page), f"{what} page {page} ({url})", sleep=sleep)
-        items.extend(_check_item(item, data) for item in body.get("items", []))
+        for item in body.get("items", []):
+            try:
+                items.append(_check_item(item, data))
+            except ValueError as error:
+                raise ValueError(f"{what} page {page}: {error}") from error
         token = body.get("nextPageToken")
         if token is None:
             break

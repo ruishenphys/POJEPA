@@ -681,8 +681,13 @@ def test_raw_listing_rejects_bad_items_tokens_and_duplicates():
     with pytest.raises(ValueError, match=r"listing \*\*/trajectory.h5 page 1: bad or repeated nextPageToken"):
         ix.list_raw(data, get=lambda url: json.dumps(next(pages)).encode())
     no_md5 = {k: v for k, v in item.items() if k != "md5Hash"}
-    with pytest.raises(ValueError, match="md5Hash"):
+    with pytest.raises(ValueError, match=r"^listing \*\*/trajectory.h5 page 0: listing item .*md5Hash None"):
         ix.list_raw(data, get=lambda url: json.dumps({"items": [no_md5]}).encode())
+    # 坏条目在 MP4 列表的第 1 页：报错写明是哪个 glob、第几页
+    mp4 = {**item, "name": PREFIX + "a/success/x/recordings/MP4/1.mp4"}
+    pages = iter([{"items": [item]}, {"items": [mp4], "nextPageToken": "t"}, {"items": [{**mp4, "size": 1}]}])
+    with pytest.raises(ValueError, match=r"^listing \*\*/recordings/MP4/\*.mp4 page 1: listing item .*size 1 is not"):
+        ix.list_raw(data, get=lambda url: json.dumps(next(pages)).encode())
 
 
 def test_raw_listing_keeps_only_name_size_md5():

@@ -28,8 +28,8 @@ SALT = "po-jepa-droid-1.0.1-split-v1"
 SMALL = dict(id_test_scenes=3, val_scenes=2, episodes_per_scene=2, ood_quota=(2, 2, 1), shard_size=4, train_episodes=6)
 
 
-def h(kind, key):
-    return hashlib.sha256(f"{SALT}|{kind}|{key}".encode("utf-8")).hexdigest()
+def h(kind, key, salt=SALT):
+    return hashlib.sha256(f"{salt}|{kind}|{key}".encode("utf-8")).hexdigest()
 
 
 def cfg(**data):
@@ -71,9 +71,12 @@ def compute(rows=None, **data):
 
 # ---------------------------------------------------------------- §5 每一步
 
-def test_each_step_matches_hand_computation():
+@pytest.mark.parametrize("salt", [SALT, "po-jepa-droid-other-salt"])
+def test_each_step_matches_hand_computation(salt):
+    """默认盐和另一个盐：手算（用参数里的盐）的场景、场景内回合、留出实验室和训练顺序都一致。"""
     rows = world()
-    splits = compute(rows)
+    splits = compute(rows, split_salt=salt)
+    h = lambda kind, key: globals()["h"](kind, key, salt)   # noqa: E731
     selected = [e for e in rows if e["selected"]]
     by_scene = {}
     for e in selected:
@@ -100,7 +103,15 @@ def test_each_step_matches_hand_computation():
     assert splits["excluded_scene_ids"] == [3000, 4000]
     assert splits["counts"] == {"selected": len(selected), "candidate_scenes": 10, "id_test": 6, "val": 4,
                                 "ood_test": 5, "train_order": len(train), "train_failures": len(splits["train_failures"])}
-    assert splits["schema"] == "droid_splits_v1" and splits["salt"] == SALT and splits["episodes_sha256"] == "e"*64
+    assert splits["schema"] == "droid_splits_v1" and splits["salt"] == salt and splits["episodes_sha256"] == "e"*64
+
+
+def test_other_salt_changes_the_splits():
+    """换盐真的换划分（不是写死默认盐）：场景、场景内回合、留出实验室和训练顺序都变。"""
+    rows = world()
+    a, b = compute(rows), compute(rows, split_salt="po-jepa-droid-other-salt")
+    for key in ("id_test_scenes", "id_test", "ood_test", "train_order"):
+        assert a[key] != b[key], key
 
 
 def test_ood_test_follows_ood_labs_order():
@@ -271,6 +282,28 @@ def test_run_index_writes_splits_before_manifest(bucket, tmp_path):  # noqa: F81
     assert manifest["files"]["splits.json"] == ix._file_entry(directory/"splits.json")
     assert sp.load_splits(tmp_path, config) == expected
     assert expected["excluded_scene_ids"] == [] and expected["id_test_scenes"] in ([["AUTOLab", 5207831207]], [["TRI", 4242]])
+
+
+def test_run_index_writes_no_manifest_when_writing_splits_fails(bucket, tmp_path, monkeypatch):  # noqa: F811
+    """splits.json 最后换名失败：不写清单；成功时划分先于清单写。"""
+    _fill(bucket, SEVEN)
+    real_replace, order = sp.os.replace, []
+
+    def replace(src, dst):
+        if Path(dst).name == "splits.json":
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(sp.os, "replace", replace)
+    with pytest.raises(OSError, match="disk full"):
+        ix.run_index(_config(bucket), tmp_path)
+    assert not (tmp_path/"index"/"MANIFEST.json").exists() and not (tmp_path/"index"/"splits.json").exists()
+    monkeypatch.setattr(sp.os, "replace", real_replace)
+    real_write_splits, real_write_json = sp.write_splits, ix.cache._write_json
+    monkeypatch.setattr(sp, "write_splits", lambda d, v: (order.append("splits"), real_write_splits(d, v))[1])
+    monkeypatch.setattr(ix.cache, "_write_json", lambda p, v: (order.append(Path(p).name), real_write_json(p, v))[1])
+    ix.run_index(_config(bucket), tmp_path)
+    assert order == ["splits", "MANIFEST.json"]
 
 
 def test_run_index_fails_without_manifest_when_splits_fail(bucket, tmp_path):  # noqa: F811

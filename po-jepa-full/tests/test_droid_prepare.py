@@ -760,8 +760,8 @@ def test_stats_scale_windows_and_completion(raw, mp4_bytes, tmp_path):
     assert sum(v["reasons"].get("action_bounds_commanded", 0) for v in stats["shards"].values()) == 2
     q = stats["interval_seconds_quantiles"]
     assert list(q) == ["0.01", "0.5", "0.99"] and 1.05 <= q["0.01"] <= q["0.99"] <= 1.05 + 15*3/1000
-    assert record == {"schema": "droid_prepare_stats_complete_v1", "config": cfg.name, "config_sha256": cfg.config_sha256,
-                      "splits_sha256": cache.file_sha(root/"index"/"splits.json"),
+    assert record == {"schema": "droid_prepare_stats_complete_v2", "config": cfg.name, "config_sha256": cfg.config_sha256,
+                      "splits_sha256": cache.file_sha(root/"index"/"splits.json"), "use_failures": True,
                       "action_scale_sha256": cache.file_sha(root/"prepared"/"action_scale.json"),
                       "windows_sha256": {s: cache.file_sha(root/"prepared"/"windows"/f"{s}.json") for s in wn.SPLITS},
                       "stats_sha256": cache.file_sha(root/"prepared"/"stats"/f"{cfg.name}.json"),
@@ -817,6 +817,70 @@ def test_stats_use_failures_false_reuses_main_files(raw, mp4_bytes, tmp_path):
     record = pr.run_stats(nofail, tmp_path)
     assert (tmp_path/"prepared"/"action_scale.json").read_bytes() == before
     assert record["action_scale_sha256"] == cache.file_sha(tmp_path/"prepared"/"action_scale.json")
+    assert record["use_failures"] is False
+
+
+def _nofail_after_main(raw, mp4_bytes, tmp_path):
+    """主配置跑完 prepare/stats，无失败回合配置的各片也准备好、还没跑统计。"""
+    cfg, _ = build_root(raw, tmp_path, mp4_bytes)
+    cfg = small(cfg)
+    nofail = replace(cfg, name="nofail", data=dataclasses.replace(cfg.data, use_failures=False))
+    prepare_all(cfg, tmp_path)
+    pr.run_stats(cfg, tmp_path)
+    prepare_all(nofail, tmp_path)
+    return cfg, nofail, tmp_path/"prepared"
+
+
+def test_stats_use_failures_false_needs_the_main_completion_record(raw, mp4_bytes, tmp_path):
+    """主配置写完共用文件、没写完成记录（中断）：共用文件都在，也不复用。"""
+    cfg, nofail, prepared = _nofail_after_main(raw, mp4_bytes, tmp_path)
+    main = prepared/"_complete"/f"stats-{cfg.name}.json"
+    kept = main.read_bytes()
+    main.unlink()
+    with pytest.raises(ValueError, match="no main configuration .* has completed prepare/stats"):
+        pr.run_stats(nofail, tmp_path)
+    # 只有另一个 use_failures: false 配置的完成记录，不算主配置
+    other = json.loads(kept)
+    other.update(config="nofail2", use_failures=False)
+    (prepared/"_complete"/"stats-nofail2.json").write_bytes(cache._json_bytes(other))
+    with pytest.raises(ValueError, match="no main configuration"):
+        pr.run_stats(nofail, tmp_path)
+    # 主配置的完成记录是别的 splits.json 的
+    other.update(config=cfg.name, use_failures=True, splits_sha256="0"*64)
+    main.write_bytes(cache._json_bytes(other))
+    with pytest.raises(ValueError, match="no main configuration"):
+        pr.run_stats(nofail, tmp_path)
+    main.write_bytes(kept)
+    assert pr.run_stats(nofail, tmp_path)["use_failures"] is False
+
+
+def test_stats_use_failures_false_refuses_a_changed_scale(raw, mp4_bytes, tmp_path):
+    """主配置完成后动作尺度被改（仍是合法的正数、schema 和 splits_sha256 都对）：报错。"""
+    cfg, nofail, prepared = _nofail_after_main(raw, mp4_bytes, tmp_path)
+    path = prepared/"action_scale.json"
+    scale = json.loads(path.read_bytes())
+    scale["realized"]["position"] *= 2
+    path.write_bytes(cache._json_bytes(scale))
+    with pytest.raises(ValueError, match=r"shared files \['action_scale'\] differ from what main configuration"):
+        pr.run_stats(nofail, tmp_path)
+    assert not (prepared/"_complete"/"stats-nofail.json").exists()
+
+
+def test_stats_use_failures_false_refuses_swapped_windows(raw, mp4_bytes, tmp_path):
+    """id_test 和 ood_test 的窗口文件互换：完成记录的 SHA 不符；连完成记录一起改对了，文件头的 split 也不符。"""
+    cfg, nofail, prepared = _nofail_after_main(raw, mp4_bytes, tmp_path)
+    a, b = prepared/"windows"/"id_test.json", prepared/"windows"/"ood_test.json"
+    body_a, body_b = a.read_bytes(), b.read_bytes()
+    a.write_bytes(body_b)
+    b.write_bytes(body_a)
+    with pytest.raises(ValueError, match=r"shared files \['windows/id_test', 'windows/ood_test'\] differ"):
+        pr.run_stats(nofail, tmp_path)
+    main = prepared/"_complete"/f"stats-{cfg.name}.json"
+    record = json.loads(main.read_bytes())
+    record["windows_sha256"]["id_test"], record["windows_sha256"]["ood_test"] = cache.file_sha(a), cache.file_sha(b)
+    main.write_bytes(cache._json_bytes(record))
+    with pytest.raises(ValueError, match=r"id_test.json was not written as the id_test windows"):
+        pr.run_stats(nofail, tmp_path)
 
 
 def test_stats_needs_every_shard_and_unchanged_outputs(raw, mp4_bytes, tmp_path):

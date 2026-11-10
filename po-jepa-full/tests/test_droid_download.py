@@ -254,6 +254,37 @@ def test_large_file_streams_in_many_chunks(raw, tmp_path):
     assert record["size"] == 1_000_003 and record["sha256"] == hashlib.sha256(raw.objects[name]).hexdigest()
 
 
+def test_stream_reads_chunk_bytes_at_a_time(monkeypatch, tmp_path):
+    """每次 read 都只要 CHUNK_BYTES；超过一块的内容分多次读（不是一次读完）。"""
+    monkeypatch.setattr(dl, "CHUNK_BYTES", 4096)
+    body = _payload(3, 2*dl.CHUNK_BYTES + 17)
+    reads = []
+
+    class Response:
+        headers = {"Content-Length": str(len(body))}
+
+        def __init__(self):
+            self.offset = 0
+
+        def read(self, n=-1):
+            reads.append(n)
+            block = body[self.offset:self.offset + n]
+            self.offset += len(block)
+            return block
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(dl, "_open", lambda url: Response())
+    part = tmp_path/"x.part"
+    dl._stream("http://unused", part)
+    assert part.read_bytes() == body
+    assert reads == [dl.CHUNK_BYTES]*4      # 两整块、17 字节、确认结束的空读
+
+
 # ---------------------------------------------------------------- 校验失败、截断、500、404
 
 def _one(config, episodes, root, shard="val"):
@@ -521,6 +552,28 @@ def test_downloaded_record_for_other_objects_is_refused(raw, tmp_path, edit):
     (tmp_path/"raw"/"val"/"_complete"/"pilot.json").unlink()
     with pytest.raises(ValueError, match="does not record episode"):
         run(config, tmp_path, "val")
+
+
+def test_downloaded_record_that_is_not_an_object_is_refused(raw, tmp_path):
+    config, episodes = build(raw, tmp_path)
+    run(config, tmp_path, "val")
+    uuid, _ = _one(config, episodes, tmp_path)
+    path = edir(tmp_path, "val", uuid)/"DOWNLOADED.json"
+    path.write_text("[1]", encoding="utf-8")
+    (tmp_path/"raw"/"val"/"_complete"/"pilot.json").unlink()
+    with pytest.raises(ValueError, match=r"DOWNLOADED.json is not a JSON object"):
+        run(config, tmp_path, "val")
+
+
+def test_metadata_rows_missing_from_the_index_are_named(tmp_path):
+    rows = [{"_name": "robotics/droid_raw/1.0.1/a/metadata_a.json", "uuid": "a"},
+            {"_name": "robotics/droid_raw/1.0.1/b/metadata_b.json", "uuid": "b"}]
+    (tmp_path/ix.METADATA_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    names = {r["_name"] for r in rows}
+    assert dl._metadata_rows(tmp_path, names) == {r["_name"]: r for r in rows}
+    missing = "robotics/droid_raw/1.0.1/c/metadata_c.json"
+    with pytest.raises(ValueError, match=r"has no rows for \['robotics/droid_raw/1.0.1/c/metadata_c.json'\]"):
+        dl._metadata_rows(tmp_path, names | {missing})
 
 
 def test_interrupted_run_resumes_without_redownloading(raw, tmp_path):
