@@ -854,6 +854,32 @@ def test_stats_use_failures_false_needs_the_main_completion_record(raw, mp4_byte
     assert pr.run_stats(nofail, tmp_path)["use_failures"] is False
 
 
+def test_old_v1_main_record_is_redone_as_v2(raw, mp4_bytes, tmp_path):
+    """数据根里主配置的完成记录还是 v1（没有 use_failures）：无失败回合配置被拒；重跑主配置 stats 时不直接返回 v1，
+    而是重做核对并写成 v2，之后无失败回合配置照常完成。v2 记录照旧直接返回。"""
+    cfg, nofail, prepared = _nofail_after_main(raw, mp4_bytes, tmp_path)
+    main = prepared/"_complete"/f"stats-{cfg.name}.json"
+    v2 = main.read_bytes()
+    old = json.loads(v2)
+    del old["use_failures"]
+    old["schema"] = "droid_prepare_stats_complete_v1"
+    main.write_bytes(cache._json_bytes(old))
+    with pytest.raises(ValueError, match="no main configuration"):
+        pr.run_stats(nofail, tmp_path)
+    shared = {p: p.read_bytes() for p in [prepared/"action_scale.json", *(prepared/"windows").glob("*.json")]}
+    record = pr.run_stats(cfg, tmp_path)
+    assert record["schema"] == "droid_prepare_stats_complete_v2" and record["use_failures"] is True
+    assert main.read_bytes() == v2 and {p: p.read_bytes() for p in shared} == shared
+    assert pr.run_stats(nofail, tmp_path)["use_failures"] is False
+    # v1 记录重做时照样核共用文件：尺度被改就报错，不悄悄升级
+    main.write_bytes(cache._json_bytes(old))
+    scale = json.loads(shared[prepared/"action_scale.json"])
+    scale["realized"]["position"] *= 2
+    (prepared/"action_scale.json").write_bytes(cache._json_bytes(scale))
+    with pytest.raises(ValueError, match="already exists with different content"):
+        pr.run_stats(cfg, tmp_path)
+
+
 def test_stats_use_failures_false_refuses_a_changed_scale(raw, mp4_bytes, tmp_path):
     """主配置完成后动作尺度被改（仍是合法的正数、schema 和 splits_sha256 都对）：报错。"""
     cfg, nofail, prepared = _nofail_after_main(raw, mp4_bytes, tmp_path)

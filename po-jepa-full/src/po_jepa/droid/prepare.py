@@ -567,7 +567,11 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
     root = prepared_dir(data_root)
     done = root/COMPLETE_DIR/f"stats-{config.name}.json"
     if done.exists():
-        return _read_json(done)
+        record = _read_json(done)
+        if record.get("schema") == STATS_COMPLETE_SCHEMA:
+            return record
+        # 旧 schema（v1，没有 use_failures）的完成记录不算完成：照常重做全部核对（共用文件已存在就要逐字节相同），
+        # 最后覆盖成 v2。否则 v1 主记录永远升不了级，use_failures: false 的配置一直被拒（F1-fix1 Codex P2）。
     splits = sp.load_splits(data_root, config)
     splits_sha = cache.file_sha(ix.index_dir(data_root)/ix.SPLITS_FILE)
     plan = sp.shard_plan(splits, config.data)
@@ -670,6 +674,7 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
     }
     done.parent.mkdir(parents=True, exist_ok=True)
     done.with_name(done.name + PARTIAL_SUFFIX).unlink(missing_ok=True)
+    done.unlink(missing_ok=True)   # 只可能是上面放过的旧 schema 记录（v2 记录在开头就返回了）
     cache._write_json(done, record)
     return record
 
