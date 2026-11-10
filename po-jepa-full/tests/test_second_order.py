@@ -195,7 +195,7 @@ def test_pendulum_substeps_converge_and_stay_below_nyquist():
         for tid in range(30):
             st = PE.trajectory(tid, controls(100+tid), params)
             worst = max(worst, np.abs(np.diff(st[:, 0])).max())
-    assert worst < .8*math.pi                                  # 相邻两帧转角 < π，方向没有歧义
+    assert worst < .8*math.pi       # 随机动作、增益 1 下相邻两帧转角 < π；不是全范围的保证（构造的动作能超过 π，见类说明）
 
 
 def test_pendulum_bob_drawn_at_angle():
@@ -461,6 +461,142 @@ def test_balls_collisions_converge_in_substeps():
     u = controls(9)
     a = BB.trajectory(9, u, params); b = BB.trajectory(9, u, params, substeps=128)
     assert np.abs(a-b).max() < 1e-8
+
+
+def test_balls_resting_contact_does_not_swallow_other_collisions():
+    """S23a-fix1（Codex P1 反例）：第 0 个球贴右墙、被动作一直往墙上顶（静止接触）；第 1 个球 0.001 s 后撞左墙，
+    必须照常按 e = 1 反弹（原实现把剩余子步自由推进再全局投影，第 1 个球停在墙上、速度清零）。"""
+    h = .25/32
+    pos = np.array([[1.8, 0.], [-1.799, 0.]]); vel = np.array([[0., 0.], [-1., 0.]]); acc = np.array([[.75, 0.], [0., 0.]])
+    BB.substep(pos, vel, acc, 0., 1., h)
+    assert pos[1, 0] == pytest.approx(-1.8+(h-.001), abs=1e-12) and vel[1, 0] == 1.     # −1.7931875，速度 +1
+    assert pos[0, 0] == pytest.approx(1.8, abs=1e-15) and vel[0, 0] == 0.
+
+
+def test_balls_resting_ball_hit_toward_the_wall_bounces():
+    """S23a-fix1：第 0 个球贴墙静止接触时，第 1 个球（e = 1、速度 +1）把它撞向墙：牛顿摆，第 0 个撞墙反弹、再把速度
+    还给第 1 个，第 1 个以 −1 离开（不能被投影吞掉）。第 1 个球不受动作，速度精确是 −1。"""
+    h = .25/32
+    pos = np.array([[1.8, 0.], [1.8-.4-.001, 0.]]); vel = np.array([[0., 0.], [1., 0.]]); acc = np.array([[.75, 0.], [0., 0.]])
+    BB.substep(pos, vel, acc, 0., 1., h)
+    assert vel[1] == pytest.approx([-1., 0.], abs=1e-12)
+    assert pos[1, 0] == pytest.approx(1.4-(h-.001), abs=1e-6)          # 只差静止接触压进去的那一点（.75·t²/2 量级）
+    assert pos[0, 0] <= 1.8 and abs(vel[0, 0]) < 1e-2
+
+
+def test_balls_grazing_collision_inside_a_substep_is_found():
+    """S23a-fix1（Codex P2 反例）：两球在子步内部擦边相碰、子步两端都不重叠。无阻力无动作时是直线运动：
+    接触时刻解 |d₀ + Δv·t| = 2R 的二次方程，冲量沿连心线（e = 1 交换法向速度），之后再直线运动——与闭式解比。"""
+    q = np.array([-.18046875, 0., .18046875, .3999, 1.4, 0., -1.4, 0.])
+    q1 = BB.tick(q, np.zeros(2), {"n": 2, "drag": 0., "restitution": 1.})
+    p, v = q[:4].reshape(2, 2), q[4:].reshape(2, 2)
+    d0, dv = p[1]-p[0], v[1]-v[0]
+    a, b, c = dv @ dv, 2*d0 @ dv, d0 @ d0-.16
+    tc = (-b-math.sqrt(b*b-4*a*c))/(2*a)
+    assert 0. < tc < .25
+    pc = p+v*tc; nrm = (pc[1]-pc[0])/.4
+    vn = (v[1]-v[0]) @ nrm
+    assert vn < -.05                                                    # 真碰撞（法向接近速度约 0.0626），不是静止接触
+    v1 = v.copy(); v1[0] += vn*nrm; v1[1] -= vn*nrm
+    expect = np.concatenate(((pc+v1*(.25-tc)).ravel(), v1.ravel()))
+    assert np.abs(q1-expect).max() < 1e-10
+
+
+def test_balls_first_contact_matches_exact_roots():
+    """连续碰撞检测与精确根对照：β = 0 时球对的 |d(t)|² − 4R² 是 t 的四次多项式（第 0 个球有加速度）、墙间隙是二次式；
+    随机的近距离状态（一部分子步两端都不重叠、中间擦边），_first_contact 的时刻 = 最早的实根（差 < 1e−10）。"""
+    g = np.random.default_rng(0); h = .25/32; checked = graze = 0
+    for k in range(400):
+        ang = g.uniform(0., 2*math.pi); nrm = np.array([math.cos(ang), math.sin(ang)]); center = g.uniform(-1.2, 1.2, 2)
+        acc = np.zeros((2, 2)); acc[0] = g.uniform(-3., 3., 2)
+        if k % 2:                                                    # 随机近距离
+            off = .5*(.4+g.uniform(0., .02))*nrm
+            vel = g.uniform(-3., 3., (2, 2))
+        else:                                                        # 构造擦边：子步中点最近距离略小于 2R，两端都不重叠
+            rel = g.uniform(4., 6.)*np.array([-nrm[1], nrm[0]])
+            off = .5*(g.uniform(.3999, .4)*nrm-rel*h/2)
+            base = g.uniform(-1., 1., 2); vel = np.array([base-rel/2, base+rel/2])
+            acc[0] *= .1
+        pos = np.array([center-off, center+off])
+        assert BB._sgaps(pos).min() > 0.                             # 起点不重叠
+        c, t = BB._first_contact(pos, vel, acc, 0., h, set())
+        d0, dv, da = pos[1]-pos[0], vel[1]-vel[0], acc[1]-acc[0]
+        poly = np.polynomial.polynomial.Polynomial
+        d = [poly([d0[k], dv[k], da[k]/2]) for k in range(2)]
+        roots = (d[0]**2+d[1]**2-.16).roots()
+        roots = sorted(r.real for r in roots if abs(r.imag) < 1e-9 and 0. < r.real < h)
+        walls = []
+        for k in range(2):
+            for i in range(2):
+                for side in (1., -1.):
+                    w = poly([1.8-side*pos[i, k], -side*vel[i, k], -side*acc[i, k]/2]).roots()
+                    walls += [r.real for r in w if abs(r.imag) < 1e-9 and 0. < r.real < h]
+        first = min(roots[:1]+walls, default=None)
+        if first is None:
+            assert c is None
+            continue
+        assert c is not None and t == pytest.approx(first, abs=1e-10)       # 阈值 −EPS：擦边时差 EPS/|S'|
+        checked += 1
+        end = BB._sgaps(BB.flow(pos, vel, acc, 0., h)[0])
+        graze += roots and first == roots[0] and end[-1] > 0.
+    assert checked > 100 and graze > 5
+
+
+def test_balls_curvature_bound_holds():
+    """_curvature 的 M 是 [0, T] 上 S'' 的上界（分支定界的前提）：随机状态（含阻力、动作）下用细网格二阶差分核对。"""
+    g = np.random.default_rng(1); h = .25/32
+    ts = np.linspace(0., h, 401); dt = ts[1]-ts[0]
+    for _ in range(60):
+        n = int(g.integers(2, 6)); beta = float(g.choice([0., .3, 1.]))
+        pos = g.uniform(-1.7, 1.7, (n, 2)); vel = g.uniform(-4., 4., (n, 2)); acc = np.zeros((n, 2)); acc[0] = g.uniform(-3., 3., 2)
+        M = BB._curvature(pos, vel, acc, beta, h)
+        S = np.array([BB._sgaps(BB.flow(pos, vel, acc, beta, t)[0]) for t in ts])
+        d2 = (S[2:]-2*S[1:-1]+S[:-2])/dt**2
+        assert (d2.max(0) <= M*(1+1e-6)+1e-4).all()                   # 墙的界是紧的（t = 0 处取等），留差分噪声的余量
+        assert (M > 0.).any()
+
+
+def test_balls_flow_small_drag_is_stable():
+    """S23a-fix1（Codex P2 反例）：极小正阻力 β 时 p(τ) = p + v·E + a·F 不能相近数相减。参照用 50 位十进制独立计算
+    E = (1 − e^{−βτ})/β、F = (τ − E)/β；β → 0 连续地趋近匀加速（原实现 β = 1e−16 时一个 tick 位移少约 3%）。"""
+    from decimal import Decimal, getcontext
+    getcontext().prec = 50
+    p0, v0, a = np.array([[.1, -.2]]), np.array([[.3, .5]]), np.array([[.75, -.4]])
+    for beta in (1e-16, 1e-12, 1e-8, 1e-4, .2, 1.):
+        for tau in (.25/32, .001, .25):
+            p, v = BB.flow(p0, v0, a, beta, tau)
+            B, T = Decimal(beta), Decimal(tau)
+            E = (1-(-B*T).exp())/B; F = (T-E)/B
+            for k in range(2):
+                pr = Decimal(p0[0, k])+Decimal(v0[0, k])*E+Decimal(a[0, k])*F
+                vr = Decimal(v0[0, k])*(-B*T).exp()+Decimal(a[0, k])*E
+                assert abs(float(pr)-p[0, k]) < 1e-15 and abs(float(vr)-v[0, k]) < 1e-15
+    q0 = one_ball([-.5, .2], [.4, -.3], {"drag": 0.}, (.3, .1))
+    for beta in (1e-16, 1e-14, 1e-10):
+        q = one_ball([-.5, .2], [.4, -.3], {"drag": beta}, (.3, .1))
+        assert np.abs(q-q0).max() < 1e-13+beta                         # 物理上差 O(β)
+
+
+def test_balls_resting_contact_does_not_hit_the_event_cap():
+    """静止接触与别的碰撞并存时不会在同一时刻来回触发事件（到 MAX_EVENTS 走投影兜底）：球被顶在墙上、另一个球追上来；
+    第 0 个球把另一个球推到墙上一直顶着（墙对第 1 个球也算静止接触，它被别的静止接触顶着）。每个子步的事件数远小于上限。"""
+    counts = []
+    orig = type(BB).substep
+
+    def counting(self, *a):
+        k = orig(self, *a); counts.append(k); return k
+    try:
+        type(BB).substep = counting
+        params = {"n": 2, "restitution": .5}
+        a = np.array([1.6, 0., 1.0, 0., .3, 0., .2, 0.])          # 第 0 个被顶在墙上，第 1 个追上来靠着它
+        b = np.array([1.0, 0., 1.6, 0., .3, 0., .2, 0.])          # 第 0 个把第 1 个推到墙上、一直顶着
+        for _ in range(12):
+            a = BB.tick(a, np.array([.5, 0.]), params); b = BB.tick(b, np.array([.5, 0.]), params)
+    finally:
+        type(BB).substep = orig
+    assert max(counts) < 8                                           # 实测最多 5（几次真碰撞的反弹串），上限是 20
+    assert a[0] == pytest.approx(1.8, abs=1e-9) and a[2] < 1.4+1e-5     # 第 1 个按 e 弹开或靠着，不穿过第 0 个
+    assert b[2] == pytest.approx(1.8, abs=1e-9) and b[0] == pytest.approx(1.4, abs=1e-4)
 
 
 def test_balls_drawn_as_discs_at_positions():

@@ -191,6 +191,16 @@ def test_knobs_reach_the_right_place(use, captured, name):
     use(name, "saturation=0.1"); systems.get().frames(5)
     assert np.array_equal(captured[-1][2], np.clip(base, -.1, .1))
     # 改动作抽样：下达动作和执行动作一起变
+    # S23a-fix1（Codex S23b P3-1）：非默认 zero 真的改了零动作段的比例——按 v6 规则（流 1、段长 1/4/8）独立重抽
+    use(name, "zero=0.5"); changed = 0
+    for tid in (5, 6, 7, 8):
+        systems.get().frames(tid)
+        g = simulation._rng(tid, 1); expect = np.zeros((32, 2)); t = 0
+        while t < 32:
+            n_ = int(g.choice([1, 4, 8])); expect[t:t+n_] = 0. if g.random() < .5 else g.uniform(-.5, .5, 2); t += n_
+        assert np.array_equal(ticks(systems.commanded_controls(tid)), expect) and np.array_equal(captured[-1][2], expect)
+        changed += not np.array_equal(expect, ticks(simulation.sample_controls(tid)))
+    assert changed >= 2
     use(name, "axes=x,segments=2"); systems.get().frames(5)
     c = systems.commanded_controls(5)
     assert np.all(c.values[:, 1] == 0.) and np.all(c.ends_ticks-c.starts_ticks == 2)
@@ -305,3 +315,13 @@ def test_protocols_do_not_pick_up_second_order_scenes():
     assert not set(NAMES) & {protocols.system_of(s) for s in protocols.SCENES}
     assert protocols.SECOND_ORDER_SCENES == NAMES
     assert sum(len(protocols.tests(s)) for s in protocols.SCENES) == 82
+
+
+def test_original_protocol_entries_are_frozen():
+    """S23a-fix1（Codex S23b P3-2）：只数 82 格挡不住改档位取值或换顺序。原 7 个场景三档的完整条目
+    (场景, 协议, 档位, 变体) 按顺序写成紧凑 JSON 的 SHA-256，在 S23b 之前的 a15737c 上算出（e61df67 上相同）。"""
+    import hashlib, json
+    rows = [[s, pid, lv, var] for s in protocols.SCENES for (pid, lv, var) in protocols.tests(s, levels=("轻", "标准", "重"))]
+    assert len(rows) == 234 and sum(r[2] == "标准" for r in rows) == 82
+    blob = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode()
+    assert hashlib.sha256(blob).hexdigest() == "cb5b07c09788ce203321ed18aab44ad605d3b89c1021ae5dd13ba19b5734a230"

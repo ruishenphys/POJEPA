@@ -224,6 +224,9 @@ class Pendulum(SecondOrder):
     （u = (0.5, 0) 在 θ = 0 时给 2 rad/s²，与 S22 探针单摆的标量力矩相同）。
     物理参数：g_over_l（默认 9.81 s⁻²，小角周期 2.006 s，每周期约 8 帧）、damping γ（默认 0.2 s⁻¹）。
     初值（t = −1，流 0）：θ ∈ U(−π, π)、θ̇ ∈ U(−3, 3) rad/s。每 tick RK4 50 步。
+    相邻两帧转角不保证 < π（S23a-fix1，Codex 补审）：动作能往摆里持续做功，g/l = 16、无阻尼时专门构造的动作序列能到 1.43π。
+    v6 规则的随机动作下实测（每组 2000 条）：默认参数增益 1/2/4 最大 0.53π/0.58π/0.67π；最极端的角（g/l = 16、无阻尼）
+    增益 4 时 0.05% 的轨迹超过 π（方向混叠），增益 ≤ 2 时没有。
     画面：S22 探针的画法（支点在画面中心，灰色抗锯齿摆杆 80 像素，摆锤是调节项颜色的高斯光点 σ = 6）。只由 θ 决定。
     状态 (θ, θ̇)，θ 不回绕。
     """
@@ -421,13 +424,15 @@ class SpringChain(SecondOrder):
 class BouncingBalls(SecondOrder):
     """方盒里的 n 个弹球（俯视、无重力）：单位质量、半径 R = 0.2，线性阻力，球与墙、球与球按恢复系数 e 碰撞；动作推第 0 个球。
       dv_i/dt = −β·v_i + [i = 0]·K·u，K = 1.5；墙在 |x|, |y| = W = 2（球心活动范围 |x|, |y| ≤ W − R）。
-    两次碰撞之间按解析解推进（指数衰减到 K·u/β）。碰撞按事件处理：每 tick 分 32 个子步，子步末尾有重叠就在 [0, 子步] 上
-    二分（60 次）找最早的接触时刻，推进到那一刻（取接触前一侧），施加冲量：墙 v_n ← −e·v_n；两球（等质量）
+    两次碰撞之间按解析解推进（指数衰减到 K·u/β；βτ 小时用级数，β → 0 连续）。碰撞按事件处理：每 tick 分 32 个子步，
+    子步内用连续碰撞检测找最早的接触时刻（S23a-fix1：间隙函数二阶导数有上界，分支定界，子步内进入又离开的擦边碰撞也能找到，
+    不只看子步末端），推进到那一刻（取接触前一侧），施加冲量：墙 v_n ← −e·v_n；两球（等质量）
     沿连心线 Δ = −(1+e)·v_rel,n/2，v_i −= Δn、v_j += Δn；然后继续推进本子步剩下的时间。
-    接近速度 < V_REST = 0.05 且动作把它往里顶（法向相对加速度指向约束内）时按静止接触处理（不反弹，法向相对速度置零、
-    位置投影到不重叠），避免动作把球顶在墙上时无穷次碰撞（芝诺现象）；这是近似，只在球被慢慢顶住时出现。没有往里顶的
-    加速度时，再慢的碰撞也照常按 e 反弹（所以 e = 1、无动作、无阻力时动能精确守恒）。每个子步最多 MAX_EVENTS 次碰撞，
-    超过时剩下的时间不再找事件，末尾投影。
+    接近速度 < V_REST = 0.05 且被往里顶（动作给的法向相对加速度指向约束内，或者它的球正被别的静止接触顶着）时按静止接触
+    处理：不反弹，法向相对速度置零，本子步不再对这个约束找事件，子步末尾把位置投影到不重叠；避免动作把球顶在墙上时无穷次
+    碰撞（芝诺现象）。这是近似，只在球被慢慢顶住时出现；其余约束照常找事件、按 e 反弹（S23a-fix1：原来一出现静止接触就整段
+    自由推进再全局投影，别的球的碰撞被吞掉）。没有往里顶的加速度时，再慢的碰撞也照常按 e 反弹（所以 e = 1、无动作、无阻力时
+    动能精确守恒）。每个子步最多 MAX_EVENTS 次碰撞，超过时剩下的时间不再找事件，末尾投影（实测扫描里没有触发）。
     物理参数：n（默认 3，1…5）、restitution e（默认 0.9，[0.5, 1]）、drag β（默认 0.2 s⁻¹，[0, 1]）。
     初值（t = −1，流 0）：位置在 [−(W−R−0.05), W−R−0.05]² 里拒绝抽样（两两间距 ≥ 2R + 0.05），速度 ∈ U(−1.5, 1.5)²。
     画面（每单位 48 像素）：浅灰方框墙（内沿就是 W），球是抗锯齿实心圆盘（半径 9.6 像素；第 0 个调节项颜色，其余青、品红、黄、绿）。
@@ -440,7 +445,8 @@ class BouncingBalls(SecondOrder):
     R = .2
     K = 1.5
     SUBSTEPS = 32
-    BISECT = 60
+    EPS = 1e-14             # 找事件的阈值容差（墙：长度；球对：长度²）
+    MAX_NODES = 100_000     # 连续碰撞检测每个约束最多展开的区间数（实测远小于此，超了直接报错）
     V_REST = .05
     MAX_EVENTS = 20
 
@@ -454,13 +460,30 @@ class BouncingBalls(SecondOrder):
         vel = g.uniform(-1.5, 1.5, (n, 2))
         return np.concatenate((np.array(pos).ravel(), vel.ravel()))
 
-    @staticmethod
-    def flow(pos, vel, acc, beta, tau):
-        """常加速度 acc [n,2]、线性阻力 β 下推进 τ 秒（解析解）。β = 0 时退化为匀加速。"""
+    # F(τ)/τ² = Σ_{k≥0} (−z)^k/(k+2)!（z = βτ）的系数，z < 0.5 时 20 项到机器精度
+    _F_SERIES = tuple(1./math.factorial(k+2) for k in range(20))
+
+    @classmethod
+    def _phi(cls, beta, tau):
+        """E(τ) = (1 − e^{−βτ})/β、F(τ) = (τ − E(τ))/β（= ∫₀^τ E）。z = βτ < 0.5 时 F 用级数 τ²·Σ(−z)^k/(k+2)!，
+        避免 τ − E 相近数相减（S23a-fix1：β 极小时原式把加速度位移消掉，β = 1e−16 少约 3%）。β = 0 的情形由 flow 单独处理。"""
+        z = beta*tau
+        e1 = -math.expm1(-z)/beta
+        if z < .5:
+            s = 0.
+            for c in reversed(cls._F_SERIES):
+                s = s*(-z)+c
+            return e1, tau*tau*s
+        return e1, (tau-e1)/beta
+
+    @classmethod
+    def flow(cls, pos, vel, acc, beta, tau):
+        """常加速度 acc [n,2]、线性阻力 β 下推进 τ 秒（解析解）：p(τ) = p + v·E + a·F，v(τ) = v·e^{−βτ} + a·E。
+        β = 0 时退化为匀加速。"""
         if beta == 0.:
             return pos+vel*tau+.5*acc*tau*tau, vel+acc*tau
-        e1 = -math.expm1(-beta*tau)/beta                       # (1 − e^{−βτ})/β
-        return pos+vel*e1+acc*(tau-e1)/beta, vel*math.exp(-beta*tau)+acc*e1
+        e1, f = cls._phi(beta, tau)
+        return pos+vel*e1+acc*f, vel*math.exp(-beta*tau)+acc*e1
 
     def _gaps(self, pos):
         """所有约束的间隙（≥ 0 不重叠）：4n 个墙（x+、x−、y+、y− 顺序）+ n(n−1)/2 个球对。"""
@@ -469,6 +492,70 @@ class BouncingBalls(SecondOrder):
         n = len(pos); i, j = np.triu_indices(n, 1)
         pairs = np.hypot(*(pos[j]-pos[i]).T)-2*self.R if n > 1 else np.zeros(0)
         return np.concatenate((walls, pairs)), (i, j)
+
+    def _sgaps(self, pos):
+        """找事件用的间隙函数 S：墙同 _gaps（位置的一次式），球对用 |d|² − (2R)²（与 |d| − 2R 同号、同单调，
+        但对时间的二阶导数有简单上界，见 _curvature）。"""
+        lim = self.W-self.R
+        walls = np.stack((lim-pos[:, 0], lim+pos[:, 0], lim-pos[:, 1], lim+pos[:, 1]), -1).ravel()
+        n = len(pos); i, j = np.triu_indices(n, 1)
+        d = pos[j]-pos[i]
+        return np.concatenate((walls, (d*d).sum(-1)-(2*self.R)**2))
+
+    def _curvature(self, pos, vel, acc, beta, T):
+        """[0, T] 上每个约束的 S''(t) 的上界 M（自由推进，没有碰撞）。
+        每个球 p'(t) = v·e^{−βt} + a·E(t)，p''(t) = (a − β·v)·e^{−βt}：墙 |S''| ≤ |a − β·v|（对应分量）。
+        球对 d = p_j − p_i：|d'| ≤ |Δv| + |Δa|·E(T) =: V，|d''| ≤ |Δa − β·Δv| =: A，|d| ≤ |d₀| + V·T，
+        S'' = 2|d'|² + 2·d·d'' ≤ 2V² + 2(|d₀| + V·T)·A。"""
+        e1 = T if beta == 0. else self._phi(beta, T)[0]
+        m = np.abs(acc-beta*vel)
+        walls = np.stack((m[:, 0], m[:, 0], m[:, 1], m[:, 1]), -1).ravel()
+        n = len(pos); i, j = np.triu_indices(n, 1)
+        dv, da = vel[j]-vel[i], acc[j]-acc[i]
+        V = np.hypot(*dv.T)+np.hypot(*da.T)*e1 if n > 1 else np.zeros(0)
+        A = np.hypot(*(da-beta*dv).T) if n > 1 else np.zeros(0)
+        d0 = np.hypot(*(pos[j]-pos[i]).T) if n > 1 else np.zeros(0)
+        return np.concatenate((walls, 2*V*V+2*(d0+V*T)*A))
+
+    def _first_contact(self, pos, vel, acc, beta, T, skip):
+        """在 [0, T] 上找最早穿过阈值的约束（连续碰撞检测，S23a-fix1）→ (约束号, 时刻) 或 (None, None)。
+        约束 c 的阈值 thr = min(S_c(0), 0) − EPS：起点已经有极小重叠（投影的容差）的约束，只在重叠进一步加深时才算事件。
+        分支定界：S'' ≤ M 时，区间 [a, b] 上 S ≥ min(S(a), S(b)) − M(b−a)²/8；这个下界 ≥ thr 的区间里一定没有穿过，
+        其余对半分，直到区间宽 T·2⁻⁵⁰，返回最早一个右端点 < thr 的叶子的左端点（接触前一侧）。
+        所以子步内进入又离开的擦边碰撞也能找到，不只看子步末端。skip 里的约束（本子步已按静止接触处理）不找。"""
+        s0 = self._sgaps(pos)
+        sT = self._sgaps(self.flow(pos, vel, acc, beta, T)[0])
+        thr = np.minimum(s0, 0.)-self.EPS
+        M = self._curvature(pos, vel, acc, beta, T)
+        lower = np.minimum(s0, sT)-thr-M*T*T/8
+        best, best_t = None, None
+        for c in np.flatnonzero(lower < 0.):
+            if c in skip:
+                continue
+            t = self._crossing(c, pos, vel, acc, beta, T, thr[c], M[c], s0[c], sT[c], T if best_t is None else best_t)
+            if t is not None and (best_t is None or t < best_t):
+                best, best_t = int(c), t
+        return best, best_t
+
+    def _crossing(self, c, pos, vel, acc, beta, T, thr, M, s0, sT, limit):
+        """约束 c 在 [0, min(T, limit)) 里第一次 S < thr 的时刻（叶子左端点），没有则 None。S 用与 _first_contact 同一套式子算。"""
+        leaf = T*2.**-50
+        stack = [(0., T, s0, sT)]; nodes = 0
+        while stack:
+            a, b, sa, sb = stack.pop()
+            if a >= limit or min(sa, sb)-thr-M*(b-a)*(b-a)/8 >= 0.:
+                continue
+            if b-a <= leaf:
+                if sb < thr:
+                    return a
+                continue
+            nodes += 1
+            if nodes > self.MAX_NODES:
+                raise RuntimeError("bouncing_balls 连续碰撞检测没有收敛（分支定界节点超限）")
+            m = .5*(a+b)
+            sm = self._sgaps(self.flow(pos, vel, acc, beta, m)[0])[c]
+            stack.append((m, b, sm, sb)); stack.append((a, m, sa, sm))          # 先看左半
+        return None
 
     def _normal(self, c, pos, pairs):
         """约束 c 的法向：墙 → (球号, 指向墙内的单位法向)；球对 → (i, j, 从 i 指向 j 的单位法向)。"""
@@ -480,6 +567,11 @@ class BouncingBalls(SecondOrder):
         i, j = pairs[0][c-4*n], pairs[1][c-4*n]
         d = pos[j]-pos[i]
         return i, j, d/np.hypot(*d)
+
+    def _balls(self, c, n, pairs):
+        if c < 4*n:
+            return {c//4}
+        return {int(pairs[0][c-4*n]), int(pairs[1][c-4*n])}
 
     def _approach(self, c, pos, x, pairs):
         """x 取速度时是法向接近速度，取加速度时是法向接近加速度（> 0 表示往重叠的方向）。"""
@@ -500,6 +592,23 @@ class BouncingBalls(SecondOrder):
             delta = -(1+e)*vn/2
             vel[i] = vel[i]-delta*nrm; vel[j] = vel[j]+delta*nrm
 
+    def _settle(self, c, pos, vel, pairs):
+        """把单个约束 c 的重叠推回边界、去掉法向接近速度（完全非弹性）。"""
+        lim = self.W-self.R
+        i, j, nrm = self._normal(c, pos, pairs)
+        if j is None:
+            axis = 0 if c % 4 < 2 else 1
+            pos[i, axis] = np.clip(pos[i, axis], -lim, lim)
+            vel[i] = vel[i]-min(vel[i] @ nrm, 0.)*nrm
+            return
+        d = pos[j]-pos[i]; dist = np.hypot(*d)
+        if dist < 2*self.R:
+            shift = (2*self.R-dist)/2*nrm
+            pos[i] = pos[i]-shift; pos[j] = pos[j]+shift
+        vn = (vel[j]-vel[i]) @ nrm
+        if vn < 0.:
+            vel[i] = vel[i]+vn/2*nrm; vel[j] = vel[j]-vn/2*nrm
+
     def _project(self, pos, vel):
         """静止接触：把重叠的位置推回边界、去掉法向接近速度（最多 50 轮 Gauss–Seidel）。墙是硬约束：最后再把球心
         截回 [−(W−R), W−R]，所以球被另一个球顶在墙上（卡住）时只会留下极小的球间重叠（实测 < 1e−5），不会穿墙。"""
@@ -509,59 +618,46 @@ class BouncingBalls(SecondOrder):
             if gaps.min() >= -1e-12:
                 return
             for c in np.flatnonzero(gaps < 0.):
-                i, j, nrm = self._normal(c, pos, pairs)
-                if j is None:
-                    axis = 0 if c % 4 < 2 else 1
-                    pos[i, axis] = np.clip(pos[i, axis], -lim, lim)
-                    vel[i] = vel[i]-min(vel[i] @ nrm, 0.)*nrm
-                else:
-                    d = pos[j]-pos[i]; dist = np.hypot(*d)
-                    if dist >= 2*self.R:
-                        continue
-                    shift = (2*self.R-dist)/2*nrm
-                    pos[i] = pos[i]-shift; pos[j] = pos[j]+shift
-                    vn = (vel[j]-vel[i]) @ nrm
-                    if vn < 0.:
-                        vel[i] = vel[i]+vn/2*nrm; vel[j] = vel[j]-vn/2*nrm
+                self._settle(c, pos, vel, pairs)
         for axis, side in ((0, 1.), (0, -1.), (1, 1.), (1, -1.)):
             out = side*pos[:, axis] > lim
             pos[out, axis] = side*lim
             vel[out, axis] = np.where(side*vel[out, axis] > 0., 0., vel[out, axis])
 
     def substep(self, pos, vel, acc, beta, e, h):
-        """推进一个子步 h（事件驱动），原地修改 pos、vel；返回本子步的碰撞事件数。"""
-        remaining, events = h, 0
+        """推进一个子步 h（事件驱动），原地修改 pos、vel；返回本子步的碰撞事件数。
+        S23a-fix1：静止接触只约束它自己——记进 resting，本子步不再对它找事件（它的球在剩下的时间里会稍微压进去，
+        子步末尾投影），其余约束照常找事件、按 e 反弹（原来一出现静止接触就把整个剩余子步自由推进再全局投影，
+        别的球在这段时间里的碰撞被投影吞掉、法向速度清零）。之后若有真正的碰撞（按 e 反弹）涉及 resting 里某个约束的球，
+        先把那个约束单独推回、去掉法向接近速度，再从 resting 里拿掉，让它重新参与找事件（例如别的球把贴墙的球撞向墙）。"""
+        remaining, events, resting = h, 0, set()
+        n = len(pos)
         self._project(pos, vel)
         while remaining > 0.:
-            p1, v1 = self.flow(pos, vel, acc, beta, remaining)
-            gaps, pairs = self._gaps(p1)
-            hits = np.flatnonzero(gaps < 0.)
-            if len(hits) == 0:
-                pos[:], vel[:] = p1, v1
-                return events
             if events >= self.MAX_EVENTS:
-                pos[:], vel[:] = p1, v1; self._project(pos, vel)
+                pos[:], vel[:] = self.flow(pos, vel, acc, beta, remaining); self._project(pos, vel)
                 return events
-            best, best_t = None, remaining
-            for c in hits:
-                lo, hi = 0., remaining
-                for _ in range(self.BISECT):
-                    mid = .5*(lo+hi)
-                    if self._gaps(self.flow(pos, vel, acc, beta, mid)[0])[0][c] < 0.:
-                        hi = mid
-                    else:
-                        lo = mid
-                if lo < best_t:
-                    best, best_t = c, lo
+            best, best_t = self._first_contact(pos, vel, acc, beta, remaining, resting)
+            if best is None:
+                pos[:], vel[:] = self.flow(pos, vel, acc, beta, remaining)
+                break
             pc, vc = self.flow(pos, vel, acc, beta, best_t)
             pos[:], vel[:] = pc, vc; remaining -= best_t; events += 1
-            if self._approach(best, pos, vel, pairs) < self.V_REST and self._approach(best, pos, acc, pairs) > 0.:
-                # 慢慢顶住：按静止接触处理，推进完本子步再投影
+            pairs = np.triu_indices(n, 1)
+            balls = self._balls(best, n, pairs)
+            held = any(self._balls(r, n, pairs) & balls for r in resting)
+            if self._approach(best, pos, vel, pairs) < self.V_REST and (self._approach(best, pos, acc, pairs) > 0. or held):
+                # 慢慢顶住（动作往里顶，或者它的球正被别的静止接触顶着，例如第 0 个球把另一个球推在墙上）：
+                # 静止接触（不反弹），本子步不再对它找事件
                 self._impulse(best, pos, vel, pairs, 0.)
-                p1, v1 = self.flow(pos, vel, acc, beta, remaining)
-                pos[:], vel[:] = p1, v1; self._project(pos, vel)
-                return events
+                resting.add(best)
+                continue
+            for r in sorted(resting):
+                if self._balls(r, n, pairs) & balls:
+                    resting.discard(r); self._settle(r, pos, vel, pairs)
             self._impulse(best, pos, vel, pairs, e)
+        if resting:
+            self._project(pos, vel)
         return events
 
     def tick(self, q, u, params, substeps=None):
