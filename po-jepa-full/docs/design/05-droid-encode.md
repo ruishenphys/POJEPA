@@ -2,7 +2,7 @@
 
 2026-11-08 · 第一版
 
-阶段 4：用冻结的 V-JEPA 2 ViT-g 把每条回合的取帧位置编码成特征，训练和评测之后只读特征、不跑编码器。每片一个 GPU 任务 `encode/<片名>`，另加 `encode/test-extra`。代码在 `src/po_jepa/droid/encode.py` 和 `src/po_jepa/droid/features.py`（S06）。
+阶段 4：用冻结的 V-JEPA 2 ViT-g 把每条回合的取帧位置编码成特征，训练和评测之后只读特征、不跑编码器。每片一个 GPU 任务 `encode/<片名>`，另加 `encode/test-extra`。代码在 `src/po_jepa/droid/encode.py` 和 `src/po_jepa/droid/features.py`（S06 拆两段：S06a 主特征、片清单、读取、`--delete-raw`、`droid/poses.py`；S06b 测试附加 §4）。
 
 ## 1. 编码器和预处理（和 v7 完全相同）
 
@@ -28,12 +28,19 @@
 
 全部回合完成后，`encode/<片名>` 写：
 
-- `features/<片名>/MANIFEST.json`：这一片在该配置下的 uuid 列表，每条的 JSON SHA、文件 SHA、行数；跳过的回合和原因。
+- `features/<片名>/MANIFEST.<配置名>.json`：这一片在该配置下的 uuid 列表，每条的 JSON SHA、文件 SHA、行数；跳过的回合和原因（S06a 改：原写 `MANIFEST.json`，但试跑和正式运行的 `train-000` 回合列表不同，所以按配置名分文件，同 04 §6 的统计）。
 - `features/<片名>/_complete/<配置名>.json`：MANIFEST 的 SHA、配置 SHA。
 
-全部片完成后，训练任务读取前先生成**特征总清单**的 SHA：按片名排序，把每片 MANIFEST 的 SHA 依次连接后取 SHA-256。它就是 `TrainingBatch.provenance["feature_manifest_sha256"]`（06 §5）。
+全部片完成后，训练任务读取前先生成**特征总清单**的 SHA：按片名排序（Python 字符串顺序），把每片 MANIFEST 的 SHA（64 位十六进制串）依次连接后取 SHA-256（`features.total_manifest_sha256`）。它就是 `TrainingBatch.provenance["feature_manifest_sha256"]`（06 §5）。
 
 带 `--delete-raw` 时（只用于训练片），清单写完并重新读一遍核对通过后删原始 MP4 和 h5（03 §4）。
+
+S06a 补充（实现时定，见 `docs/segments/S06a.md` §4）：
+- “准备检查通过”取两种动作源任一通过（`passed_realized` 或 `passed_commanded`）：特征只和画面有关，两种配置共用一份；两种都没通过的回合记为跳过，原因抄自准备文件的 `reasons`。
+- 跳过规则另要求片名、证据角色（`evidence_role`）、上游提交一致；特征 JSON 的 `encoder` 字段就是这几项加权重 SHA、预处理 SHA、`batch_frames`。
+- 重新读一遍核对 = 每条特征 JSON 的 SHA 等于清单、`.npy` 整个文件重算 SHA、dtype/形状/行数、每一行的 SHA。对每条回合先写 `RAW_DELETED.json`（`schema`、删除时间、特征 JSON 的 SHA、删的文件名），再删文件；中断后重跑会删掉剩下的。准备没通过、没编码的回合不删原始文件（留着查原因）。
+- 完成记录已在时任务不再编码；带 `--delete-raw` 时仍做删除那一步（幂等）。
+- 假编码器的预处理是 `preprocess_square(·, 256)`（和 v7 `preprocess_rgb` 逐位相同，但 CPU 测试没有上游代码），特征 JSON 记它自己的预处理 SHA（`encode.square_preprocess_sha256(256)`），不冒充 v7 的。
 
 ## 4. 测试附加 `encode/test-extra`
 
@@ -65,7 +72,7 @@ s5 文件里第 3j 行和主特征第 j 行是同一帧，但编码时的块不�
 
 CPU 测试不用真实权重：沿用 v7 `encode_v7.py` 里的假编码器思路（固定随机投影：把 16×16 的图块拉平后乘一个固定种子的随机矩阵，得到 [B, 256, 1408]），192 和 320 输入相应得到 144 和 400 个 token。假编码器写的清单里 `encoder_checkpoint_sha256` 为 null、`evidence_role` 为 `synthetic_development_only`，训练读到这种特征时只允许跑冒烟测试。
 
-## 7. 真实编码器核对（S06 合并前，在 GPU 机器上）
+## 7. 真实编码器核对（GPU 机器上；S06a 合入时没有 GPU，交给算力方）
 
-- 取一条金标准回合的前 32 个取帧位置，用本模块编码，和直接用 v7 `FrozenFrameEncoder` 在同一块大小下编码的结果逐位相同。
+- 取一条金标准回合的前 32 个取帧位置，用本模块编码，和直接用 v7 `FrozenFrameEncoder` 在同一块大小下编码的结果逐位相同（`python -m po_jepa.droid.encode --config … --data-root … --check-mp4 <金标准 MP4>`，退出码 0 即通过）。
 - 192 和 320 输入各编 1 帧，输出形状正确、全部有限。
