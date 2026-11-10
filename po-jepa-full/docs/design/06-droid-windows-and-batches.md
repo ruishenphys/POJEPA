@@ -89,6 +89,8 @@ def step_rng(seed: int, step: int, stream: int) -> np.random.Generator:
 
 **AC 片段**：`make_ac_clip_batch(clips, reader, prepared, source, device)` 返回 `features` float32 [16, 9, 256, 1408]、`actions` float64→float32 [16, 8, 7]（物理单位，第 k 个是 `action_<source>[s + k]`）、`states` float32 [16, 9, 7]（`state[s : s+9]`，`ac_state: true_state` 时用）。v7 的 `ac_training` 片段读取只认仿真缓存，DROID 用这个函数代替，训练步本身复用（09 §6.2）。
 
+S07 补充（实现时定，见 `docs/segments/S07.md` §3）：上面的 `prepared` 参数实现成 `batches.episode_arrays(prepared, uuids, source)` 给出的小表（行数、准备 JSON SHA、`action_<source>`、`state`），动作源由它定；每个窗口核对特征 JSON 记的准备 JSON SHA 和行数等于表里的；端点秒数 (s + d)·P 必须逐位等于 s·P + d·P，否则报错。
+
 **验证和测试批**：冻结窗口按文件顺序每 64 个一批，组装规则同上（评测时不需要 `tau`、`sigma` 的那些检查，但仍用同一个函数）。`make_eval_batch` 另返回每个窗口起点行的真实状态 `state[s]`（float64 [B, 7]，物理单位），只给 AC 的官方输入模式用（09 §6.2）。
 
 ## 5. 来源字段
@@ -111,4 +113,4 @@ v7 每步写一份完整的来源 JSON；DROID 一个任务 3 万步，不这样
 
 ## 6. 读取速度
 
-每步读 64 × 2 行（每行 256 × 1408 × 2 字节 ≈ 0.7 MB），约 90 MB；AC 每步读 16 × 9 行，约 100 MB。特征要放在 SSD 或共享高速存储上。数据加载用 `torch.utils.data.DataLoader`，`IterableDataset` 从 `completed_steps` 开始按步号产出批（读行、核行 SHA、转 float32，都在工作进程里），2 个工作进程，预取 4 步；主进程只把张量搬到 GPU。批的内容只由步号决定，和工作进程数无关。
+每步读 64 × 2 行（每行 256 × 1408 × 2 字节 ≈ 0.7 MB），约 90 MB；AC 每步读 16 × 9 行，约 100 MB。特征要放在 SSD 或共享高速存储上。数据加载用 `torch.utils.data.DataLoader`，`IterableDataset` 从 `completed_steps` 开始按步号产出批（读行、核行 SHA、转 float32，都在工作进程里），2 个工作进程，预取 4 步；主进程只把张量搬到 GPU。批的内容只由步号决定，和工作进程数无关。S07 实现（`batches.StepBatches`、`training_batches`）：第 w 个工作进程（共 n 个）产出步号 ≡ start + w (mod n) 的步，每个工作进程自己开 `FeatureReader`；主进程核对步号连续，再调 `assemble_training_batch` 搬到设备。

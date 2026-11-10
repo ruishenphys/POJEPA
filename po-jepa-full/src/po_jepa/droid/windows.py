@@ -4,7 +4,8 @@
 只含 `passed_realized` 为真的回合。排序哈希 `hw(*parts) = sha256("|".join([window_salt, *map(str, parts)]))`，
 哈希相同（不会发生）时按窗口编号再排，结果仍确定。
 
-训练时每一步的窗口（06 §2 `step_rng`）由 S07 加在本模块里。
+训练集（06 §1 `train_episodes`）和每一步的训练窗口（06 §2 `step_rng`、`training_windows`、`ac_clips`）是 S07 加的：
+只由（种子，步数，流）决定，不依赖数据加载器的状态。把窗口组装成批在 `batches.py`。
 """
 
 from __future__ import annotations
@@ -12,7 +13,10 @@ from __future__ import annotations
 import hashlib
 from typing import Mapping, Sequence
 
-from po_jepa.droid.config import DroidConfig
+import numpy as np
+
+from po_jepa.droid import splits as sp
+from po_jepa.droid.config import ACTION_SOURCES, DroidConfig
 
 SCHEMA = "droid_windows_v1"
 SPLITS = ("val", "id_test", "ood_test")
@@ -24,8 +28,16 @@ def hw(salt: str, *parts) -> str:
     return hashlib.sha256("|".join([salt, *map(str, parts)]).encode("utf-8")).hexdigest()
 
 
+TRAIN_STREAM = 0   # 06 §2：PO-JEPA 类、Transformer 类和 Koopman（同一种子下同一步看到同样的窗口）
+AC_STREAM = 1      # 06 §2：AC 两个条件的 9 帧片段
+
+
 def window_id(uuid: str, duration: int, start: int) -> str:
     return f"{uuid}|d{duration}|s{start}"
+
+
+def clip_id(uuid: str, start: int) -> str:
+    return f"{uuid}|clip|s{start}"
 
 
 def frame_rate_id(uuid: str, start_frame: int) -> str:
@@ -158,3 +170,76 @@ def frozen_windows(split: str, uuids: Sequence[str], *, rows: Mapping[str, int],
 
 def _by_duration(windows: list[dict], durations: Sequence[int]) -> dict[str, int]:
     return {str(d): sum(w["duration"] == d for w in windows) for d in durations}
+
+
+# ---------------------------------------------------------------- 训练集和每一步的训练窗口（06 §1、§2，S07）
+
+def train_episodes(splits: dict, prepared: Mapping, config: DroidConfig) -> list[str]:
+    """06 §1：`splits.train_order(splits, config.data)` 的前 `train_episodes` 条，再去掉 `passed_<config.action.source>`
+    不为真的回合，保持原顺序。`prepared` 是 {uuid: `prepare.PreparedEpisode`}（至少覆盖前 `train_episodes` 条）。"""
+    source = config.action.source
+    if source not in ACTION_SOURCES:
+        raise ValueError(f"action.source must be one of {ACTION_SOURCES}")
+    head = sp.train_order(splits, config.data)[:config.data.train_episodes]
+    if len(head) < config.data.train_episodes:
+        raise ValueError(f"data.train_episodes = {config.data.train_episodes} but the training order has only {len(head)}")
+    missing = [u for u in head if u not in prepared]
+    if missing:
+        raise ValueError(f"no prepared episode for {missing[:3]}")
+    return [u for u in head if prepared[u].passed(source) is True]
+
+
+def list_sha256(ids: Sequence[str]) -> str:
+    """一串编号（回合 uuid、一步的窗口编号）用 "\n" 连接后的 SHA-256：训练登记里训练集的 SHA（06 §1）、
+    日志里每一步窗口编号列表的 SHA（06 §5）。"""
+    if any(type(i) is not str or not i or "\n" in i for i in ids):
+        raise ValueError("ids must be non-empty strings without newlines")
+    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
+
+
+def step_rng(seed: int, step: int, stream: int) -> np.random.Generator:
+    """06 §2：第 `step` 步（从 0 计）、流 `stream` 的随机数发生器，只由这三个整数决定。"""
+    for name, value in (("seed", seed), ("step", step), ("stream", stream)):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{name} must be a non-negative int, got {value!r}")
+    return np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, step, stream])))
+
+
+def _episode_rows(episodes: Sequence[str], rows: Mapping[str, int], need: int) -> None:
+    if not episodes:
+        raise ValueError("no training episodes")
+    for u in episodes:
+        r = rows.get(u)
+        if type(r) is not int or r < need + 1:
+            raise ValueError(f"training episode {u} has rows {r!r}; needs at least {need + 1}")
+
+
+def training_windows(episodes: Sequence[str], rows: Mapping[str, int], *, seed: int, step: int,
+                     config: DroidConfig) -> list[dict]:
+    """06 §2（stream 0）：第 `step` 步的 `training.batch` 行，逐行依次抽回合 e、时长 d ∈ `training.durations`、
+    起点 s ∈ [0, F_e − 1 − d]。`rows[uuid]` 是这条回合的特征行数 F（准备 JSON 的 `rows`）。"""
+    durations = list(config.training.durations)
+    _episode_rows(episodes, rows, max(durations))
+    rng = step_rng(seed, step, TRAIN_STREAM)
+    out = []
+    for _ in range(config.training.batch):
+        uuid = episodes[int(rng.integers(len(episodes)))]
+        d = durations[int(rng.integers(len(durations)))]
+        s = int(rng.integers(rows[uuid] - d))
+        out.append({"id": window_id(uuid, d, s), "uuid": uuid, "duration": d, "start": s})
+    return out
+
+
+def ac_clips(episodes: Sequence[str], rows: Mapping[str, int], *, seed: int, step: int,
+             config: DroidConfig) -> list[dict]:
+    """06 §2（stream 1）：第 `step` 步的 `training.ac_batch_clips` 个 `ac_clip_frames`（9）帧片段，逐个抽回合 e 和起点
+    s ∈ [0, F_e − ac_clip_frames]（片段是第 s 到 s + 8 行）。"""
+    frames = config.training.ac_clip_frames
+    _episode_rows(episodes, rows, frames - 1)
+    rng = step_rng(seed, step, AC_STREAM)
+    out = []
+    for _ in range(config.training.ac_batch_clips):
+        uuid = episodes[int(rng.integers(len(episodes)))]
+        s = int(rng.integers(rows[uuid] - (frames - 1)))
+        out.append({"id": clip_id(uuid, s), "uuid": uuid, "start": s, "frames": frames})
+    return out
