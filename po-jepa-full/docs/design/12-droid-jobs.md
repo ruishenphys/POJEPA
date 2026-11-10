@@ -38,6 +38,8 @@
 
 下载、准备、编码按片串起来：一片下完就能准备，准备完就能编码，不用等全部下完。训练任务之间互不依赖，可以同时跑。
 
+S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推出，不读索引；数据根里已有 `index/splits.json` 时用 `splits.shard_plan` 并核对两者相同；`use_failures: false` 的片号取决于失败回合的位置，必须先有索引。汇总依赖全部 `eval/*`（含 `eval/spectral-gap`）。统一入口 `tools/droid.py` 目前接上 index、download、prepare、encode 四个阶段（转给 S02–S06b 各模块的 `main()`），其余阶段在 S09、S11–S13 写好之前退出 2、不写文件。
+
 ## 3. 每个任务的共同约定
 
 - 命令：`python tools/droid.py <阶段> --config configs/droid/<name>.yaml --data-root <数据根> --run-root <运行根> --job <任务编号>`，训练和评测另加 `--time-limit-minutes <上限>`，训练任务在工作目录 `po-jepa-full/` 下运行。
@@ -91,6 +93,7 @@
 - 本机没有时长上限，训练任务传配置里的上限，到点同样会存档退出 75 再被重排，所以本机和集群上的行为一致。
 - 断电或 Ctrl-C 后重新运行同一条命令即可：完成的跳过，没完成的从断点接着做。
 - `--dry-run` 只打印将要运行的顺序。
+- S14 补注：排在前面的任务资源不够时，后面放得下的先跑；CPU 任务的 `CUDA_VISIBLE_DEVICES` 为空；命令的 `python` 换成运行器自己的解释器；每个任务最多重排 `--max-requeues`（默认 100）次；退出 0 但没写完成标志、要的资源超过本机总量都算失败；同一运行根同时只能有一个运行器（`logs/RUNNER.pid`）；Ctrl-C 时把 SIGINT 转给正在跑的任务，等 `--grace-seconds`（默认 60）秒后强制结束，退出 130。
 
 这和 v7 的 `run_jobs.py` 是同一种用法，只是按依赖调度而不是按段。
 
