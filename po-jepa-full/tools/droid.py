@@ -7,8 +7,9 @@
 - 开始时完成标志已存在：什么都不做，退出 0。完成标志由各阶段自己最后写（先写临时文件再改名）；阶段返回后完成标志
   不存在算失败（退出 1）。
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
-- 已接上的阶段：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b）。
-  calibrate、check、train（S09）、eval（S11、S12）、summary（S13）还没写：退出 2，不写任何文件。
+- 已接上的阶段：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b），以及评测阶段里
+  的 `eval/spectral-gap`（10 §8.8，S11b，`droid.spectral_gap.main`）。calibrate、check、train（S09）、其余 eval（S11、
+  S12，读检查点等 S09）、summary（S13）还没写：退出 2，不写任何文件。
 - 编码任务开始时由 `encode.load_frozen` 核上游提交（204698b）和编码器权重 SHA（= v7 `cache.CHECKPOINT_SHA`），
   不对就报错退出 1（12 §1）。`--fake-encoder` 只给 CPU 流程测试用（特征标成 synthetic_development_only）。
 """
@@ -24,6 +25,7 @@ from po_jepa.droid import download as dl  # noqa: E402
 from po_jepa.droid import encode as en  # noqa: E402
 from po_jepa.droid import index as ix  # noqa: E402
 from po_jepa.droid import prepare as pp  # noqa: E402
+from po_jepa.droid import spectral_gap as sg  # noqa: E402
 from po_jepa.droid.config import load_config  # noqa: E402
 
 NOT_IMPLEMENTED = 2
@@ -50,6 +52,8 @@ def stage_argv(stage: str, rest: str, a: argparse.Namespace) -> list[str]:
 
 MAINS = {"index": lambda argv: ix.main(argv), "download": lambda argv: dl.main(argv),
          "prepare": lambda argv: pp.main(argv), "encode": lambda argv: en.main(argv)}
+# 阶段整体还没接上、但其中某个任务已经能跑的（S11b：截断间隙只读特征和 sigma_z.json）
+JOB_MAINS = {f"eval/{droid_jobs.SPECTRAL_GAP}": lambda argv: sg.main(argv)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,11 +86,14 @@ def main(argv: list[str] | None = None) -> int:
     if done.exists():
         print(f"{a.job}: already complete ({done})")
         return 0
-    if stage in PENDING:
+    if a.job in JOB_MAINS:
+        code = JOB_MAINS[a.job](["--config", str(a.config), "--data-root", str(a.data_root), "--run-root", str(a.run_root)])
+    elif stage in PENDING:
         print(f"{a.job}: stage {stage!r} is not implemented yet ({PENDING[stage]}); nothing was written",
               file=sys.stderr)
         return NOT_IMPLEMENTED
-    code = MAINS[stage](stage_argv(stage, rest, a))
+    else:
+        code = MAINS[stage](stage_argv(stage, rest, a))
     if code != 0:
         return code
     if not done.exists():

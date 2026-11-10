@@ -1,8 +1,9 @@
-"""DROID 评测轴（docs/design/10-evaluation.md §8，S11a）。
+"""DROID 评测轴（docs/design/10-evaluation.md §8，S11a、S11b）。
 
-本段（S11a）做冻结测试窗口上的各轴（10 §8.2 的表、§8.3 动作干预、§8.6 AC 的处理、§8.7 成败分开、§8.9 的
-rows/续跑/report）和 `commanded` 配置的跳过（§8.1 最后一条）。原始帧率（§8.4）、原始分辨率（§8.5）、截断间隙（§8.8）
-和读检查点（§8.1 前三条，依赖 S09 的检查点格式）在 S11b。
+S11a 做冻结测试窗口上的各轴（10 §8.2 的表、§8.3 动作干预、§8.6 AC 的处理、§8.7 成败分开、§8.9 的 rows/续跑/report）
+和 `commanded` 配置的跳过（§8.1 最后一条）。S11b 加原始帧率（§8.4，`evaluate_frame_rate`）、原始分辨率（§8.5，
+`evaluate_resolution`），由 `evaluate_job` 的 `extra_reader` 打开；截断间隙（§8.8）是单独的 CPU 任务，在
+`droid/spectral_gap.py`；读检查点（§8.1 前三条）的格式由 S09 定，这里只有接口 `load_selected`。
 
 记号（10 §8.2）：窗口 w =（回合，时长 d，起点行 s），z 是第 s 行特征，z*_T 是第 s+T 行，u 是第 s … s+T−1 个周期的
 动作（`batches.make_eval_batch` 组装，和训练批相同）。每个窗口只算 T = d 的量。d(a, b) 是 JEPA 距离
@@ -39,17 +40,22 @@ rows/续跑/report）和 `commanded` 配置的跳过（§8.1 最后一条）。�
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+import numpy as np
 import torch
 
 from po_jepa import ln_metrics, metrics
-from po_jepa.actions import ActionSegments, concatenate_action_segments, split_action_segments
+from po_jepa.actions import ActionSegments, concatenate_action_segments, from_physical_segments, split_action_segments
 from po_jepa.droid import batches as bt
 from po_jepa.droid import index as ix
+from po_jepa.droid import windows as wn
+from po_jepa.droid.actions import poses_to_diffs
+from po_jepa.droid.poses import compute_new_pose
 from po_jepa.droid.config import DroidConfig
 from po_jepa.geometry import apply_spatial_transfer, build_spatial_transfer, regular_grid
 from po_jepa.losses import LossConfig, SpatialPredictions, TemporalPredictions, input_scale, jepa_distance
@@ -434,14 +440,378 @@ def evaluate_split(output: Path | str, *, model, split: str, doc: Mapping, prepa
                 macro=summarize(rows, config))
 
 
+# ---------------------------------------------------------------- 原始帧率（10 §8.4，S11b）
+
+SCHEMA_FRAME_RATE = "droid_eval_frame_rate_v1"
+SCHEMA_RESOLUTION = "droid_eval_resolution_v1"
+FRAME_RATE_FILE = "frame_rate.json"
+RESOLUTION_FILE = "resolution.json"
+
+AcSteps = Callable[[object, torch.Tensor, torch.Tensor, torch.Tensor, object], torch.Tensor]
+
+
+def frame_rate_plan(config: DroidConfig) -> dict:
+    """10 §8.4 的帧数表：单步 F ∈ frame_rate_single ∪ {一个周期}、滚动步长 F ∈ frame_rate_rollout ∪ {一个周期}（滚
+    total/F 步）、一次直接预测 total 帧；δ = F / frames_per_interval 个周期。s5 文件第 j 行是第 stride·j 帧。"""
+    per, stride = config.time.frames_per_interval, config.encode.frame_rate_stride_frames
+    e = config.evaluation
+    total = e.frame_rate_total_frames
+    single = tuple(sorted({*e.frame_rate_single, per}))
+    roll = tuple(sorted({*e.frame_rate_rollout, per}))
+    if any(f <= 0 or f % stride for f in (*single, *roll, total)) or total % per or any(total % f for f in roll):
+        raise ValueError(f"frame-rate frames {single}, {roll}, {total} must be positive multiples of the s5 stride "
+                         f"{stride}, the total a multiple of {per} and of every rollout step")
+    return dict(per=per, stride=stride, total=total, single=single, rollout=roll, duration=wn.frame_rate_duration(config))
+
+
+def frame_rate_names(config: DroidConfig) -> tuple[str, ...]:
+    """原始帧率每个起点的键（固定顺序）：single:f=F、rollout:f=F、direct:f=total（F 是帧数）。"""
+    p = frame_rate_plan(config)
+    return (*(f"single:f={f}" for f in p["single"]), *(f"rollout:f={f}" for f in p["rollout"]), f"direct:f={p['total']}")
+
+
+def frame_rate_definitions(config: DroidConfig) -> dict:
+    p = frame_rate_plan(config)
+    per = p["per"]
+    return dict(
+        frames_per_interval=per, s5_stride_frames=p["stride"], total_frames=p["total"],
+        single=[dict(name=f"single:f={f}", frames=f, delta=f/per, s5_target_offset=f//p["stride"]) for f in p["single"]],
+        rollout=[dict(name=f"rollout:f={f}", frames=f, delta=f/per, steps=p["total"]//f,
+                      s5_target_offset=p["total"]//p["stride"]) for f in p["rollout"]],
+        direct=dict(name=f"direct:f={p['total']}", frames=p["total"], duration=p["total"]//per, segments=p["total"]//per),
+        control="u = poses_to_diffs([s_f, s_{f+F}]) / delta (01 §5.5), one segment [0, delta) per call, local origin 0; "
+                "direct uses one per-cycle pose diff per cycle",
+        ac="AC: one step = stride frames, actions are the physical stride-frame pose diffs (not divided by delta); a call "
+           "of delta cycles = F/stride steps; the start state of each call is state_all[f0] integrated with "
+           "compute_new_pose over the earlier steps",
+        excluded="an entry whose per-cycle control u/delta leaves the ControlSpec physical bounds for any key is "
+                 "excluded for every condition (all values None) and counted")
+
+
+def _poses(prepared, uuid: str, source: str) -> tuple[np.ndarray, np.ndarray]:
+    """全部步的位姿（动作源的 state_all 或 command_all）和真实状态 state_all，float64 [T, 7]。"""
+    arrays = prepared[uuid].arrays
+    poses, states = arrays["command_all" if source == "commanded" else "state_all"], arrays["state_all"]
+    for a in (poses, states):
+        if a.dtype != np.float64 or a.ndim != 2 or a.shape[1] != 7:
+            raise ValueError(f"episode {uuid}: full-rate poses must be float64 [T, 7]")
+    return poses, states
+
+
+def _diff(poses: np.ndarray, frames: Sequence[int]) -> np.ndarray:
+    """poses_to_diffs(poses[frames])，float64 [len(frames) − 1, 7]。"""
+    return np.asarray(poses_to_diffs(poses[list(frames)]), dtype=np.float64)
+
+
+def _segments(values: np.ndarray, lengths: Sequence[float], ids: Sequence[str], control_spec, device) -> ActionSegments:
+    """物理控制值 float64 [B, J, 7]（每段一个），段长 `lengths`（周期），局部原点 0 → v7 `ActionSegments`。"""
+    b, j = values.shape[:2]
+    ends = torch.tensor(np.cumsum(np.asarray(lengths, dtype=np.float64)), dtype=torch.float64)
+    starts = torch.cat([torch.zeros(1, dtype=torch.float64), ends[:-1]])
+    period = control_spec.control_period_seconds
+    return from_physical_segments(
+        starts_seconds=(starts*period).expand(b, j).clone(), ends_seconds=(ends*period).expand(b, j).clone(),
+        u_values=torch.from_numpy(values.astype(np.float32)).to(device), n_segments=torch.full((b,), j, dtype=torch.int64),
+        segment_valid=torch.ones(b, j, dtype=torch.bool), origin_seconds=torch.zeros(b, dtype=torch.float64),
+        control_spec=control_spec, source_ids=tuple(ids))
+
+
+def _in_bounds(values: np.ndarray, control_spec) -> bool:
+    """和 `from_physical_segments` 相同的判法（float32 比较物理界）。"""
+    v = torch.from_numpy(np.asarray(values, dtype=np.float32))
+    lo, hi = v.new_tensor(control_spec.lower_bounds), v.new_tensor(control_spec.upper_bounds)
+    return bool(torch.isfinite(v).all() and not torch.any((v < lo) | (v > hi)))
+
+
+def frame_rate_controls(poses: np.ndarray, f0: int, plan: dict) -> dict[str, list[np.ndarray]]:
+    """一个起点每个键的物理控制值：{键: [每次调用的 float64 [J, 7]]}（单步 1 次、滚动 total/F 次、直接 1 次 J = total/per）。"""
+    per, total = plan["per"], plan["total"]
+    out = {}
+    for f in plan["single"]:
+        out[f"single:f={f}"] = [_diff(poses, (f0, f0 + f))/(f/per)]
+    for f in plan["rollout"]:
+        out[f"rollout:f={f}"] = [_diff(poses, (f0 + k*f, f0 + (k + 1)*f))/(f/per) for k in range(total//f)]
+    out[f"direct:f={total}"] = [_diff(poses, range(f0, f0 + total + 1, per))]
+    return out
+
+
+def ac_frame_rate_actions(poses: np.ndarray, states: np.ndarray, f0: int, plan: dict) -> dict[str, list[tuple]]:
+    """AC 的小步（01 §5.4、10 §8.4）：{键: [每次调用的 (物理动作 float64 [F/stride, 7]，起点状态 float64 [7])]}。
+    小步动作是相邻 stride 帧的物理位姿差，不除以 δ；第 k 次调用的起点状态 = state_all[f0] 用 compute_new_pose 按前面的
+    小步积分（第一次就是 state_all[f0]）。"""
+    stride, total, per = plan["stride"], plan["total"], plan["per"]
+    small = _diff(poses, range(f0, f0 + total + 1, stride))                     # [total/stride, 7]
+    state = torch.from_numpy(states[f0].copy())[None, None]                     # [1, 1, 7]
+    integrated = [state[0, 0].numpy().copy()]
+    for a in small:
+        state = compute_new_pose(state, torch.from_numpy(a.copy())[None, None])
+        integrated.append(state[0, 0].numpy().copy())
+    out = {}
+    for f in plan["single"]:
+        out[f"single:f={f}"] = [(small[:f//stride], integrated[0])]
+    for f in plan["rollout"]:
+        n = f//stride
+        out[f"rollout:f={f}"] = [(small[k*n:(k + 1)*n], integrated[k*n]) for k in range(total//f)]
+    out[f"direct:f={total}"] = [(small, integrated[0])]
+    return out
+
+
+def _frame_rate_entries(doc: Mapping, skipped: set[str], config: DroidConfig) -> list[dict]:
+    """冻结窗口文件里的原始帧率起点（06 §3），核编号、起点帧 = 15·s 且有对应的 d = 4 窗口；跳过 `commanded` 没通过的回合。"""
+    plan = frame_rate_plan(config)
+    extra = set(doc.get("extra_episodes", []))
+    windows = {w["id"] for w in doc["windows"]}
+    out = []
+    for e in doc.get("frame_rate", []):
+        f0 = _int_value(e["start_frame"], "start_frame")
+        if (e["id"] != wn.frame_rate_id(e["uuid"], f0) or f0 % plan["per"] or e["uuid"] not in extra
+                or wn.window_id(e["uuid"], plan["duration"], f0//plan["per"]) not in windows):
+            raise ValueError(f"frame-rate entry {e['id']!r} is not a start frame 15·s of a d = {plan['duration']} "
+                             "window of an extra episode")
+        if e["uuid"] not in skipped:
+            out.append(dict(e))
+    return out
+
+
+def _int_value(value, name: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{name} must be an int, got {value!r}")
+    return value
+
+
+def _extra_record(extra_reader, uuid: str, kind: str, episodes, prepared) -> dict:
+    """附加特征和准备文件配对（准备 JSON 的 SHA），并返回特征 JSON。"""
+    record = extra_reader.record(uuid, kind)
+    if record.get("prepared_sha256") != episodes[uuid].prepared_sha256:
+        raise ValueError(f"episode {uuid} {kind}: the test-extra features were encoded from another prepared file")
+    return record
+
+
+def _s5_rows(extra_reader, uuid: str, kind: str, rows: Sequence[int], stride: int, episodes, prepared) -> torch.Tensor:
+    record = _extra_record(extra_reader, uuid, kind, episodes, prepared)
+    index = record.get("frame_index")
+    if not isinstance(index, list) or any(r >= len(index) or index[r] != stride*r for r in rows):
+        raise ValueError(f"episode {uuid} {kind}: rows {list(rows)} are not frames {[stride*r for r in rows]} "
+                         f"(the s5 file has {len(index) if isinstance(index, list) else None} rows)")
+    return extra_reader.rows(uuid, kind, rows)
+
+
+def _macro_values(rows: Sequence[Mapping], name: str, outcome: str | None, *, duration: int | None = None) -> dict:
+    by_episode: dict[str, list[float]] = {}
+    for r in rows:
+        if (duration is None or r["duration"] == duration) and (outcome is None or r["outcome"] == outcome):
+            v = r["values"][name]
+            if v is not None:
+                by_episode.setdefault(r["uuid"], []).append(v)
+    means = [sum(v)/len(v) for v in by_episode.values()]
+    return dict(episode_macro_mean=sum(means)/len(means) if means else None, episodes=len(means),
+                windows=sum(len(v) for v in by_episode.values()))
+
+
+def _macros(rows, names, **kw) -> dict:
+    return {n: {"all": _macro_values(rows, n, None, **kw), **{o: _macro_values(rows, n, o, **kw) for o in OUTCOMES}}
+            for n in names}
+
+
+def _reuse(path: Path, schema: str, split: str, ids: list[str]) -> dict | None:
+    """已写好的 frame_rate.json / resolution.json：schema、测试集和起点（窗口）编号都等于这一次的就复用，否则报错。"""
+    if not path.exists():
+        return None
+    body = ix._loads(path.read_bytes(), str(path))
+    if body.get("schema") != schema or body.get("split") != split or [r["id"] for r in body["entries"]] != ids:
+        raise ValueError(f"{path} does not hold the current entries of {split}")
+    return body
+
+
+@torch.no_grad()
+def frame_rate_group(model, entries: Sequence[Mapping], *, prepared, episodes, extra_reader, control_spec,
+                     loss_config: LossConfig, config: DroidConfig, device, ac_steps: AcSteps | None = None) -> list[dict]:
+    """一批原始帧率起点的记录（10 §8.4）：起点和目标都从 s5 文件读，每个键的未来误差 d(预测, 目标)。"""
+    plan = frame_rate_plan(config)
+    source = config.action.source
+    kind, stride, per, total = f"s{plan['stride']}", plan["stride"], plan["per"], plan["total"]
+    grid16 = regular_grid(GRID, GRID)
+    jepa = lambda a, y: jepa_distance(a, y, config=loss_config).per_sample
+    names = frame_rate_names(config)
+    records, live = [], []
+    for e in entries:
+        u, f0 = e["uuid"], e["start_frame"]
+        poses, states = _poses(prepared, u, source)
+        if f0 + total >= poses.shape[0]:
+            raise ValueError(f"frame-rate entry {e['id']}: needs frame {f0 + total} of an episode with {poses.shape[0]} steps")
+        controls = frame_rate_controls(poses, f0, plan)
+        ok = all(_in_bounds(v, control_spec) for calls in controls.values() for v in calls)
+        records.append(dict(id=e["id"], uuid=u, start_frame=f0, s5_start_row=f0//stride, outcome=None,
+                            excluded=None if ok else "control_out_of_bounds", values={n: None for n in names}))
+        if ok:
+            live.append((len(records) - 1, e, poses, states, controls))
+    if not live:
+        return records
+    j0 = [e["start_frame"]//stride for _, e, _, _, _ in live]
+    raw = torch.cat([_s5_rows(extra_reader, e["uuid"], kind, [j], stride, episodes, prepared)
+                     for (_, e, _, _, _), j in zip(live, j0)]).to(device)
+    ids = [e["id"] for _, e, _, _, _ in live]
+
+    def target(offset):
+        return torch.cat([_s5_rows(extra_reader, e["uuid"], kind, [j + offset], stride, episodes, prepared)
+                          for (_, e, _, _, _), j in zip(live, j0)]).to(device)
+
+    def run(name, step_frames, n_calls, offset):
+        x = raw
+        if ac_steps is None:
+            delta = step_frames/per
+            for k in range(n_calls):
+                values = np.stack([c[name][k] for *_, c in live])
+                lengths = [delta] if values.shape[1] == 1 else [1.]*values.shape[1]
+                seg = _segments(values, lengths, [f"{i}|{name}|{k}" for i in ids], control_spec, device)
+                x = model(x, seg, seg.duration.clone(), grid16)
+        else:
+            acts = [ac_frame_rate_actions(p, s, e["start_frame"], plan)[name] for _, e, p, s, _ in live]
+            for k in range(n_calls):
+                a = torch.from_numpy(np.stack([c[k][0] for c in acts]))
+                s0 = torch.from_numpy(np.stack([c[k][1] for c in acts]))
+                x = ac_steps(model, x, a, s0, grid16)
+        return _list(jepa(x, target(offset)))
+
+    values = {}
+    for f in plan["single"]:
+        values[f"single:f={f}"] = run(f"single:f={f}", f, 1, f//stride)
+    for f in plan["rollout"]:
+        values[f"rollout:f={f}"] = run(f"rollout:f={f}", f, total//f, total//stride)
+    values[f"direct:f={total}"] = run(f"direct:f={total}", per, 1, total//stride)
+    for k, (i, *_rest) in enumerate(live):
+        records[i]["values"] = {n: values[n][k] for n in names}
+    return records
+
+
+def evaluate_frame_rate(output: Path | str, *, model, split: str, doc: Mapping, prepared: Mapping, outcomes, skipped,
+                        episodes, extra_reader, control_spec, loss_config, config, device, ac_steps=None) -> dict:
+    """`<output>/frame_rate.json`（每个起点一条，已有且是这一次的起点就复用），返回这个测试集的汇总。"""
+    path = Path(output)/FRAME_RATE_FILE
+    entries = _frame_rate_entries(doc, skipped, config)
+    names = frame_rate_names(config)
+    body = _reuse(path, SCHEMA_FRAME_RATE, split, [e["id"] for e in entries])
+    if body is None:
+        rows = []
+        for chunk in bt.chunks(entries) if entries else []:
+            rows += frame_rate_group(model, chunk, prepared=prepared, episodes=episodes, extra_reader=extra_reader,
+                                     control_spec=control_spec, loss_config=loss_config, config=config, device=device,
+                                     ac_steps=ac_steps)
+        for r in rows:
+            r["outcome"] = outcomes[r["uuid"]]
+        body = dict(schema=SCHEMA_FRAME_RATE, split=split, entries=rows)
+        Path(output).mkdir(parents=True, exist_ok=True)
+        cache._write_json(path, body)
+    rows = body["entries"]
+    return dict(counts=dict(entries=len(rows), episodes=len({r["uuid"] for r in rows}),
+                            excluded=sum(r["excluded"] is not None for r in rows)),
+                excluded=[r["id"] for r in rows if r["excluded"] is not None],
+                macro=_macros(rows, names))
+
+
+# ---------------------------------------------------------------- 原始分辨率（10 §8.5，S11b）
+
+def resolution_kinds(config: DroidConfig) -> dict[str, int]:
+    """{附加特征种类: 网格边长}：r192 → 12、r320 → 20（patch 16）。"""
+    out = {}
+    for r in config.encode.extra_resolutions:
+        if r % 16:
+            raise ValueError(f"extra resolution {r} is not a multiple of the patch size 16")
+        out[f"r{r}"] = r//16
+    return out
+
+
+def resolution_names(config: DroidConfig) -> tuple[str, ...]:
+    return ("future:g=16", *(f"future:{k}" for k in resolution_kinds(config)))
+
+
+@torch.no_grad()
+def resolution_group(model, group: Sequence[Mapping], *, prepared, episodes, reader, extra_reader, control_spec,
+                     provenance, loss_config, config, device, bind: Bind | None = None) -> list[dict]:
+    """一组同时长的附加回合窗口：主特征 16×16 的未来误差，和 r192/r320 同一行（s、s + d）上原生网格的未来误差。"""
+    duration = group[0]["duration"]
+    if any(w["duration"] != duration for w in group):
+        raise ValueError("a resolution group shares one duration")
+    loaded = bt.load_windows(group, reader, episodes)
+    jepa = lambda a, y: jepa_distance(a, y, config=loss_config).per_sample
+    batch = bt.assemble_training_batch(loaded, control_spec, provenance, device)
+    phi = _predictor(model, bind, loaded.start_states, batch.controls)
+    values = {"future:g=16": _list(jepa(phi(batch.raw_z, batch.controls, batch.duration, regular_grid(GRID, GRID)),
+                                        batch.raw_target))}
+    for kind, side in resolution_kinds(config).items():
+        pairs = []
+        for w in group:
+            u, s = w["uuid"], w["start"]
+            record = _extra_record(extra_reader, u, kind, episodes, prepared)
+            main_index = [int(i) for i in prepared[u].arrays["frame_index"]]
+            if record.get("rows") != episodes[u].rows or record.get("frame_index") != main_index:
+                raise ValueError(f"episode {u} {kind}: rows are not the main feature frames")
+            pairs.append(extra_reader.rows(u, kind, [s, s + duration]))
+        pair = torch.stack(pairs)
+        if pair.shape[2] != side*side:
+            raise ValueError(f"{kind}: {pair.shape[2]} tokens, expected {side}×{side}")
+        native = dataclasses.replace(loaded, raw_z=pair[:, 0].contiguous(), raw_target=pair[:, 1].contiguous())
+        nb = bt.assemble_training_batch(native, control_spec, provenance, device)
+        values[f"future:{kind}"] = _list(jepa(phi(nb.raw_z, nb.controls, nb.duration, regular_grid(side, side)),
+                                              nb.raw_target))
+    return [dict(id=w["id"], uuid=w["uuid"], duration=duration, start=w["start"], outcome=None,
+                 values={n: values[n][k] for n in resolution_names(config)}) for k, w in enumerate(group)]
+
+
+def evaluate_resolution(output: Path | str, *, model, split: str, doc: Mapping, prepared, outcomes, skipped, episodes,
+                        reader, extra_reader, control_spec, provenance, loss_config, config, device, bind=None) -> dict:
+    """`<output>/resolution.json`（附加回合里 d ∈ 同分布时长的每个窗口一条），返回这个测试集的汇总。"""
+    path = Path(output)/RESOLUTION_FILE
+    extra = set(doc.get("extra_episodes", []))
+    ids_d = set(config.evaluation.durations_id)
+    windows = [w for w in doc["windows"] if w["uuid"] in extra and w["uuid"] not in skipped and w["duration"] in ids_d]
+    body = _reuse(path, SCHEMA_RESOLUTION, split, [w["id"] for w in windows])
+    if body is None:
+        records: list = []
+        for chunk in bt.chunks(windows) if windows else []:
+            part: list[dict | None] = [None]*len(chunk)
+            for d, index in _group(chunk).items():
+                for i, r in zip(index, resolution_group(
+                        model, [chunk[i] for i in index], prepared=prepared, episodes=episodes, reader=reader,
+                        extra_reader=extra_reader, control_spec=control_spec, provenance=provenance,
+                        loss_config=loss_config, config=config, device=device, bind=bind)):
+                    part[i] = r
+            records += part
+        for r in records:
+            r["outcome"] = outcomes[r["uuid"]]
+        body = dict(schema=SCHEMA_RESOLUTION, split=split, entries=records)
+        Path(output).mkdir(parents=True, exist_ok=True)
+        cache._write_json(path, body)
+    rows = body["entries"]
+    return dict(counts=dict(windows=len(rows), episodes=len({r["uuid"] for r in rows})),
+                macro={str(d): _macros(rows, resolution_names(config), duration=d)
+                       for d in sorted({r["duration"] for r in rows})})
+
+
+# ---------------------------------------------------------------- 读检查点（10 §8.1，等 S09）
+
+def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: LossConfig, config: DroidConfig,
+                  provenance: dict) -> dict:
+    """10 §8.1 的放宽读法：读 `selection.json` 选出的检查点，核文件 SHA、步数、配置快照、`model_state` 和来源里的数据
+    字段（`feature_manifest_sha256` 等），`source_files_sha256` 只记录；返回写进 `job.json` 的检查点记录（路径、SHA、步数）
+    和 `source.json` 的内容。检查点和 `selection.json` 的格式由 S09 定，所以这里只留接口。"""
+    raise NotImplementedError("10 §8.1 checkpoint loading waits for the S09 checkpoint and selection.json format")
+
+
 # ---------------------------------------------------------------- 一个评测任务
 
 def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None, job: Mapping, splits: Mapping[str, Mapping],
                  prepared: Mapping, outcomes: Mapping[str, str], reader, control_spec, provenance: dict,
-                 loss_config: LossConfig, config: DroidConfig, device, bind: Bind | None = None) -> dict:
-    """`eval/<条件>/seed<种子>/`（10 §8.9）的窗口轴部分：`job.json`（`job` 由调用者给，读检查点的记录在 S11b）、两个测试集
-    的 rows、`report.json`、`COMPLETE.json`。已完成就直接返回已有的报告；三角不等式有违反时写 `FAILED.json` 并报错。
-    模型在 eval 模式、no_grad 下跑，前后核对参数、梯度和 buffer 没变（10 §1）。"""
+                 loss_config: LossConfig, config: DroidConfig, device, bind: Bind | None = None,
+                 extra_reader=None, ac_steps: AcSteps | None = None) -> dict:
+    """`eval/<条件>/seed<种子>/`（10 §8.9）：`job.json`（`job` 由调用者给，读检查点的记录由 `load_selected` 给，等 S09）、
+    两个测试集的 rows、`frame_rate.json` 和 `resolution.json`（给了 `extra_reader` 时，S11b）、`report.json`、
+    `COMPLETE.json`。已完成就直接返回已有的报告；三角不等式有违反时写 `FAILED.json` 并报错。
+    模型在 eval 模式、no_grad 下跑，前后核对参数、梯度和 buffer 没变（10 §1）。
+
+    `extra_reader` 是测试附加特征的 `features.ExtraFeatureReader`；不给时报告的 `axes` 记原始帧率和原始分辨率没做。
+    AC 的原始帧率要 `ac_steps(model, raw, actions, start_state, grid)`（S08b 的小步前向：`actions` 是物理单位的小步动作
+    CPU float64 [B, n, 7]，`start_state` 是这次调用起点的状态 CPU float64 [B, 7]，返回 n 个小步之后的预测）。"""
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
     if (out/"COMPLETE.json").exists():
@@ -453,6 +823,10 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
         raise ValueError("ac_state: true_state needs the state-binding wrapper (09 §6.2) for AC conditions")
     if condition not in AC_CONDITIONS and bind is not None:
         raise ValueError("only AC conditions take a state-binding wrapper")
+    if condition in AC_CONDITIONS and extra_reader is not None and ac_steps is None:
+        raise ValueError("the AC frame-rate axis needs the small-step forward ac_steps (10 §8.4)")
+    if condition not in AC_CONDITIONS and ac_steps is not None:
+        raise ValueError("only AC conditions take ac_steps")
     if set(splits) != set(TEST_SPLITS):
         raise ValueError(f"an evaluation job covers both test splits {TEST_SPLITS}")
     for stale in out.glob("*.partial"):
@@ -475,6 +849,15 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
                                             outcomes=outcomes, reader=reader, control_spec=control_spec,
                                             provenance=provenance, loss_config=loss_config, config=config,
                                             device=device, bind=bind)
+            if extra_reader is not None:                       # 10 §8.4、§8.5（S11b）
+                _, kept_episodes, skipped = _selected(splits[split], prepared, config.action.source)
+                episodes = bt.episode_arrays(prepared, kept_episodes, config.action.source)
+                common = dict(model=model, split=split, doc=splits[split], prepared=prepared, outcomes=outcomes,
+                              skipped=skipped, episodes=episodes, extra_reader=extra_reader, control_spec=control_spec,
+                              loss_config=loss_config, config=config, device=device)
+                results[split]["frame_rate"] = evaluate_frame_rate(out/split, ac_steps=ac_steps, **common)
+                results[split]["resolution"] = evaluate_resolution(out/split, reader=reader, provenance=provenance,
+                                                                   bind=bind, **common)
     finally:
         for module, flag in modes.items():
             module.training = flag
@@ -485,6 +868,11 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
     ac = condition in AC_CONDITIONS
     report = dict(schema=SCHEMA_REPORT, job=head, status="failed" if problems else "passed", problems=problems,
                   splits=results, definitions=definitions(config),
+                  axes=dict(windows=True, frame_rate=extra_reader is not None, resolution=extra_reader is not None),
+                  frame_rate_definitions=frame_rate_definitions(config),
+                  resolution_definitions=dict(kinds=resolution_kinds(config), durations=list(config.evaluation.durations_id),
+                                              note="same rows s, s + d of the r<R> files on regular_grid(R/16, R/16); "
+                                                   "future:g=16 is the 256-input main feature on the same windows"),
                   not_comparable=list(INPUT_SPACE_METRICS) if ac else [],
                   ac_interpolated_tcd=[f"tcd_ln:d={d}" for d in AC_INTERPOLATED_TCD] if ac else [],
                   device=str(device), scientific_conclusions_verified=False)

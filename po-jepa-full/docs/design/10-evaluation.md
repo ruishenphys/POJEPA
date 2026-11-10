@@ -182,7 +182,7 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 
 ## 8. DROID 评测轴
 
-代码在 `src/po_jepa/droid/evaluate.py`（S11；拆成 S11a：§8.2、§8.3、§8.6、§8.7、§8.9 和 §8.1 的 `commanded` 跳过，S11b：§8.4、§8.5、§8.8 和 §8.1 的读检查点，见 `docs/segments/S11a.md`）。§3 的指标定义（两种度量、分割滚动 Φ_Π、归一化）DROID 上原样使用，只把“tick”换成“周期”，窗口换成 06 §3 的冻结窗口。
+代码在 `src/po_jepa/droid/evaluate.py`（S11；拆成 S11a：§8.2、§8.3、§8.6、§8.7、§8.9 和 §8.1 的 `commanded` 跳过，S11b：§8.4、§8.5、§8.8（截断间隙在 `droid/spectral_gap.py`），见 `docs/segments/S11a.md`、`S11b.md`；§8.1 的读检查点等 S09，接口 `evaluate.load_selected`）。§3 的指标定义（两种度量、分割滚动 Φ_Π、归一化）DROID 上原样使用，只把“tick”换成“周期”，窗口换成 06 §3 的冻结窗口。
 
 ### 8.1 任务和读检查点
 
@@ -225,9 +225,13 @@ S11a 补充（实现时定，见 `docs/segments/S11a.md` §3）：未来误差�
 - **AC**：一步就是重采样后的一帧间隔（5 帧），动作是这 5 帧的物理位姿差，不除以 δ（01 §5.4）。时长 δ 的一次调用 = 连续 3δ 个这样的小步，状态从 `state_all[f0]` 起按动作积分；滚动时每次调用都从上一次的输出重新开始上下文，和其他模型的复合方式一致。
 - 指标：每一项的未来误差 d(预测, 目标)；identity 作参照。
 
+S11b 补充（实现时定，见 `docs/segments/S11b.md` §3）：代码 `evaluate.evaluate_frame_rate`，输出 `<测试集>/frame_rate.json`。每次调用的控制用局部原点 0（一段 [0, δ)，时长 δ 精确）。键名按帧数：`single:f=5/10/15/20`、`rollout:f=10/15/20`、`direct:f=60`。某个起点任一键的 u/δ 越出 `ControlSpec` 的物理界时整个起点排除（值记 None、计数），所有条件排除同一批。AC 的所有键都按 5 帧一小步，接口 `ac_steps(model, raw, actions, start_state, grid)`（S08b 实现），滚动第 k 次调用的起点状态由 `state_all[f0]` 按前面的小步积分。
+
 ### 8.5 原始分辨率
 
 只用附加回合里 d ∈ {1, 2, 4, 8} 的窗口。起点和目标都换成 r192（12×12 = 144 个 token）或 r320（20×20 = 400 个 token）的同一行（05 §4），网格用 `regular_grid(12, 12)` 或 `regular_grid(20, 20)`，模型直接在这个网格上预测，不做重采样。指标是未来误差；同一批窗口上 256 输入的 16×16 未来误差一起列出作对照。PO-JEPA 类在 144 或 400 个 token 上建图求谱；Koopman 的基底按 08 §5.3 换到这个网格；AC 按 v7 的做法把 RoPE 位置缩放到 16×16。
+
+S11b 补充：代码 `evaluate.evaluate_resolution`，输出 `<测试集>/resolution.json`，键 `future:g=16`、`future:r192`、`future:r320`；附加特征的 `prepared_sha256` 和帧号要等于准备文件的。
 
 ### 8.6 AC 的特殊处理
 
@@ -242,6 +246,8 @@ S11a 补充（实现时定，见 `docs/segments/S11a.md` §3）：未来误差�
 ### 8.8 截断间隙
 
 和 §5 相同的做法，每个配置跑一次 CPU 任务 `eval/spectral-gap`：两个测试集里 d = 1 的全部窗口的起点帧，在 16×16、8×8、12×12 上用 σ_z 的 DROID 标定值建图，报告 λ_16、λ_17、`cutoff_gap` 和相邻间隙中位数之比的分位数，判断规则同 §5。
+
+S11b 补充：代码 `src/po_jepa/droid/spectral_gap.py`（复用 `addon.spectral_gap.window_gaps`、`summarize`），`tools/droid.py eval --job eval/spectral-gap` 已接上；图是 09 §2.1 配置块的 `graph` 段，只换 σ_z（`<name>/calibration/sigma_z.json`）；判断用两个测试集合起来的窗口，各测试集的分位数另记。
 
 ### 8.9 输出
 

@@ -38,7 +38,7 @@
 
 下载、准备、编码按片串起来：一片下完就能准备，准备完就能编码，不用等全部下完。训练任务之间互不依赖，可以同时跑。
 
-S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推出，不读索引；数据根里已有 `index/splits.json` 时用 `splits.shard_plan` 并核对两者相同；`use_failures: false` 的片号取决于失败回合的位置，必须先有索引。汇总依赖全部 `eval/*`（含 `eval/spectral-gap`）。统一入口 `tools/droid.py` 目前接上 index、download、prepare、encode 四个阶段（转给 S02–S06b 各模块的 `main()`），其余阶段在 S09、S11–S13 写好之前退出 2、不写文件。
+S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推出，不读索引；数据根里已有 `index/splits.json` 时用 `splits.shard_plan` 并核对两者相同；`use_failures: false` 的片号取决于失败回合的位置，必须先有索引。汇总依赖全部 `eval/*`（含 `eval/spectral-gap`）。统一入口 `tools/droid.py` 目前接上 index、download、prepare、encode 四个阶段（转给 S02–S06b 各模块的 `main()`），其余阶段在 S09、S11–S13 写好之前退出 2、不写文件。S11b 接上了 `eval/spectral-gap`（`droid.spectral_gap.main`），其余 eval 任务仍退出 2。
 
 ## 3. 每个任务的共同约定
 
