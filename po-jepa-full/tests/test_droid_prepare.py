@@ -842,14 +842,14 @@ def test_stats_pool_must_be_prepared(raw, mp4_bytes, tmp_path):
         pr.run_stats(cfg, tmp_path)
 
 
-def test_stats_fails_above_one_percent_and_writes_nothing_shared(raw, mp4_bytes, tmp_path):
+def test_stats_fails_above_three_percent_and_writes_nothing_shared(raw, mp4_bytes, tmp_path):
     def edit(uuid, data):
         if uuid.startswith("PennPAL+acda9df1"):
             data["state_gripper"][3] = 1.5   # finite 失败
     cfg, _ = build_root(raw, tmp_path, mp4_bytes, edit=edit)
     cfg = small(cfg)
     prepare_all(cfg, tmp_path)
-    with pytest.raises(RuntimeError, match=r"shards \['ood_test'\] have more than 1%"):
+    with pytest.raises(RuntimeError, match=r"shards \['ood_test'\] have more than 3%"):
         pr.run_stats(cfg, tmp_path)
     stats = json.loads((tmp_path/"prepared"/"stats"/f"{cfg.name}.json").read_text(encoding="utf-8"))
     assert stats["over_limit"] == ["ood_test"] and stats["shards"]["ood_test"]["reasons"] == {"finite": 1}
@@ -863,8 +863,9 @@ def _records(n, failed):
                       "reasons": [] if i >= failed else ["timestamps"]} for i in range(n)}
 
 
-@pytest.mark.parametrize("n,failed,over", [(100, 1, False), (100, 2, True), (200, 2, False), (199, 2, True), (5, 0, False)])
-def test_one_percent_threshold(n, failed, over):
+@pytest.mark.parametrize("n,failed,over", [(100, 3, False), (100, 4, True), (200, 6, False), (199, 6, True),
+                                           (1000, 30, False), (1000, 31, True), (5, 0, False)])
+def test_three_percent_threshold(n, failed, over):
     records = _records(n, failed)
     shards, excluded = pr.shard_stats({"train-000": list(records)}, records, CFG)
     assert shards["train-000"]["failed"] == failed and excluded == [f"u{i}" for i in range(failed)]

@@ -47,7 +47,7 @@ SCALE_SCHEMA = "droid_action_scale_v1"
 STATS_SCHEMA = "droid_prepare_stats_v1"
 STATS_COMPLETE_SCHEMA = "droid_prepare_stats_complete_v1"
 WORKERS = 8                             # §5：8 个进程并行
-MAX_FAILED_RATIO = 0.01                 # §6 第 3 条：任一片失败比例超过 1% 时任务失败
+MAX_FAILED_RATIO = 0.03                 # §6 第 3 条：任一片失败比例超过 3% 时任务失败（Jerry 2026-11-10 定，原 1%）
 INTERVAL_QUANTILES = (0.01, 0.5, 0.99)  # §6 第 3 条
 
 # §3 的数组（顺序即 npz 和 arrays_sha256 里的顺序）
@@ -553,7 +553,7 @@ def shard_stats(plan: dict[str, list[str]], records: dict[str, dict], config: Dr
 
 
 def over_limit(shards: dict) -> list[str]:
-    """失败比例超过 MAX_FAILED_RATIO（1%）的片；恰好 1% 不算超过。"""
+    """失败比例超过 MAX_FAILED_RATIO（3%）的片；恰好 3% 不算超过。"""
     return [shard for shard, v in shards.items() if v["failed_ratio"] > MAX_FAILED_RATIO]
 
 
@@ -562,7 +562,7 @@ def run_stats(config: DroidConfig, data_root: Path | str) -> dict:
 
     依赖本配置的全部 `prepare/<片名>`。动作尺度和冻结窗口和配置无关（同一数据根共用）：文件不存在就写，已存在就
     重算并要求逐字节相同。`use_failures: false` 的配置不重算这两样，要求它们已由主配置写好。统计写
-    `prepared/stats/<配置名>.json`（各片条数和配置有关）；任一片失败比例超过 1% 时写完统计后任务失败。
+    `prepared/stats/<配置名>.json`（各片条数和配置有关）；任一片失败比例超过 3% 时写完统计后任务失败。
     """
     root = prepared_dir(data_root)
     done = root/COMPLETE_DIR/f"stats-{config.name}.json"

@@ -74,6 +74,6 @@ S05 补充（实现时定，见 `docs/segments/S05.md` §4）：
 
 1. **动作尺度** `prepared/action_scale.json`：取完整训练顺序（含失败回合，不受 `use_failures` 影响）的前 `scale_episodes`（500）条，每种动作源只用其中 `passed_<源>` 为真的回合（通常只少几条），按 01 §5.2 算各自的三个尺度。记下用到的 uuid 列表、分位数、算法（`numpy.quantile`，`method="linear"`，float64）。三个尺度都必须 > 0。格式按 S01 的读取方（01 §5.3）：顶层 `realized`、`commanded` 两个键，各自正好是 `{position, rotation, gripper}` 三个 float；记录类字段放在别的顶层键里。这 500 条就是 `train-000` 的前 500 条，试跑正好全部准备过，所以试跑就能算出来，正式运行沿用。σ_z 的标定用同一个回合池（09 §3.1）。`use_failures: false` 的配置不重算这些文件，要求同一数据根下主配置的 `prepare/stats` 已完成。
 2. **冻结窗口** `prepared/windows/{val,id_test,ood_test}.json`：按 06 §3 的规则生成，只含 `passed_realized` 为真的回合。
-3. **统计** `prepared/stats/<配置名>.json`（S05 改：各片在不同配置下的回合列表不同，统计和配置有关，所以按配置名分文件；可重算，重跑时覆盖）：每片通过和失败的条数（失败按本配置的 `action.source`）、失败原因计数、每片 `rows` 的总数、训练片去掉的回合（`train_excluded`）、`interval_seconds` 的分位数（1%、50%、99%，所有能构造数组的回合）。任一片的失败比例超过 1%（恰好 1% 不算）时写完统计后任务失败、不写 1、2 两项和完成记录：说明有系统性问题，要人来看，不能悄悄少掉很多回合。
+3. **统计** `prepared/stats/<配置名>.json`（S05 改：各片在不同配置下的回合列表不同，统计和配置有关，所以按配置名分文件；可重算，重跑时覆盖）：每片通过和失败的条数（失败按本配置的 `action.source`）、失败原因计数、每片 `rows` 的总数、训练片去掉的回合（`train_excluded`）、`interval_seconds` 的分位数（1%、50%、99%，所有能构造数组的回合）。任一片的失败比例超过 3%（恰好 3% 不算；Jerry 2026-11-10 定，原 1%：真实数据约 1.3% 回合视频帧数 ≠ T − 1，按 §4 跳过，见 `docs/segments/S05.md` §6）时写完统计后任务失败、不写 1、2 两项和完成记录：说明有系统性问题，要人来看，不能悄悄少掉很多回合。
 
 `commanded` 动作源只在开关打开时用到：它的尺度已在 `action_scale.json` 里；窗口文件仍是上面那一份，评测时再跳过 `passed_commanded` 为假的回合并报告跳过的条数。
