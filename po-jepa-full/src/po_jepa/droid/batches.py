@@ -146,27 +146,38 @@ def spatial_transfer():
     return build_spatial_transfer(regular_grid(GRID, GRID), target_height=CONSISTENCY_GRID, target_width=CONSISTENCY_GRID)
 
 
-def assemble_training_batch(loaded: LoadedWindows, control_spec: ControlSpec, provenance: dict,
-                            device) -> training.TrainingBatch:
-    """06 §4 的表：特征搬到 `device`，控制用 v7 `from_physical_segments` 构造，时间都是 CPU float64。"""
-    if control_spec.action_dim != loaded.actions.shape[-1]:
-        raise ValueError(f"control_spec has {control_spec.action_dim} channels, the actions have {loaded.actions.shape[-1]}")
+def window_controls(starts: torch.Tensor, durations: torch.Tensor, actions: torch.Tensor, control_spec: ControlSpec,
+                    sample_ids: tuple[str, ...], device):
+    """06 §4 的控制列：第 j 段（j < d）起止秒 (s + j)·P、(s + j + 1)·P，物理动作 `actions[:, j]`（float32 [B, J, m]，
+    padding 段不读），`origin_seconds = s·P`，用 v7 `from_physical_segments` 构造。返回 (controls, 起点秒, 终点秒)，
+    时间都是 CPU float64；终点秒 (s + d)·P 必须逐位等于 s·P + d·P。离线规划（11 §1）的候选动作也走这里。"""
+    if control_spec.action_dim != actions.shape[-1]:
+        raise ValueError(f"control_spec has {control_spec.action_dim} channels, the actions have {actions.shape[-1]}")
     period = control_spec.control_period_seconds
-    b, width = loaded.actions.shape[:2]
-    s = loaded.starts.to(torch.float64)
-    d = loaded.durations.to(torch.float64)
+    width = actions.shape[1]
+    s = starts.to(torch.float64)
+    d = durations.to(torch.float64)
     j = torch.arange(width, dtype=torch.float64)
-    valid = torch.arange(width)[None, :] < loaded.durations[:, None]
+    valid = torch.arange(width)[None, :] < durations[:, None]
     starts_seconds = torch.where(valid, (s[:, None] + j[None, :])*period, torch.zeros((), dtype=torch.float64))
     ends_seconds = torch.where(valid, (s[:, None] + j[None, :] + 1)*period, torch.zeros((), dtype=torch.float64))
     origin = s*period
     controls = from_physical_segments(
         starts_seconds=starts_seconds, ends_seconds=ends_seconds,
-        u_values=loaded.actions.to(device), n_segments=loaded.durations.clone(), segment_valid=valid,
-        origin_seconds=origin, control_spec=control_spec, source_ids=loaded.sample_ids)
-    target = (loaded.starts + loaded.durations).to(torch.float64)*period
+        u_values=actions.to(device), n_segments=durations.clone(), segment_valid=valid,
+        origin_seconds=origin, control_spec=control_spec, source_ids=sample_ids)
+    target = (starts + durations).to(torch.float64)*period
     if not torch.equal(target, origin + d*period):
         raise ValueError(f"window endpoints are not exactly representable with period {period}")
+    return controls, origin, target
+
+
+def assemble_training_batch(loaded: LoadedWindows, control_spec: ControlSpec, provenance: dict,
+                            device) -> training.TrainingBatch:
+    """06 §4 的表：特征搬到 `device`，控制用 v7 `from_physical_segments` 构造（`window_controls`），时间都是 CPU float64。"""
+    controls, origin, target = window_controls(loaded.starts, loaded.durations, loaded.actions, control_spec,
+                                               loaded.sample_ids, device)
+    d = loaded.durations.to(torch.float64)
     return training.TrainingBatch(
         raw_z=loaded.raw_z.to(device), raw_target=loaded.raw_target.to(device), controls=controls,
         duration=d, tau=d/2, sigma=d/2, transfer=spatial_transfer(),
