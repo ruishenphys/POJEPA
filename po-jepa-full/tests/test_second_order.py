@@ -557,12 +557,12 @@ def test_balls_curvature_bound_holds():
 
 
 def test_balls_flow_small_drag_is_stable():
-    """S23a-fix1（Codex P2 反例）：极小正阻力 β 时 p(τ) = p + v·E + a·F 不能相近数相减。参照用 50 位十进制独立计算
+    """S23a-fix1（Codex P2 反例）：极小正阻力 β 时 p(τ) = p + v·E + a·F 不能相近数相减。参照用 700 位十进制独立计算
     E = (1 − e^{−βτ})/β、F = (τ − E)/β；β → 0 连续地趋近匀加速（原实现 β = 1e−16 时一个 tick 位移少约 3%）。"""
     from decimal import Decimal, getcontext
-    getcontext().prec = 50
+    getcontext().prec = 700                                      # β = 1e−300 也要算准 1 − e^{−βτ}
     p0, v0, a = np.array([[.1, -.2]]), np.array([[.3, .5]]), np.array([[.75, -.4]])
-    for beta in (1e-16, 1e-12, 1e-8, 1e-4, .2, 1.):
+    for beta in (1e-300, 1e-16, 1e-12, 1e-8, 1e-4, .2, 1., 3.):
         for tau in (.25/32, .001, .25):
             p, v = BB.flow(p0, v0, a, beta, tau)
             B, T = Decimal(beta), Decimal(tau)
@@ -572,7 +572,7 @@ def test_balls_flow_small_drag_is_stable():
                 vr = Decimal(v0[0, k])*(-B*T).exp()+Decimal(a[0, k])*E
                 assert abs(float(pr)-p[0, k]) < 1e-15 and abs(float(vr)-v[0, k]) < 1e-15
     q0 = one_ball([-.5, .2], [.4, -.3], {"drag": 0.}, (.3, .1))
-    for beta in (1e-16, 1e-14, 1e-10):
+    for beta in (5e-324, 1e-320, 1e-300, 1e-16, 1e-14, 1e-10):      # 含次正规数（βτ 下溢）
         q = one_ball([-.5, .2], [.4, -.3], {"drag": beta}, (.3, .1))
         assert np.abs(q-q0).max() < 1e-13+beta                         # 物理上差 O(β)
 

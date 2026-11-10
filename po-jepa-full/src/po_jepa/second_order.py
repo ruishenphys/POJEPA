@@ -460,20 +460,23 @@ class BouncingBalls(SecondOrder):
         vel = g.uniform(-1.5, 1.5, (n, 2))
         return np.concatenate((np.array(pos).ravel(), vel.ravel()))
 
-    # F(τ)/τ² = Σ_{k≥0} (−z)^k/(k+2)!（z = βτ）的系数，z < 0.5 时 20 项到机器精度
+    # E(τ)/τ = Σ_{k≥0} (−z)^k/(k+1)!、F(τ)/τ² = Σ_{k≥0} (−z)^k/(k+2)!（z = βτ）的系数，z < 0.5 时 20 项到机器精度
+    _E_SERIES = tuple(1./math.factorial(k+1) for k in range(20))
     _F_SERIES = tuple(1./math.factorial(k+2) for k in range(20))
 
     @classmethod
     def _phi(cls, beta, tau):
-        """E(τ) = (1 − e^{−βτ})/β、F(τ) = (τ − E(τ))/β（= ∫₀^τ E）。z = βτ < 0.5 时 F 用级数 τ²·Σ(−z)^k/(k+2)!，
-        避免 τ − E 相近数相减（S23a-fix1：β 极小时原式把加速度位移消掉，β = 1e−16 少约 3%）。β = 0 的情形由 flow 单独处理。"""
+        """E(τ) = (1 − e^{−βτ})/β、F(τ) = (τ − E(τ))/β（= ∫₀^τ E）。z = βτ < 0.5 时两者都用级数
+        E = τ·Σ(−z)^k/(k+1)!、F = τ²·Σ(−z)^k/(k+2)!：F 的原式 τ − E 相近数相减（S23a-fix1：β = 1e−16 时一个 tick 少约 3%），
+        E 的原式 −expm1(−z)/β 在 z 落进次正规数时严重量化（S23a-fix1 复审：β = 5e−324 时 E = 0，球不动）。
+        级数只用 z 乘系数，z 下溢成 0 时正好退化为 E = τ、F = τ²/2。β = 0 的情形由 flow 单独处理。"""
         z = beta*tau
-        e1 = -math.expm1(-z)/beta
         if z < .5:
-            s = 0.
-            for c in reversed(cls._F_SERIES):
-                s = s*(-z)+c
-            return e1, tau*tau*s
+            se = sf = 0.
+            for ce, cf in zip(reversed(cls._E_SERIES), reversed(cls._F_SERIES)):
+                se = se*(-z)+ce; sf = sf*(-z)+cf
+            return tau*se, tau*tau*sf
+        e1 = -math.expm1(-z)/beta
         return e1, (tau-e1)/beta
 
     @classmethod
