@@ -134,3 +134,15 @@ T5 的 ε̂ 和有效斜率：ε̂ 是每个 (场景, 种子, 条件) 上 D4 窗
 | D11 成本 | 每个条件每步耗时的中位数、显存峰值、GPU 小时（来自训练日志）、续跑次数、求谱后端 |
 
 图：每个测试集一张精度—缺陷散点；pd 对 x；收敛曲线；原始帧率下误差随步长的变化。输出目录结构和 §7 相同，放在 `<name>/summary/`。
+
+### 8.5 S13 实现补注（2026-11-10）
+
+代码 `tools/droid_summary.py`，测试 `tests/test_droid_summary.py`，说明和验收单 `docs/segments/S13.md`。统计、精度匹配、表格格式和画图复用 `tools/summarize_addon.py`。实现时定的几条（不改上面的口径）：
+
+- 训练任务的产物（09 §4–§5）、`check/env.json` 和评测任务 job.json/source.json 里的来源字段格式由 S09 定，汇总只经过三个读取函数（`read_train`、`read_eval_view`、`read_env`，现在抛 NotImplementedError），§8.3 的核对和 D11 对着 `TrainView`、`EvalView` 写好；S09 补上读取函数后在 `tools/droid.py` 的 `MAINS` 里接上 `summary`。
+- 场景 = `index/episodes.jsonl` 的 (lab, scene_id)。自助法在抽到的群里按回合加权平均：每个场景回合数相同时就是场景平均，群是单条回合时和 §3 的按轨迹自助法逐位相同。
+- 未来误差在 D1 里把 T = 1、2、4、8 合在一起（和 13 §5 T1 相同），另出按时长分开的表；AC 的 `tcd_ln` 在 T = 1、3 上是插值，在按时长的表里单列（10 §8.6）。D2 时长留出既给 3、12、16 合起来的值（进 D7），也给每个时长。
+- ε̂（D8）取一个 (测试集, 种子, 条件) 上同分布时长全部窗口的 `tcd_normalized` 的中位数：DROID 每个窗口只有一个时长，没有仿真那种“同一批窗口 × 4 个时长”。
+- 不训练的对照（identity、vjepa2_ac_zeroshot）只有一个任务，种子标签 `untrained`，配对时和 po_jepa_full 的每个种子配。vjepa2_ac_zeroshot 的初始权重和它登记的 `construction_seed` 那个种子的 vjepa2_ac 比（09 §2.4）。
+- 核对另加两项：“配置”（所有任务的 config_sha256 = 本配置）和“评测窗口”（各条件评测的窗口、原始帧率起点、分辨率窗口、规划窗口编号相同；rows 的 outcome = 索引；id_test 回合都有场景）。任一项不通过：只写 summary.json（`status: blocked`）、checks.json、missing.json、summary.md，不出表和图、不写 COMPLETE.json，退出 1。
+- 读不到 σ_z 或 λ 标定文件而有对应的训练任务时，算核对不通过（13 §4 的规则）；对照的训练任务缺时“初始权重”不比、只进 missing.json；评测任务对应的训练任务缺时“评测”不通过。

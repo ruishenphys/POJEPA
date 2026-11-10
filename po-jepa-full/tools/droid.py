@@ -9,7 +9,8 @@
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
 - 已接上的阶段：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b），以及评测阶段里
   的 `eval/spectral-gap`（10 §8.8，S11b，`droid.spectral_gap.main`）。calibrate、check、train（S09）、其余 eval（S11、
-  S12，读检查点等 S09）、summary（S13）还没写：退出 2，不写任何文件。
+  S12，读检查点等 S09）还没写，summary（S13，`tools/droid_summary.py`）写好了但训练产物和评测来源的读取函数等 S09：
+  这几个阶段退出 2，不写任何文件。
 - 编码任务开始时由 `encode.load_frozen` 核上游提交（204698b）和编码器权重 SHA（= v7 `cache.CHECKPOINT_SHA`），
   不对就报错退出 1（12 §1）。`--fake-encoder` 只给 CPU 流程测试用（特征标成 synthetic_development_only）。
 """
@@ -29,7 +30,8 @@ from po_jepa.droid import spectral_gap as sg  # noqa: E402
 from po_jepa.droid.config import load_config  # noqa: E402
 
 NOT_IMPLEMENTED = 2
-PENDING = {"calibrate": "S09", "check": "S09", "train": "S09", "eval": "S11/S12", "summary": "S13"}
+PENDING = {"calibrate": "S09", "check": "S09", "train": "S09", "eval": "S11/S12",
+           "summary": "S13 is in tools/droid_summary.py; its train/eval-source readers wait for S09"}
 assert set(PENDING) | {"index", "download", "prepare", "encode"} == set(droid_jobs.STAGES)
 
 
