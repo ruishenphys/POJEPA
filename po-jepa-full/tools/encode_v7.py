@@ -24,6 +24,8 @@ S25e 空间采样测试集（--variant 带 resolution/zoom/pan/drift）：也只
 （po_jepa.native_encoder：预处理输出边长 R、编码器输入 [B,3,R,R]，不缩放回 256），特征 [33,(R/16)²,1408]，manifest 的 grid 是
 [R/16,R/16]、多一个 space 记录，预处理记录和摘要是原生分辨率版（runtime/space_cache.py），所以 cache.read_window 不收。
 
+S25-fix3：每条 manifest 的 generation.encode_batch 记 --batch，finalize 的 report.json 汇总（encode_batches）。
+
 中途断了直接重跑同一条命令：已完成（有 COMPLETE.json）的轨迹会跳过，未完成的残留会被清掉重做。
 """
 import argparse
@@ -93,6 +95,8 @@ def main():
     if args.mode == "finalize":
         return finalize(out, spec, cache, _splits(args.splits))
 
+    if args.batch < 1:
+        raise SystemExit(f"--batch 必须是正整数：{args.batch}")
     if spec.knobs.horizon != systems.TICKS and args.batch != 33:
         # S25c 修改（Codex 审核）：长时程前 33 帧要和主实验缓存同一批编码（见文件头）；在建输出目录之前拒绝
         raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程测试集：只能 --batch 33（前 33 帧要和主实验缓存同一批编码）")
@@ -190,7 +194,10 @@ def main():
                             preprocess=space_cache.preprocess_record(resolution) if spaced else cache._v7_preprocess_record(),
                             generator_source_sha256=generator_sources,
                             environment=environment,
-                            preprocess_rule="reset_same_trajectory_generator_state_before_each_single_frame"))
+                            preprocess_rule="reset_same_trajectory_generator_state_before_each_single_frame",
+                            # S25-fix3（Codex 复审 S25-fix1 的 P3-2）：每次送进编码器的帧数。分批会改浮点结果，
+                            # 记下来才能从产物核“长时程前 33 帧与主实验缓存同一批”（主实验 33 帧、--batch ≥ 33 时是一批）
+                            encode_batch=args.batch))
         cache._write_json(folder/"manifest.json", manifest)
         cache._write_json(folder/"COMPLETE.json", dict(manifest_sha256=cache.file_sha(folder/"manifest.json")))
         done += 1
@@ -272,15 +279,21 @@ def finalize(out, spec, cache, splits=("train", "validation", "test")):
         records.append(dict(trajectory_id=tid, split=m["split"], manifest_sha256=complete["manifest_sha256"],
                             evidence_role=m["generation"]["evidence_role"],
                             max_abs=m["feature_stats"]["max_abs"],
-                            relative_rounding_error=m["feature_stats"]["relative_rounding_error"]))
+                            relative_rounding_error=m["feature_stats"]["relative_rounding_error"],
+                            **({"encode_batch": m["generation"]["encode_batch"]} if "encode_batch" in m["generation"] else {})))
     if missing:
         raise SystemExit(f"还有 {len(missing)} 条没编码完（例如 {missing[:5]}），先把所有分片跑完")
     roles = {r["evidence_role"] for r in records}
+    # S25-fix3：每条的编码 batch（不同分片可以用不同 --batch，所以记所有出现过的值）；S25-fix3 以前编的 manifest 没有这一项，
+    # 记为 encode_batch_unrecorded 条。全都没记时报告和以前逐字节相同（已有缓存重跑 finalize，encode_report_sha256 不变）。
+    batches = [r.get("encode_batch") for r in records]
+    batch_record = (dict(encode_batches=sorted({b for b in batches if b is not None}),
+                         encode_batch_unrecorded=sum(b is None for b in batches)) if any(b is not None for b in batches) else {})
     report = dict(mode="encode_v7", status="passed", system=spec.system, dataset_count=spec.count,
                   **({"variant": spec.variant} if spec.variant else {}),
                   splits=dict(train=spec.train, validation=spec.validation, test=spec.test),
                   **({"splits_encoded": list(splits)} if tuple(splits) != ("train", "validation", "test") else {}),
-                  evidence_roles=sorted(roles), records=records,
+                  evidence_roles=sorted(roles), **batch_record, records=records,
                   max_abs=max(r["max_abs"] for r in records),
                   max_relative_rounding_error=max(r["relative_rounding_error"] for r in records))
     for name in ("report.json", "COMPLETE.json"):
@@ -288,7 +301,9 @@ def finalize(out, spec, cache, splits=("train", "validation", "test")):
     cache._write_json(out/"report.json", report)
     cache._write_json(out/"COMPLETE.json", dict(report_sha256=cache.file_sha(out/"report.json")))
     print(f"{spec.tag}：{len(records)} 条全部完成；特征最大绝对值 {report['max_abs']:.3g}，"
-          f"float16 最大相对舍入误差 {report['max_relative_rounding_error']:.2e}")
+          f"float16 最大相对舍入误差 {report['max_relative_rounding_error']:.2e}；"
+          + (f"编码 batch {report['encode_batches']}" + (f"（另 {report['encode_batch_unrecorded']} 条没记）" if report["encode_batch_unrecorded"] else "")
+             if batch_record else "编码 batch 没记（S25-fix3 以前编的缓存）"))
 
 
 if __name__ == "__main__":

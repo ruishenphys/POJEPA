@@ -236,7 +236,7 @@ PAIR_REPORT_FIELDS = ("train_dataset", "registration_sha256", "definitions", "ca
 
 
 def pairing_problems(mine, other, key_of, row_fields):
-    """S25c/S25d 修改（Codex 审核）：full 与对照同一种子的两份报告能不能逐行配对。返回 (full 的行, 对照的行, 问题列表)，
+    """S25c/S25d 修改（Codex 审核）、S25-fix3 起空间采样也走这里：full 与对照同一种子的两份报告能不能逐行配对。返回 (full 的行, 对照的行, 问题列表)，
     行按 key_of(行) 索引。问题：报告级字段（训练数据集、预登记、评测定义、缓存身份）缺失或不同；某一侧有重复键；
     两侧键集合不同（缺行）；同键的行 manifest_sha256 或 row_fields 不同（不是同一份缓存、同一个窗口）。
     有问题时调用方不出这个比较的平均差（只取交集会让缺行改变甚至反转比较方向）。"""
@@ -417,8 +417,10 @@ def space_reports(root):
     """S25e tools/space_eval.py 的结果（kind = space_eval）：每个 (空间采样测试集, 条件) 跨种子平均（按时长 T）：
     空间采样测试集上的直接预测、基础测试集同一窗口上的直接预测、两者之差（gap）；
     full − 对照按同一窗口（轨迹、起点、时长）配对，分别比 direct 和 gap（先每个种子内逐窗口相减取平均，再跨种子平均）。
-    配对要求两份报告的窗口集合完全相同、每个窗口的缓存来源（空间采样和基础测试集的 manifest SHA）相同，否则不比、记进 mismatched
-    （不静默取交集：缺行会让比较偏向剩下的窗口）。行里另给跨种子 SD。"""
+    S25-fix3 修改：配对核对并进 pairing_problems（和长时程、时间采样同一入口）：两份报告同训练数据集、预登记、评测定义、
+    缓存身份（空间采样和基础测试集的编码报告），窗口集合相同且不重复，每个窗口的缓存来源（空间采样和基础测试集的 manifest SHA）
+    相同；任一种子不通过，这个比较整个不出平均差，记进 incomplete（原来只核窗口和 manifest，记进 mismatched，其余种子照出）。
+    定义取组内第一份合法的（_group_steps），都缺时整组记进 incomplete。行里另给跨种子 SD。"""
     reports = []
     for path in sorted(Path(root).rglob("*.json")):
         if path.stat().st_size > 50_000_000:
@@ -436,7 +438,7 @@ def space_reports(root):
         if sub in by[key]:
             duplicates.append(r["file"]); continue
         by[key][sub] = r
-    rows, comparisons, mismatched = [], [], []
+    rows, comparisons, incomplete = [], [], []
 
     def mean_of(seeds, key):
         xs = [r["means"][key] for r in seeds if key in r["means"]]
@@ -446,11 +448,11 @@ def space_reports(root):
         xs = [r["means"][key] for r in seeds if key in r["means"]]
         return statistics.stdev(xs) if len(xs) == len(seeds) and len(xs) > 1 else None
 
-    def windows(r):
-        return {(w["trajectory_id"], w["start_tick"], w["duration"]): w for w in r["rows"]}
-
+    key_of = lambda w: (w["trajectory_id"], w["start_tick"], w["duration"])
     for (dataset, updates), group in sorted(by.items()):
-        durations = group[next(iter(group))]["definitions"]["durations"]
+        durations = _group_steps(group, "durations")
+        if durations is None:
+            incomplete.append(_no_definitions(dataset, updates, group, "durations")); continue
         for c in CONDITIONS:
             seeds = [r for (cc, _), r in sorted(group.items()) if cc == c]
             if seeds:
@@ -458,24 +460,23 @@ def space_reports(root):
                                  **{k: [mean_of(seeds, f"{k}:T={t}") for t in durations] for k in ("direct", "base_direct", "gap")},
                                  **{f"{k}_sd": [sd_of(seeds, f"{k}:T={t}") for t in durations] for k in ("direct", "gap")}))
         for ref in REFERENCES:
-            ok = {}
+            checked, problems = {}, []
             for (cc, seed), r in sorted(group.items()):
                 other = group.get((ref, seed))
                 if cc != "po_jepa_full" or other is None:
                     continue
-                mine, theirs = windows(r), windows(other)
-                same = mine.keys() == theirs.keys() and len(mine) == len(r["rows"]) and len(theirs) == len(other["rows"]) and all(
-                    (mine[k].get("manifest_sha256"), mine[k].get("base_manifest_sha256"))
-                    == (theirs[k].get("manifest_sha256"), theirs[k].get("base_manifest_sha256")) for k in mine)
-                if same:
-                    ok[seed] = (mine, theirs)
+                mine, theirs, bad = pairing_problems(r, other, key_of, ("base_manifest_sha256",))
+                if bad:
+                    problems.append(dict(seed=seed, problems=bad))
                 else:
-                    mismatched.append(dict(dataset=dataset, updates=updates, seed=seed, comparison=f"po_jepa_full − {ref}",
-                                           files=[r["file"], other["file"]]))
+                    checked[seed] = (mine, theirs)
+            if problems:
+                incomplete.append(dict(dataset=dataset, updates=updates, comparison=f"po_jepa_full − {ref}", per_seed=problems))
+                continue
             for metric in ("direct", "gap"):
                 for t in durations:
                     diffs = []
-                    for seed, (mine, theirs) in sorted(ok.items()):
+                    for seed, (mine, theirs) in sorted(checked.items()):
                         d = [w["values"][f"{metric}:T={t}"]-theirs[k]["values"][f"{metric}:T={t}"]
                              for k, w in sorted(mine.items()) if w["duration"] == t]
                         if d:
@@ -485,7 +486,7 @@ def space_reports(root):
                         comparisons.append(dict(dataset=dataset, updates=updates, comparison=f"po_jepa_full − {ref}", metric=metric,
                                                 T=t, seeds=len(diffs), mean=_mean(ms),
                                                 seed_std=statistics.stdev(ms) if len(ms) > 1 else None, per_seed=diffs))
-    return dict(rows=rows, comparisons=comparisons, duplicates=duplicates, mismatched=mismatched)
+    return dict(rows=rows, comparisons=comparisons, incomplete=incomplete, duplicates=duplicates)
 
 
 def _f(x, digits=5):
@@ -583,9 +584,7 @@ def _markdown(s):
             lines += [f"| {c['dataset']} | {c['updates']} | {c['comparison']} | {c['metric']} | {c['T']} | {c['seeds']} | {_f(c['mean'])} | "
                       f"{_f(c['seed_std'])} | " + ", ".join(f"{x['full_better']}/{x['windows']}" for x in c["per_seed"]) + " |"
                       for c in space["comparisons"]]
-        if space.get("mismatched"):
-            lines += ["", "窗口集合或缓存来源对不上、没有配对的比较："] + [
-                f"- {m['dataset']} 种子 {m['seed']}：{m['comparison']}（{', '.join(m['files'])}）" for m in space["mismatched"]]
+    lines += _incomplete_lines("空间采样", space.get("incomplete", []))
     if s["missing"]:
         lines += ["", "## 缺失任务", ""] + [f"- {m['dataset']} {m['updates']} 步 种子 {m['seed']}：{m['condition']}" for m in s["missing"]]
     if s["duplicates"]:

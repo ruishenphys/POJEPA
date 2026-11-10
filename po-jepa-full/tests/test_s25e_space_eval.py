@@ -688,6 +688,10 @@ def test_make_v8_jobs_space_stage():
         assert not any("space_eval" in l or "resolution=" in l or "zoom=" in l for l in _jobs("--stage", stage))
 
 
+_SPACE_REPORT_FIELDS = dict(train_dataset="double_well-2000", registration_sha256="reg",
+                            cache_identity=dict(encode_report_sha256="enc", base_encode_report_sha256="base"))
+
+
 def test_summarize_space_reports(tmp_path):
     s = _tool_module("summarize_v7")
 
@@ -697,12 +701,12 @@ def test_summarize_space_reports(tmp_path):
             for st in (0, 10):
                 for d in space_eval.DURATIONS:
                     v = offset+.01*t
-                    rows.append(dict(trajectory_id=t, start_tick=st, duration=d,
+                    rows.append(dict(trajectory_id=t, start_tick=st, duration=d, manifest_sha256=f"s{t}", base_manifest_sha256=f"b{t}",
                                      values={f"direct:T={d}": v, f"base_direct:T={d}": base, f"gap:T={d}": v-base}))
         means = {f"{k}:T={d}": (offset+.01*1800.5 if k == "direct" else base if k == "base_direct" else offset+.01*1800.5-base)
                  for k in space_eval.KEYS for d in space_eval.DURATIONS}
         return dict(kind="space_eval", dataset="double_well~resolution=384-2000", updates=10000, condition=condition, seed=seed,
-                    definitions=dict(durations=list(space_eval.DURATIONS)), rows=rows, means=means)
+                    **_SPACE_REPORT_FIELDS, definitions=dict(durations=list(space_eval.DURATIONS)), rows=rows, means=means)
     for c, off, base in (("po_jepa_full", .1, .05), ("matched_transformer", .3, .02)):
         for seed in (1703, 1704):
             path = tmp_path/c/f"{seed}.json"; path.parent.mkdir(exist_ok=True)
@@ -727,12 +731,78 @@ def test_summarize_space_reports(tmp_path):
     assert g["mean"] == pytest.approx(-.2-.03) and g["seeds"] == 2
     assert len(out["duplicates"]) == 1
     assert full["gap_sd"][0] == pytest.approx(0., abs=1e-12) and full["direct_sd"][0] is not None
-    # 窗口集合不同（identity 1703 少一行）、缓存来源不同（vjepa2_ac_small）：不配对，记进 mismatched，不取交集
-    assert sorted((m["comparison"], m["seed"]) for m in out["mismatched"]) == [
-        ("po_jepa_full − identity", 1703), ("po_jepa_full − vjepa2_ac_small", 1703)]
-    i8 = next(c for c in out["comparisons"] if c["comparison"] == "po_jepa_full − identity" and c["metric"] == "direct" and c["T"] == 8)
-    assert [x["seed"] for x in i8["per_seed"]] == [1704]
-    assert not any(c["comparison"] == "po_jepa_full − vjepa2_ac_small" for c in out["comparisons"])
+    # 窗口集合不同（identity 1703 少一行）、缓存来源不同（vjepa2_ac_small）：不配对，记进 incomplete，不取交集。
+    # S25-fix3：和长时程、时间采样一样，任一种子不通过整个比较不出平均差（原来 identity 还用种子 1704 单独出）
+    assert sorted((m["comparison"], [x["seed"] for x in m["per_seed"]]) for m in out["incomplete"]) == [
+        ("po_jepa_full − identity", [1703]), ("po_jepa_full − vjepa2_ac_small", [1703])]
+    assert not any(c["comparison"] in ("po_jepa_full − identity", "po_jepa_full − vjepa2_ac_small") for c in out["comparisons"])
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
                           timing=dict(rows=[], comparisons=[]), space=out, missing=[], duplicates=[]))
     assert "## 空间采样" in md and "| double_well~resolution=384-2000 | 10000 | po_jepa_full | 2 |" in md and "| gap | 8 |" in md
+    assert "⚠ 空间采样" in md
+
+
+def _space_report(condition, seed, direct):
+    """两条轨迹 × 一个起点 × 时长 1、2；direct 按行给，base_direct 固定 0。"""
+    keys = [(t, 0, d) for t in (1800, 1801) for d in (1, 2)]
+    rows = [dict(trajectory_id=t, start_tick=st, duration=d, manifest_sha256=f"s{t}", base_manifest_sha256=f"b{t}",
+                 values={f"direct:T={d}": x, f"base_direct:T={d}": 0., f"gap:T={d}": x}) for (t, st, d), x in zip(keys, direct)]
+    return dict(kind="space_eval", dataset="double_well~resolution=384-2000", updates=10000, condition=condition, seed=seed,
+                **_SPACE_REPORT_FIELDS, definitions=dict(durations=[1, 2]), rows=rows,
+                means={f"{k}:T={d}": 1. for k in space_eval.KEYS for d in (1, 2)})
+
+
+@pytest.mark.parametrize("what", ["missing_row", "duplicate_row", "manifest", "base_manifest", "base_cache", "train_dataset",
+                                  "registration", "definitions_differ"])
+def test_summarize_space_refuses_unpairable_reports(tmp_path, what):
+    """S25-fix3：空间采样配对并进 pairing_problems。原来只核窗口集合和逐窗口 manifest，报告级的训练数据集、预登记、
+    评测定义、缓存身份（含基础测试集的编码报告）不核；重复的行被 dict 吞掉只在长度上间接看出。
+    反例同时间采样：full [1, 100]、对照 [2, 2]，对照缺最后一行时取交集会让平均差从 48.5 变成 −1。"""
+    s = _tool_module("summarize_v7")
+    full = _space_report("po_jepa_full", 1703, [1., 1., 1., 100.])
+    ref = _space_report("matched_transformer", 1703, [2., 2., 2., 2.])
+    (tmp_path/"f.json").write_text(json.dumps(full)); (tmp_path/"r.json").write_text(json.dumps(ref))
+    out = s.space_reports(tmp_path)
+    assert not out["incomplete"]
+    assert next(c for c in out["comparisons"] if c["T"] == 2 and c["metric"] == "direct")["mean"] == pytest.approx(48.5)
+    if what == "missing_row":
+        ref["rows"] = ref["rows"][:-1]
+    elif what == "duplicate_row":
+        ref["rows"] = ref["rows"]+[dict(ref["rows"][0], values={"direct:T=1": 50., "base_direct:T=1": 0., "gap:T=1": 50.})]
+    elif what == "manifest":
+        ref["rows"][3]["manifest_sha256"] = "other"
+    elif what == "base_manifest":
+        ref["rows"][3]["base_manifest_sha256"] = "other"
+    elif what == "base_cache":
+        ref["cache_identity"] = dict(ref["cache_identity"], base_encode_report_sha256="other")
+    elif what == "train_dataset":
+        ref["train_dataset"] = "double_well~gain=2-2000"
+    elif what == "registration":
+        del ref["registration_sha256"]
+    elif what == "definitions_differ":
+        ref["definitions"] = dict(durations=[1, 2, 3])
+    (tmp_path/"r.json").write_text(json.dumps(ref))
+    out = s.space_reports(tmp_path)
+    assert not out["comparisons"]
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == "po_jepa_full − matched_transformer" and inc["per_seed"][0]["seed"] == 1703
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
+                          timing=dict(rows=[], comparisons=[]), space=out, missing=[], duplicates=[]))
+    assert "⚠ 空间采样" in md
+
+
+@pytest.mark.parametrize("all_missing", [False, True])
+def test_summarize_space_first_report_without_definitions(tmp_path, all_missing):
+    """S25-fix3：按文件顺序第一份空间采样报告缺 definitions 时原来整个汇总 KeyError（S25-fix2 只修了长时程、时间采样）。"""
+    s = _tool_module("summarize_v7")
+    full = _space_report("po_jepa_full", 1703, [1., 1., 1., 100.])
+    ref = _space_report("matched_transformer", 1703, [2., 2., 2., 2.])
+    del full["definitions"]
+    if all_missing:
+        del ref["definitions"]
+    (tmp_path/"a.json").write_text(json.dumps(full)); (tmp_path/"b.json").write_text(json.dumps(ref))
+    out = s.space_reports(tmp_path)
+    assert not out["comparisons"]
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == ("全部比较" if all_missing else "po_jepa_full − matched_transformer")
+    assert bool(out["rows"]) is not all_missing
