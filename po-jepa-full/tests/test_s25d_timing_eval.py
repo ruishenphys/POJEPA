@@ -212,6 +212,70 @@ def test_timing_cache_checks(caches, real, active, tmp_path):
         timing_cache.check_manifest(caches["sw"]/"0037", bad, "sha", datasets.active())
 
 
+class _SpyEncoder:
+    def __init__(self):
+        self.calls = []
+
+    def encode_target(self, chunk, *, target_time_seconds):
+        self.calls.append((chunk.clone(), target_time_seconds.clone()))
+        class Out:
+            raw_z = chunk.float().mean((1, 2, 3))[:, None, None].expand(-1, 2, 3).double()
+        return Out
+
+
+def _fake_preprocess(rgb, *, spec, generator):
+    """代替 vjepa.preprocess_rgb（要官方上游源码）：输出依赖画面和 generator 状态，用来核“每帧前重置随机数”。"""
+    assert spec == cache.preprocess_spec() and rgb.shape[0] == 1
+    return rgb.permute(0, 3, 1, 2)[:, :, ::64, ::64].double()+torch.rand(1, generator=generator, dtype=torch.float64)
+
+
+@pytest.mark.parametrize("spec,sizes", [(FPS8, [33, 32]), (FPS16, [33, 33, 33, 30]), (JIT, [33])])
+def test_real_encode_path_passes_actual_frame_times(active, monkeypatch, spec, sizes):
+    """S25d 修改（Codex 审核问题 4）：真实编码路径（fake=False，记录输入的替身编码器）把每帧实际时刻 × 0.25 s 跨批次传给
+    encode_target（CPU float64），每帧前预处理随机数重置。原来的编码测试都走 --fake-encoder，在这之前就返回了。"""
+    from po_jepa import simulation, vjepa
+    sys.path.insert(0, str(ROOT/"tools"))
+    import encode_v7
+    monkeypatch.setattr(vjepa, "preprocess_rgb", _fake_preprocess)
+    active(spec); tid = 37
+    _, frames = systems.get().frames(tid)
+    ticks = timing.frame_times(tid)
+    assert frames.shape[0] == ticks.shape[0] == sum(sizes)
+    if spec is JIT:
+        assert np.any(ticks != np.round(ticks))                  # 抖动：时刻不是整数，不能拿帧号顶替
+    spy = _SpyEncoder()
+    z = encode_v7._encode_trajectory(spy, frames, tid, simulation, cache, torch, np, 33, False, ticks)
+    assert [c.shape[0] for c, _ in spy.calls] == sizes and z.shape == (sum(sizes), 2, 3)
+    times = torch.cat([t for _, t in spy.calls])
+    assert times.dtype == torch.float64 and times.device.type == "cpu"
+    assert torch.equal(times, torch.from_numpy(ticks)*.25)
+    pre = torch.cat([c for c, _ in spy.calls])
+    for k in (0, sum(sizes)-1):
+        g = torch.Generator(device="cpu").manual_seed(simulation.preprocess_seed(tid))
+        assert torch.equal(pre[k], _fake_preprocess(torch.from_numpy(frames[k:k+1]), spec=cache.preprocess_spec(), generator=g)[0])
+
+
+def test_timing_cache_refuses_fractional_control_boundaries(caches, real, active, tmp_path):
+    """S25d 修改（Codex 审核问题 1）：段边界加 0.25（转 int64 后与注册动作相同）也要拒绝；原来先截成整数再比较，能蒙混过去。
+    也覆盖 COMPLETE.json 摘要正确的错误 manifest（read_complete 走完整读取）。"""
+    for spec, name, key, k in ((JIT, "jit", "starts_ticks", 1), (JIT, "jit", "ends_ticks", 0),
+                               (SW, "sw", "starts_subticks", 1), (SW, "sw", "ends_subticks", 0)):
+        active(spec)
+        m = _as_real(_manifest(caches[name], 37))
+        timing_cache.check_manifest(caches[name]/"0037", m, "sha", datasets.active())       # 不改时能过
+        for bad_value in (m["controls"][key][k]+.25, float(m["controls"][key][k])):
+            bad = copy.deepcopy(m); bad["controls"][key][k] = bad_value
+            with pytest.raises(ValueError, match="integers"):
+                timing_cache.check_manifest(caches[name]/"0037", bad, "sha", datasets.active())
+        d = tmp_path/f"{name}-{key}"; shutil.copytree(caches[name]/"0037", d)
+        raw = json.loads((d/"manifest.json").read_text()); raw["controls"][key][k] += .25
+        (d/"manifest.json").unlink(); (d/"COMPLETE.json").unlink()
+        cache._write_json(d/"manifest.json", raw)
+        cache._write_json(d/"COMPLETE.json", dict(manifest_sha256=cache.file_sha(d/"manifest.json")))
+        with pytest.raises(ValueError, match="integers"):
+            timing_cache.read_complete(d)
+
+
 def test_timing_cache_refuses_synthetic_features(caches, active):
     active(FPS8)
     m = _manifest(caches["fps8"], 37)
@@ -598,11 +662,13 @@ def test_summarize_timing_reports(tmp_path):
 
     def report(condition, seed, offset, ac=False):
         names = timing_eval.value_names(ac)
-        rows = [dict(trajectory_id=t, start_frame=i, frames=n, values={k: offset+.01*t for k in names if k.endswith(f":n={n}")})
+        rows = [dict(trajectory_id=t, start_frame=i, frames=n, start_tick=i//2, duration_ticks=n/2, manifest_sha256=f"m{t}",
+                     values={k: offset+.01*t for k in names if k.endswith(f":n={n}")})
                 for t in (1800, 1801) for i in (0, 20) for n in timing_eval.FRAME_STEPS]
         means = {k: offset+.01*1800.5 for k in names}
         means.update({f"duration_ticks:n={n}": n/2 for n in timing_eval.FRAME_STEPS})
         return dict(kind="timing_eval", dataset="double_well~fps=8-2000", updates=10000, condition=condition, seed=seed,
+                    train_dataset="double_well-2000", registration_sha256="reg", cache_identity=dict(encode_report_sha256="enc"),
                     definitions=dict(frame_steps=list(timing_eval.FRAME_STEPS)), rows=rows, means=means)
     for c, off, ac in (("po_jepa_full", .1, False), ("matched_transformer", .3, False), ("vjepa2_ac", .5, True)):
         for seed in (1703, 1704):
@@ -616,6 +682,7 @@ def test_summarize_timing_reports(tmp_path):
     full = next(r for r in out["rows"] if r["condition"] == "po_jepa_full")
     assert full["seeds"] == 2 and full["frames"] == [1, 2, 3, 4, 8, 12] and full["duration"][1] == 1.
     assert full["direct"][0] == pytest.approx(.1+18.005) and full["frame_step"] == [None]*6
+    assert full["direct_sd"] == [0.]*6 and full["frame_step_sd"] == [None]*6
     acrow = next(r for r in out["rows"] if r["condition"] == "vjepa2_ac")
     assert acrow["frame_step"][5] == pytest.approx(.5+18.005)
     smallrow = next(r for r in out["rows"] if r["condition"] == "vjepa2_ac_small")   # 一个种子缺这个键：不拿另一个种子顶替
@@ -626,3 +693,74 @@ def test_summarize_timing_reports(tmp_path):
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
                           timing=out, missing=[], duplicates=[]))
     assert "## 时间采样" in md and "T=0.5: " in md and "po_jepa_full − matched_transformer" in md
+
+
+def _timing_report(condition, seed, direct, **change):
+    """两条轨迹 × 起点 0 × n = 1、2 的窗口；direct：每个窗口的直接预测误差（按行序）。"""
+    keys = [(t, 0, n) for t in (1800, 1801) for n in (1, 2)]
+    rows = [dict(trajectory_id=t, start_frame=i, frames=n, start_tick=0, duration_ticks=n/2., manifest_sha256=f"m{t}",
+                 values={f"direct:n={n}": x}) for (t, i, n), x in zip(keys, direct)]
+    r = dict(kind="timing_eval", dataset="double_well~fps=8-2000", updates=10000, condition=condition, seed=seed,
+             train_dataset="double_well-2000", registration_sha256="reg", cache_identity=dict(encode_report_sha256="enc"),
+             definitions=dict(frame_steps=[1, 2]), rows=rows, means={"direct:n=1": 1., "direct:n=2": 1.})
+    r.update(change)
+    r["means"] = {"duration_ticks:n=1": .5, "duration_ticks:n=2": 1.} | r["means"]
+    return r
+
+
+def _summarize():
+    spec = importlib.util.spec_from_file_location("summarize_v7", ROOT/"tools/summarize_v7.py")
+    s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
+    return s
+
+
+@pytest.mark.parametrize("what", ["missing_row", "duplicate_row", "manifest", "duration", "cache", "registration"])
+def test_summarize_timing_refuses_unpairable_windows(tmp_path, what):
+    """S25d 修改（Codex 审核问题 2）：两侧窗口集合不同、重复、来自不同缓存时不出平均差，记进 incomplete。
+    Codex 反例：full 两窗口 [1, 100]、对照 [2, 2] 平均差 48.5；对照缺最后一行时原来静默取交集，得 −1（方向反转）。"""
+    s = _summarize()
+    full = _timing_report("po_jepa_full", 1703, [1., 1., 1., 100.])
+    ref = _timing_report("matched_transformer", 1703, [2., 2., 2., 2.])
+    (tmp_path/"f.json").write_text(json.dumps(full)); (tmp_path/"r.json").write_text(json.dumps(ref))
+    out = s.timing_reports(tmp_path)
+    assert not out["incomplete"]
+    assert next(c for c in out["comparisons"] if c["frames"] == 2)["mean"] == pytest.approx(48.5)
+    if what == "missing_row":
+        ref["rows"] = ref["rows"][:-1]
+    elif what == "duplicate_row":
+        ref["rows"] = ref["rows"]+[dict(ref["rows"][0], values={"direct:n=1": 50.})]
+    elif what == "manifest":
+        ref["rows"][3]["manifest_sha256"] = "other"
+    elif what == "duration":
+        ref["rows"][3]["duration_ticks"] = .75
+    elif what == "cache":
+        ref["cache_identity"] = dict(encode_report_sha256="other")
+    elif what == "registration":
+        del ref["registration_sha256"]
+    (tmp_path/"r.json").write_text(json.dumps(ref))
+    out = s.timing_reports(tmp_path)
+    assert not out["comparisons"]
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == "po_jepa_full − matched_transformer" and inc["per_seed"][0]["seed"] == 1703
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
+                          timing=out, missing=[], duplicates=[]))
+    assert "⚠ 时间采样" in md
+
+
+def test_summarize_timing_seed_sd(tmp_path):
+    """S25d 修改（Codex 审核问题 3）：主表每个指标给跨种子 SD；Codex 例：两个种子 direct 1、3 → SD √2。单种子为 None。"""
+    s = _summarize()
+    for seed, x in ((1703, 1.), (1704, 3.)):
+        r = _timing_report("po_jepa_full", seed, [x]*4, means={"direct:n=1": x, "direct:n=2": x, "composed:n=1": 2*x})
+        (tmp_path/f"{seed}.json").write_text(json.dumps(r))
+    r = _timing_report("matched_transformer", 1703, [1.]*4, means={"direct:n=1": 5.})
+    (tmp_path/"m.json").write_text(json.dumps(r))
+    out = s.timing_reports(tmp_path)
+    full = next(r for r in out["rows"] if r["condition"] == "po_jepa_full")
+    assert full["direct"] == [2., 2.] and full["direct_sd"] == pytest.approx([math.sqrt(2)]*2)
+    assert full["composed_sd"][0] == pytest.approx(2*math.sqrt(2)) and full["composed_sd"][1] is None
+    mt = next(r for r in out["rows"] if r["condition"] == "matched_transformer")
+    assert mt["direct_sd"] == [None, None]
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
+                          timing=out, missing=[], duplicates=[]))
+    assert "跨种子 SD" in md and "1.41421" in md

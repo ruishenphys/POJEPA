@@ -77,6 +77,29 @@ def goal_controls(system_name, state, horizon, goal_rng):
     return np.repeat(goal_rng.uniform(-.5, .5, (n, 2)), 2, 0)[:horizon]
 
 
+def episode_commands(history, start, actions):
+    """一次续算用的逐 tick 下达动作 [32,2]：tick < start 是这一回合已经下达的命令 history[:start]（回合起点前是测试轨迹
+    自己的下达动作，之后是已执行的规划动作），[start, start+k) 是 actions（截到 ±0.5），其余为 0。
+    S25a 修改（Codex 审核）：原来每次续算都从全零的命令表起，带执行延迟 delay 时窗口开头执行的“已排队命令”被清零，
+    目标、“不动”参照、候选和 MPC 实际执行用的不是同一个执行器状态。delay = 0 时 tick < start 的命令不影响续算（逐位不变）。"""
+    import numpy as np
+    k = len(actions)
+    vals = np.zeros((32, 2))
+    vals[:start] = np.asarray(history, dtype=np.float64)[:start]
+    vals[start:start+k] = np.clip(actions, -.5, .5)
+    return vals
+
+
+def rollout(system, v, field_scene, tid, state, start, actions, history):
+    """从 state（tick=start）起执行下达动作 actions[k,2]（窗口前的命令见 episode_commands），返回新状态。"""
+    from po_jepa import systems
+    c = systems.tick_controls(tid, episode_commands(history, start, actions))
+    k = len(actions)
+    if field_scene:
+        return system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)[-1]
+    return system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)[-1]
+
+
 GOAL_GAP = {"spring_chain": .03}        # S25a：非场场景的绝对门槛，默认 0.15（见文件头）
 
 
@@ -195,17 +218,11 @@ def main():
     new_scene = spec.system in ("gray_scott", "push")+variants.SECOND_ORDER   # S21b：没有 v6 原实现，基础场景也走可调实现（S25a 加二阶场景）
     relative_gap = field_scene or spec.system in ("gray_scott", "wave")       # 场：目标与“不动”的差按场的范数的 5% 判（S25a 加 wave）
 
-    def simulate(tid, state, start, actions, render=True):
-        """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。render=False 不画（真值规划的代价只看状态）。"""
-        k = actions.shape[0]
-        starts = np.arange(32, dtype=np.int64); vals = np.zeros((32, 2))
-        vals[start:start+k] = np.clip(actions, -.5, .5)
-        c = simulation.TrajectoryControls(tid, starts, starts+1, vals)
-        if field_scene:
-            f = system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)[-1]
-            return f, picture(f, tid, start+k) if render else None
-        q = system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)[-1]
-        return q, picture(q, tid, start+k) if render else None
+    def simulate(tid, state, start, actions, history, render=True):
+        """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。history：这一回合已下达的命令
+        （episode_commands）。render=False 不画（真值规划的代价只看状态）。"""
+        q = rollout(system, v, field_scene, tid, state, start, actions, history)
+        return q, picture(q, tid, start+len(actions)) if render else None
 
     def picture(state, tid, tick):
         """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。tick：这一帧的时刻（会动的干扰光点、像素噪声要用）。"""
@@ -244,8 +261,9 @@ def main():
             out.append((ln(pred)-ln(z_goal)).abs().mean((1, 2)))
         return torch.cat(out).cpu().numpy()
 
-    def oracle_cost(tid, state, start, goal_state, u):
-        return np.array([np.linalg.norm(oracle_state(simulate(tid, state, start, ui, render=False)[0])-goal_state) for ui in u])
+    def oracle_cost(tid, state, start, history, goal_state, u):
+        return np.array([np.linalg.norm(oracle_state(simulate(tid, state, start, ui, history, render=False)[0])-goal_state)
+                         for ui in u])
 
     def cem(cost, k, rng, samples):
         mu, sd = np.zeros((k, 2)), np.full((k, 2), .3)
@@ -266,11 +284,13 @@ def main():
             start = 32-a.horizon
         states0 = (system.variant_fields(tid, v) if field_scene else system.variant_trajectory(tid, v))
         s0 = states0[start]
+        history0 = systems.command_ticks(systems.commanded_controls(tid))     # 起点前已下达的命令（有延迟时还在排队）
+        history0[start:] = 0.
         # 目标：同起点按随机下达动作（每 2 个 tick 换一次）走 H 个 tick；与“不动”的结果差得足够远才用（最多重抽 20 次）
-        zero_final = summary_state(simulate(tid, s0, start, np.zeros((a.horizon, 2)), render=False)[0])
+        zero_final = summary_state(simulate(tid, s0, start, np.zeros((a.horizon, 2)), history0, render=False)[0])
         for _ in range(20):
             gu = goal_actions(s0)
-            goal_state, goal_frame = simulate(tid, s0, start, gu)
+            goal_state, goal_frame = simulate(tid, s0, start, gu, history0)
             g = summary_state(goal_state)
             valid = goal_far_enough(g, zero_final, relative_gap, GOAL_GAP.get(spec.system, .15))
             if valid:
@@ -279,9 +299,9 @@ def main():
         z_goal = encode(goal_frame, tid); g_oracle = oracle_state(goal_state)
         result = {}
         for planner in ("model",) if a.no_baselines else ("model", "oracle", "random"):
-            state, t, frame = s0, start, None
+            state, t, frame, history = s0, start, None, history0.copy()
             if planner == "random":
-                state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)), render=False)[0]
+                state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)), history, render=False)[0]
             else:
                 left = a.horizon
                 frame_z = encode(picture(s0, tid, start), tid) if planner == "model" else None
@@ -289,9 +309,10 @@ def main():
                     if planner == "model":
                         plan = cem(lambda u: model_cost(frame_z, z_goal, torch.from_numpy(u)), left, rng, a.samples)
                     else:
-                        plan = cem(lambda u: oracle_cost(tid, state, t, g_oracle, u), left, rng, a.oracle_samples)
+                        plan = cem(lambda u: oracle_cost(tid, state, t, history, g_oracle, u), left, rng, a.oracle_samples)
                     step = min(a.replan, left)
-                    state, frame = simulate(tid, state, t, plan[:step])
+                    state, frame = simulate(tid, state, t, plan[:step], history)
+                    history[t:t+step] = np.clip(plan[:step], -.5, .5)          # 已下达，后面的续算要排队执行
                     t += step; left -= step
                     if planner == "model" and left > 0:
                         frame_z = encode(frame, tid)

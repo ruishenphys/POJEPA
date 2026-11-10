@@ -12,7 +12,8 @@
   python tools/encode_v7.py finalize --system van_der_pol --trajectories 2000 --output ../features-v7/van_der_pol-2000
 
 S25c 长时程测试集（--variant 带 horizon=64/128）：只能 --splits test（只用来评测，tools/long_rollout.py），整条 65/129 帧都存
-（float16 每条约 47/93 MB，每类 200 条约 9/19 GB）；按 --batch 33 分批，所以前 33 帧和主实验缓存同一批送进编码器。
+（float16 每条约 47/93 MB，每类 200 条约 9/19 GB）；必须 --batch 33（默认，别的值直接报错），所以前 33 帧和主实验缓存
+（33 帧，--batch ≥ 33 都是一批）同一批送进编码器（S25c 修改，Codex 审核：原来 --batch 64 也收，首批就成了 64 帧）。
 
 S25d 时间采样测试集（--variant 带 fps/jitter/exposure/switch_offset）：也只能 --splits test（只用来评测，tools/timing_eval.py），
 不能和 horizon≠32 一起用；帧数 = 32·fps/4 + 1（17/33/65/129），manifest 的 frames 记每帧的实际时刻 time_ticks（timing.frame_times），
@@ -92,6 +93,9 @@ def main():
     if args.mode == "finalize":
         return finalize(out, spec, cache, _splits(args.splits))
 
+    if spec.knobs.horizon != systems.TICKS and args.batch != 33:
+        # S25c 修改（Codex 审核）：长时程前 33 帧要和主实验缓存同一批编码（见文件头）；在建输出目录之前拒绝
+        raise SystemExit(f"horizon={spec.knobs.horizon} 是长时程测试集：只能 --batch 33（前 33 帧要和主实验缓存同一批编码）")
     index, _, total = args.shard.partition("/")
     index, total = int(index), int(total)
     if not 0 <= index < total:

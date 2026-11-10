@@ -99,6 +99,74 @@ def test_encode_long_horizon_needs_test_split_only(tmp_path):
     assert r.returncode != 0 and "--splits test" in r.stderr and "长时程" in r.stderr and not (tmp_path/"enc").exists()
 
 
+def test_encode_long_horizon_needs_batch_33(tmp_path):
+    """S25c 修改（Codex 审核 P2-2）：长时程只收 --batch 33，在建输出目录之前报错。"""
+    for batch in ("64", "32"):
+        args = ["--system", "double_well", "--trajectories", "40", "--output", str(tmp_path/"enc"), "--variant", "horizon=64",
+                "--fake-encoder", "--device", "cpu", "--splits", "test", "--batch", batch]
+        r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/encode_v7.py"), "encode", *args], env=_clean_env(),
+                           capture_output=True, text=True)
+        assert r.returncode != 0 and "--batch 33" in r.stderr and not (tmp_path/"enc").exists()
+
+
+class _SpyEncoder:
+    """记录每次 encode_target 的输入（真实编码路径 fake=False 的分批、时刻），输出按输入算的确定值。"""
+    def __init__(self):
+        self.calls = []
+
+    def encode_target(self, chunk, *, target_time_seconds):
+        self.calls.append((chunk.clone(), target_time_seconds.clone()))
+        class Out:
+            raw_z = chunk.float().mean((1, 2, 3))[:, None, None].expand(-1, 2, 3).double()
+        return Out
+
+
+def _fake_preprocess(rgb, *, spec, generator):
+    """代替 vjepa.preprocess_rgb（要官方上游源码）：输出依赖画面和 generator 的状态，用来核“每帧前重置随机数”。"""
+    assert spec == cache.preprocess_spec() and rgb.shape[0] == 1
+    noise = torch.rand(1, generator=generator, dtype=torch.float64)
+    return rgb.permute(0, 3, 1, 2)[:, :, ::64, ::64].double()+noise
+
+
+def _encode_real_path(frames, tid, batch, ticks=None):
+    sys.path.insert(0, str(ROOT/"tools"))
+    import encode_v7
+    from po_jepa import simulation
+    spy = _SpyEncoder()
+    z = encode_v7._encode_trajectory(spy, frames, tid, simulation, cache, torch, np, batch, False, ticks)
+    return spy, z
+
+
+def test_real_encode_path_batches_the_long_prefix_like_the_main_cache(active, monkeypatch):
+    """S25c 修改（Codex 审核 P2-2）：真实编码路径（fake=False，记录输入的替身编码器）下，33/65/129 帧按 --batch 33 分批，
+    长时程的第一批与 33 帧主实验缓存的唯一一批输入逐位相同，时刻是 tick × 0.25（CPU float64）。"""
+    from po_jepa import simulation
+    from po_jepa import vjepa
+    monkeypatch.setattr(vjepa, "preprocess_rgb", _fake_preprocess)
+    tid = 37
+    active(BASE); _, frames33 = systems.get().frames(tid)
+    short, _ = _encode_real_path(frames33, tid, 33)
+    assert [c.shape[0] for c, _ in short.calls] == [33]
+    for spec, n, sizes in ((LONG, 65, [33, 32]), (LONG128, 129, [33, 33, 33, 30])):
+        active(spec); _, frames = systems.get().frames(tid)
+        assert frames.shape[0] == n
+        spy, z = _encode_real_path(frames, tid, 33)
+        assert [c.shape[0] for c, _ in spy.calls] == sizes and z.shape == (n, 2, 3)
+        assert torch.equal(spy.calls[0][0], short.calls[0][0])
+        times = torch.cat([t for _, t in spy.calls])
+        assert times.dtype == torch.float64 and times.device.type == "cpu"
+        assert torch.equal(times, torch.arange(n, dtype=torch.float64)*.25)
+        # 每帧前预处理随机数重置到同一状态：任取一帧独立预处理，与送进编码器的那一行相同
+        pre = torch.cat([c for c, _ in spy.calls])
+        k = 50
+        g = torch.Generator(device="cpu").manual_seed(simulation.preprocess_seed(tid))
+        assert torch.equal(pre[k], _fake_preprocess(torch.from_numpy(frames[k:k+1]), spec=cache.preprocess_spec(), generator=g)[0])
+    # 对照：--batch 64 时长时程首批是 64 帧，与主实验缓存那一批不同（正是上面那条拒绝要防的）
+    active(LONG); _, frames = systems.get().frames(tid)
+    spy, _ = _encode_real_path(frames, tid, 64)
+    assert [c.shape[0] for c, _ in spy.calls] == [64, 1]
+
+
 def test_long_cache_layout(caches):
     _, long = caches
     report = json.loads((long/"report.json").read_text())
@@ -284,6 +352,10 @@ class ActionToy(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.calls = []
+        # S25c 修改（Codex 审核 P3-1）：真的有参数、预置梯度和 buffer，“评测不改模型状态”的断言才不是空的（前向不用它们）
+        self.weight = torch.nn.Parameter(torch.tensor([.5, -1.5, 2.]))
+        self.weight.grad = torch.tensor([.1, .2, .3])
+        self.register_buffer("count", torch.tensor([7.]))
 
     def forward(self, raw, controls, duration, grid):
         t = float(duration[0])
@@ -379,6 +451,8 @@ def test_evaluate_end_to_end(caches, real, active):
     active(LONG)
     model, config = ActionToy(), e06_config()
     before = {k: v.clone() for k, v in model.state_dict().items()}
+    grad = model.weight.grad.clone()
+    assert set(before) == {"weight", "count"}
     rows, means = long_rollout.evaluate(model, long, config, 64, torch.device("cpu"))
     assert [r["trajectory_id"] for r in rows] == list(TEST_IDS) and model.training      # 训练标志恢复原样
     assert set(means) == set(long_rollout.value_names(64))
@@ -390,7 +464,28 @@ def test_evaluate_end_to_end(caches, real, active):
         assert torch.equal(w.inputs.raw_z, z) and torch.equal(w.target.raw_z, target)
         assert rows[-1]["values"][f"long_direct:T={t:g}"] == d4._jepa(d4.direct_prediction(model, w)[0], target, config)
     assert means["rollout:T=8"] == pytest.approx(sum(r["values"]["rollout:T=8"] for r in rows)/4, rel=1e-12)
-    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items()) and torch.equal(model.weight.grad, grad)
+
+
+class _BufferBumper(ActionToy):
+    def forward(self, *args):
+        self.count += 1
+        return super().forward(*args)
+
+
+class _GradBumper(ActionToy):
+    def forward(self, *args):
+        self.weight.grad.add_(1.)
+        return super().forward(*args)
+
+
+@pytest.mark.parametrize("toy", [_BufferBumper, _GradBumper])
+def test_evaluate_refuses_a_model_that_changes_its_state(caches, real, active, toy):
+    """S25c 修改（Codex 审核 P3-1）：评测里改了 buffer 或梯度时 evaluate 报错（状态保护真的在核）。"""
+    _, long = caches
+    active(LONG)
+    with pytest.raises(RuntimeError, match="changed parameters, gradients or buffers"):
+        long_rollout.evaluate(toy(), long, e06_config(), 64, torch.device("cpu"))
 
 
 # —— 工具和任务表 ——
@@ -487,8 +582,10 @@ def test_summarize_long_reports(tmp_path):
     names = long_rollout.value_names(128)
 
     def report(condition, seed, offset):
-        rows = [dict(trajectory_id=t, values={n: offset+.01*t for n in names}) for t in (1800, 1801)]
+        rows = [dict(trajectory_id=t, start_tick=0, values={n: offset+.01*t for n in names}, manifest_sha256=f"m{t}")
+                for t in (1800, 1801)]
         return dict(kind="long_rollout", dataset="double_well~horizon=128-2000", updates=10000, condition=condition, seed=seed,
+                    train_dataset="double_well-2000", registration_sha256="reg", cache_identity=dict(encode_report_sha256="enc"),
                     definitions=long_rollout.definitions(128), rows=rows,
                     means={n: offset+.01*1800.5 for n in names})
     for c, off in (("po_jepa_full", .1), ("identity", .3)):
@@ -505,3 +602,62 @@ def test_summarize_long_reports(tmp_path):
     assert len(out["duplicates"]) == 1
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
     assert "## 长时程滚动" in md and "8 步滚动 T=64" in md and "po_jepa_full − identity" in md
+
+
+def _long_report(condition, seed, offset, **change):
+    names = long_rollout.value_names(128)
+    rows = [dict(trajectory_id=t, start_tick=0, values={n: offset+.01*t for n in names}, manifest_sha256=f"m{t}") for t in (1800, 1801)]
+    r = dict(kind="long_rollout", dataset="double_well~horizon=128-2000", updates=10000, condition=condition, seed=seed,
+             train_dataset="double_well-2000", registration_sha256="reg", cache_identity=dict(encode_report_sha256="enc"),
+             definitions=long_rollout.definitions(128), rows=rows, means={n: offset+.01*1800.5 for n in names})
+    r.update(change)
+    return r
+
+
+@pytest.mark.parametrize("what", ["cache", "manifest", "registration", "train", "definitions", "start", "missing_row",
+                                  "duplicate_row", "no_manifest"])
+def test_summarize_long_refuses_unpairable_reports(tmp_path, what):
+    """S25c 修改（Codex 审核 P2-1）：同编号轨迹来自不同缓存（或报告级身份不同、缺行、重复行）时不出平均差，记进 incomplete。
+    Codex 反例：dataset、步数、种子、编号相同，encode_report_sha256 和 manifest 不同，原来照样输出 mean −0.2、1 条。"""
+    s = _summarize()
+    full = _long_report("po_jepa_full", 1703, .1)
+    bad = _long_report("identity", 1703, .3)
+    if what == "cache":
+        bad["cache_identity"] = dict(encode_report_sha256="other")
+    elif what == "manifest":
+        bad["rows"][1]["manifest_sha256"] = "other"
+    elif what == "registration":
+        bad["registration_sha256"] = "other"
+    elif what == "train":
+        bad["train_dataset"] = "double_well~gain=2-2000"
+    elif what == "definitions":
+        bad["definitions"] = dict(bad["definitions"], block=4)
+    elif what == "start":
+        bad["rows"][0]["start_tick"] = 8
+    elif what == "missing_row":
+        bad["rows"] = bad["rows"][:1]
+    elif what == "duplicate_row":
+        bad["rows"] = bad["rows"]+bad["rows"][:1]
+    elif what == "no_manifest":
+        del bad["rows"][0]["manifest_sha256"]; del full["rows"][0]["manifest_sha256"]
+    good = _long_report("identity", 1704, .3)
+    for name, r in (("f1", full), ("i1", bad), ("f2", _long_report("po_jepa_full", 1704, .1)), ("i2", good)):
+        (tmp_path/f"{name}.json").write_text(json.dumps(r))
+    out = s.long_reports(tmp_path)
+    assert not any(c["comparison"] == "po_jepa_full − identity" for c in out["comparisons"])
+    (inc,) = out["incomplete"]
+    assert inc["comparison"] == "po_jepa_full − identity" and [x["seed"] for x in inc["per_seed"]] == [1703] and inc["per_seed"][0]["problems"]
+    md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
+    assert "⚠ 长时程" in md and "种子 1703" in md
+    # 对照：不改时同一组报告给出正常比较
+    (tmp_path/"i1.json").write_text(json.dumps(_long_report("identity", 1703, .3)))
+    if what == "no_manifest":
+        (tmp_path/"f1.json").write_text(json.dumps(_long_report("po_jepa_full", 1703, .1)))
+    out = s.long_reports(tmp_path)
+    assert not out["incomplete"] and next(c for c in out["comparisons"])["mean"] == pytest.approx(-.2)
+
+
+def _summarize():
+    spec = importlib.util.spec_from_file_location("summarize_v7", ROOT/"tools/summarize_v7.py")
+    s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
+    return s

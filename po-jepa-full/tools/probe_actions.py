@@ -1,10 +1,11 @@
 """v7 诊断：动作在冻结特征里到底有多大信号？（回答“delta_act≈1e-6 是数据问题还是模型问题”）
 
 对测试集里的 (轨迹, 起点, 时长)，用和评测 delta_act 完全相同的 donor（测试集下一条轨迹、同起点同时长的控制），
-从真实的起点状态出发、换成 donor 的控制重新仿真，渲染终点画面，用同一个冻结编码器、同一个预处理随机种子编码，
+从真实的起点状态（完整物理状态）出发、只把窗口内的下达动作换成 donor 的（窗口前仍是这条轨迹自己的，有执行延迟时窗口开头
+执行的是它们；S25a 修改）重新仿真，渲染终点画面，用同一个冻结编码器、同一个预处理随机种子编码，
 得到“如果换了动作，终点特征本来会是什么”(Z_cf)。然后报告：
 - identity 误差   d(Z_t, Z_{t+τ})                      ：完全不预测的误差
-- 动作上限 Δ_act* d(Z_cf, Z_{t+τ})                     ：一个完美模型的 delta_act（换动作后误差应该涨多少）
+- 反事实可分性 D_cf = d(Z_cf, Z_{t+τ})（字段名沿用 oracle_delta_act）：换了窗口内的动作，真实终点特征会变多少
 - 像素位移        |q_cf − q_true|、|q_{t+τ} − q_t|        ：同一件事在画面里有多大
 d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
 *_px 列：粒子类场景是状态的 L2 × 每单位像素数；advection_diffusion 是 16×16 平均浓度场的 L2；S21b 新场景 push 是推杆和
@@ -12,7 +13,10 @@ d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
 S25a 二阶场景只比画面上看得到的位置（构形，见 po_jepa.configuration）：pendulum 摆锤 × 80、cart_pole 小车和摆锤 × 36、
 spring_chain 和 bouncing_balls 全部质点/球 × 48，wave 是 u 的 16×16 池化场（256 维）的 L2（不是像素）。
 二阶场景现在按单帧复制（dup）编码，和 encode_v7 一致：特征里看不到速度；两帧（pair）编码在 S25b 接（等 S22 探针结果）。
-若 Δ_act* 和 identity 误差同量级，而训练好的模型 delta_act≈1e-6，说明是模型/训练没学会用动作，不是数据里没有动作信号。
+D_cf 大说明在这个模拟状态下，换动作会让终点特征可以区分（数据里有动作信号）。它不是模型 delta_act 的一般上限：
+D_cf 用完整物理状态续算，模型只看到起点画面；画面推不出完整状态时（例如二阶场景 dup 编码看不到速度，同一画面、同一动作
+可以有不同的未来），模型达不到它。所以 D_cf 大、训练好的模型 delta_act≈1e-6，本身不能断定是训练没学会用动作，
+还要 pair 编码、速度条件化之类的独立对照才能分清是训练问题还是部分可观测（S25a 修改，Codex 审核）。
 
 用法（GPU 上几分钟；和 encode_v7.py 用同一个编码器与权重）：
   python tools/probe_actions.py --system double_well --trajectories 200 \
@@ -70,16 +74,18 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
     from po_jepa import datasets, systems
     from po_jepa import variants
     v = datasets.active().knobs
+    # S25a 修改（Codex 审核）：只换窗口内的下达动作，窗口前仍是 tid 自己的（有执行延迟时窗口开头执行的是它们）。
+    # 基础 v6 场景（最后一段）没有延迟，照旧用 donor 的 sample_controls。
+    swapped = systems.splice_window(systems.commanded_controls(tid), systems.commanded_controls(donor), start, duration)
     if system.name in NEW_SYSTEMS+variants.SECOND_ORDER:       # S21b；S25a 二阶场景同一条路径：从第 start 帧的完整状态续算；隐藏状态用 hidden() 换成 frames() 的那种
         if (tid, datasets.active().tag) not in _FULL:
             _FULL.clear(); _FULL[tid, datasets.active().tag] = system.variant_trajectory(tid, v)
         full = _FULL[tid, datasets.active().tag]
-        q = system.variant_trajectory(tid, v, controls=systems.commanded_controls(donor), start=start,
-                                      state=full[start], ticks=duration)[-1]
+        q = system.variant_trajectory(tid, v, controls=swapped, start=start, state=full[start], ticks=duration)[-1]
         return (system.hidden(full[start+duration][None])[0], system.hidden(q[None])[0],
                 system.draw(q[None], tid, v, ticks=[start+duration])[0])
     if not v.is_default:      # v7 可调数据集：同一套可调仿真与渲染
-        controls = systems.commanded_controls(donor)
+        controls = swapped
         if system.name == "advection_diffusion":
             fields = system.variant_fields(tid, v)
             field = system.variant_fields(tid, v, controls=controls, start=start, field=fields[start], ticks=duration)[-1]
@@ -189,7 +195,8 @@ def main():
                 oracle_over_identity=float(np.mean([r["oracle_delta_act"] for r in sel])/np.mean([r["identity"] for r in sel])))
     report = dict(system=a.system, dataset=spec.tag, encoder="fake" if a.fake_encoder else "vjepa2-vitg",
                   overall=summary(rows), by_duration={str(t): summary([r for r in rows if r["duration_cycles"] == t]) for t in DURATIONS},
-                  rows=rows, note="oracle_delta_act = 完美模型的 delta_act；与训练好模型的 delta_act（评测报告）对比",
+                  rows=rows, note=("oracle_delta_act（字段名沿用）= 反事实终点特征可分性 d(Z_cf, Z_true)：从完整物理状态续算、只换窗口内的动作；"
+                        "不是模型 delta_act 的一般上限（模型只看起点画面，部分可观测时达不到），不能单凭它把小 delta_act 归因于训练"),
                   **({"tubelet": "dup", "motion_units": "构形（po_jepa.configuration），二阶场景单帧复制编码看不到速度"}
                      if spec.system in variants.SECOND_ORDER else {}))
     a.output.parent.mkdir(parents=True, exist_ok=True)

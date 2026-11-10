@@ -116,10 +116,62 @@ def test_probe_counterfactual_end_on_second_order(use, name, knobs):
     # 换成 donor 的动作：与直接续算相同，且和真实终点不同
     true_end, cf, frame = probe.counterfactual_end(S, simulation, 181, 182, 5, 8)
     full = S.variant_trajectory(181, v)
-    expect = S.variant_trajectory(181, v, controls=systems.commanded_controls(182), start=5, state=full[5], ticks=8)[-1]
+    # 参照（S25a 修改）：窗口前是 181 自己的下达动作，窗口 [5,13) 是 182 的；逐 tick 独立展开（不调 splice_window）
+    own, other = _per_tick(systems.commanded_controls(181)), _per_tick(systems.commanded_controls(182))
+    mixed = np.concatenate((own[:5], other[5:13], own[13:]))
+    expect = S.variant_trajectory(181, v, controls=simulation.TrajectoryControls(181, np.arange(32), np.arange(1, 33), mixed),
+                                  start=5, state=full[5], ticks=8)[-1]
     assert np.array_equal(cf, S.hidden(expect[None])[0]) and np.array_equal(frame, S.draw(expect[None], 181, v, ticks=[13])[0])
     assert np.array_equal(true_end, states[13]) and not np.array_equal(cf, true_end)
     assert probe.motion(name, cf, true_end, 1., dict(v.params)) > 0
+
+
+def _same(a, b, field):
+    """场（advection_diffusion）续算要从实数场重新做 FFT，与整条仿真差 1e-16 量级；其他场景逐位相同。"""
+    return np.allclose(a, b, rtol=0, atol=1e-12) if field else np.array_equal(a, b)
+
+
+def _per_tick(c):
+    """下达动作逐 tick 展开 [32,2]（测试自己的写法：按段长 repeat）。"""
+    return np.repeat(c.values, (c.ends_ticks-c.starts_ticks).astype(int), axis=0)
+
+
+@pytest.mark.parametrize("name,knobs", [("pendulum", "delay=1"), ("cart_pole", "delay=2"), ("double_well", "delay=1"),
+                                        ("advection_diffusion", "delay=1"), ("push", "delay=1")])
+def test_counterfactual_only_swaps_the_window_under_delay(use, monkeypatch, name, knobs):
+    """S25a 修改（Codex 审核问题 1）：donor 与 recipient 窗口内的下达动作相同、窗口前不同 → 反事实终点必须等于真实终点。
+    原来把 donor 的整条动作传进续算，有延迟时窗口开头执行的是 donor 窗口前的命令（Codex 反例：单摆差 4.7 像素）。"""
+    use(name, knobs); probe = _tool("probe_actions"); S = systems.get(); probe._FULL.clear()
+    real = systems.commanded_controls
+    own = _per_tick(real(181))
+    fake = own.copy(); fake[:5] = np.where(np.abs(own[:5]) < .2, .45, -own[:5])    # 窗口前每个 tick 都不同，窗口内及以后相同
+    assert (fake[:5] != own[:5]).all()
+    monkeypatch.setattr(systems, "commanded_controls",
+                        lambda tid: simulation.TrajectoryControls(182, np.arange(32), np.arange(1, 33), fake) if tid == 182 else real(tid))
+    for start, tau in ((5, 1), (5, 4)):
+        true_end, cf, frame = probe.counterfactual_end(S, simulation, 181, 182, start, tau)
+        assert _same(cf, true_end, name == "advection_diffusion"), (name, start, tau)
+    # 窗口内不同的对照：反事实终点确实会变（不是因为根本没用 donor）
+    fake2 = own.copy(); fake2[5] = np.where(np.abs(own[5]) < .2, .45, -own[5])
+    monkeypatch.setattr(systems, "commanded_controls",
+                        lambda tid: simulation.TrajectoryControls(182, np.arange(32), np.arange(1, 33), fake2) if tid == 182 else real(tid))
+    true_end, cf, frame = probe.counterfactual_end(S, simulation, 181, 182, 5, 4)
+    assert not np.allclose(cf, true_end, rtol=0, atol=1e-6)
+
+
+def test_splice_window_values():
+    c1 = simulation.TrajectoryControls(3, np.array([0, 8, 16, 24]), np.array([8, 16, 24, 32]),
+                                       np.array([[.1, .2], [.3, .4], [-.1, -.2], [0., .5]]))
+    c2 = simulation.TrajectoryControls(4, np.array([0, 4, 12, 20, 28]), np.array([4, 12, 20, 28, 32]),
+                                       np.array([[-.5, .5], [.2, 0.], [0., 0.], [.4, -.4], [.1, .1]]))
+    out = systems.splice_window(c1, c2, 6, 8)
+    want = np.concatenate((np.array([[.1, .2]]*6), np.array([[.2, 0.]]*6), np.array([[0., 0.]]*2),
+                           np.array([[.3, .4]]*2), np.array([[-.1, -.2]]*8), np.array([[0., .5]]*8)))
+    assert out.trajectory_id == 3 and np.array_equal(out.values, want)
+    assert np.array_equal(out.starts_ticks, np.arange(32)) and np.array_equal(out.ends_ticks, np.arange(1, 33))
+    for bad in ((-1, 2), (30, 3), (4, 0)):
+        with pytest.raises(ValueError):
+            systems.splice_window(c1, c2, *bad)
 
 
 def _probe(tmp_path, system, knobs=""):
@@ -166,6 +218,37 @@ def test_plan_summaries_on_second_order(use):
     # 目标动作：与粒子类场景相同的均匀随机（每 2 tick 一段）
     r1, r2 = np.random.default_rng(5), np.random.default_rng(5)
     assert np.array_equal(plan.goal_controls("wave", full[0], 7, r1), np.repeat(r2.uniform(-.5, .5, (4, 2)), 2, 0)[:7])
+
+
+@pytest.mark.parametrize("name,knobs", [("pendulum", "delay=1"), ("cart_pole", "delay=2"), ("spring_chain", "delay=1"),
+                                        ("double_well", "delay=1"), ("advection_diffusion", "delay=2"), ("gray_scott", "delay=1")])
+def test_plan_rollout_keeps_queued_commands_under_delay(use, name, knobs):
+    """S25a 修改（Codex 审核问题 2）：带执行延迟时，规划的续算要带上已下达、还没执行的命令。
+    (1) 从起点用这条轨迹自己的下达动作续算 = 数据集本身（逐位）；(2) 分两段执行（更新已下达命令）= 一次执行（逐位）；
+    (3) 起点前的命令丢掉（原来的全零命令表）时终点不同（说明 (1) 确实在核延迟队列）。"""
+    use(name, knobs); plan = _tool("plan_v7"); S = systems.get(); v = datasets.active().knobs
+    field = name == "advection_diffusion"
+    tid, k = 181, 8
+    full = S.variant_fields(tid, v) if field else S.variant_trajectory(tid, v)
+    own = _per_tick(systems.commanded_controls(tid))
+    start = next(t for t in range(4, 24) if np.abs(own[t-v.delay:t]).max() > .05)   # 起点前排队的命令不是零
+    history = own.copy(); history[start:] = 0.
+    one = plan.rollout(S, v, field, tid, full[start], start, own[start:start+k], history)
+    assert _same(one, full[start+k], field)
+    acts = np.random.default_rng(0).uniform(-.5, .5, (k, 2))
+    whole = plan.rollout(S, v, field, tid, full[start], start, acts, history)
+    h = history.copy()
+    mid = plan.rollout(S, v, field, tid, full[start], start, acts[:3], h); h[start:start+3] = acts[:3]
+    assert _same(plan.rollout(S, v, field, tid, mid, start+3, acts[3:], h), whole, field)
+    assert not np.allclose(plan.rollout(S, v, field, tid, full[start], start, own[start:start+k], np.zeros((32, 2))), full[start+k],
+                           rtol=0, atol=1e-6)
+
+
+def test_plan_episode_commands():
+    plan = _tool("plan_v7")
+    hist = np.arange(64.).reshape(32, 2)/100
+    out = plan.episode_commands(hist, 5, np.array([[.7, -.1], [.2, -.9]]))
+    assert np.array_equal(out[:5], hist[:5]) and np.array_equal(out[5:7], [[.5, -.1], [.2, -.5]]) and not out[7:].any()
 
 
 def _plan(tmp_path, system, *extra):

@@ -82,9 +82,13 @@ def _read_uncached(path, spec):
 
 
 def _controls(m):
-    """manifest 的下达动作 → systems.TrajectoryControls 或 SubtickControls（构造时做各自的检查）。"""
+    """manifest 的下达动作 → systems.TrajectoryControls 或 SubtickControls（构造时做各自的检查）。
+    S25d 修改（Codex 审核）：段边界在转 int64 之前先核是 JSON 整数（原来先转换再比较，0.25 会被截成 0 蒙混过去）。"""
     from po_jepa import simulation, systems
     c = m["controls"]
+    for key in ("starts_ticks", "ends_ticks", "starts_subticks", "ends_subticks"):
+        if key in c and (type(c[key]) is not list or any(type(x) is not int for x in c[key])):
+            raise ValueError(f"controls.{key} must be a list of integers")
     values = np.array(c["values"], dtype=np.float64)
     if "starts_subticks" in c or "ends_subticks" in c:
         if "starts_ticks" in c or "ends_ticks" in c:

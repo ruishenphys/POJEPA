@@ -164,6 +164,34 @@ def commanded_controls(trajectory_id: int):
     return controls if not v.switch_offset else shift_controls(controls, v.switch_offset)
 
 
+def command_ticks(controls) -> np.ndarray:
+    """下达动作逐 tick 展开成 [32,2]（不经延迟、增益、噪声、饱和）。只收 32 tick 的 TrajectoryControls：反事实探针和规划
+    按 32 tick 的回合（长时程、时间采样它们直接报错）。"""
+    if not isinstance(controls, simulation.TrajectoryControls):
+        raise ValueError("command_ticks 只收 32 tick 的 simulation.TrajectoryControls")
+    u = np.zeros((TICKS, 2))
+    for a, b, value in zip(controls.starts_ticks, controls.ends_ticks, controls.values):
+        u[a:b] = value
+    return u
+
+
+def tick_controls(trajectory_id: int, values) -> simulation.TrajectoryControls:
+    """逐 tick 的下达动作 [32,2] → 每 tick 一段的 TrajectoryControls（经 applied_ticks 展开后与原分段写法逐位相同）。"""
+    starts = np.arange(TICKS, dtype=np.int64)
+    return simulation.TrajectoryControls(trajectory_id, starts, starts+1, np.array(values, dtype=np.float64))
+
+
+def splice_window(recipient, donor, start: int, duration: int) -> simulation.TrajectoryControls:
+    """反事实的下达动作：recipient 自己的下达动作，只把窗口 [start, start+duration) 换成 donor 的（S25a 修改，Codex 审核）。
+    有执行延迟 delay 时，窗口开头几个 tick 执行的是窗口前已经下达的命令，它们必须仍是 recipient 自己的，反事实才只干预
+    声明的窗口（模型评测里换的也只是窗口内的动作）。delay = 0 时窗口内的执行动作与直接用 donor 的整条动作逐位相同。"""
+    if not (0 <= start and duration > 0 and start+duration <= TICKS):
+        raise ValueError(f"窗口 [{start}, {start+duration}) 不在 [0, {TICKS}) 内")
+    u = command_ticks(recipient)
+    u[start:start+duration] = command_ticks(donor)[start:start+duration]
+    return tick_controls(recipient.trajectory_id, u)
+
+
 def _commanded_ticks(trajectory_id: int, v) -> simulation.TrajectoryControls:
     """模型看到的（下达的）动作。基础场景 = v6 的 sample_controls；调节项改动作抽样时用同一随机流按新规则抽。
 
