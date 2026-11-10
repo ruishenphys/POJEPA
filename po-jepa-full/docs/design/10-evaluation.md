@@ -182,7 +182,7 @@ D4 在同样的窗口上重算 v7 的三项标准指标，和被读检查点所�
 
 ## 8. DROID 评测轴
 
-代码在 `src/po_jepa/droid/evaluate.py`（S11；拆成 S11a：§8.2、§8.3、§8.6、§8.7、§8.9 和 §8.1 的 `commanded` 跳过，S11b：§8.4、§8.5、§8.8（截断间隙在 `droid/spectral_gap.py`），见 `docs/segments/S11a.md`、`S11b.md`；§8.1 的读检查点等 S09，接口 `evaluate.load_selected`）。§3 的指标定义（两种度量、分割滚动 Φ_Π、归一化）DROID 上原样使用，只把“tick”换成“周期”，窗口换成 06 §3 的冻结窗口。
+代码在 `src/po_jepa/droid/evaluate.py`（S11；拆成 S11a：§8.2、§8.3、§8.6、§8.7、§8.9 和 §8.1 的 `commanded` 跳过，S11b：§8.4、§8.5、§8.8（截断间隙在 `droid/spectral_gap.py`），见 `docs/segments/S11a.md`、`S11b.md`；§8.1 的读检查点是 S09b 的 `evaluate.load_selected`，评测任务入口 `droid/eval_job.py`，见 `docs/segments/S09b.md`）。§3 的指标定义（两种度量、分割滚动 Φ_Π、归一化）DROID 上原样使用，只把“tick”换成“周期”，窗口换成 06 §3 的冻结窗口。
 
 ### 8.1 任务和读检查点
 

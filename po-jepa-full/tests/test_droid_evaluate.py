@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import json
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -479,8 +480,8 @@ def _job_kwargs(root, **over):
 
 
 def test_completed_job_is_reused_only_for_the_same_request(root, tmp_path):
-    """完成缓存（S11a-P1-1）：同一请求直接返回；换条件、种子、检查点、配置、冻结窗口、准备文件、outcome、来源、两轴
-    开关中任何一项都报错，不返回旧报告；job.json 或 report 里的 job 被改也报错。"""
+    """完成缓存（S11a-P1-1）：同一请求直接返回；换条件、种子、检查点、配置、冻结窗口、准备文件、准备数组（S09b）、outcome、
+    来源、两轴开关中任何一项都报错，不返回旧报告；job.json 或 report 里的 job 被改也报错。"""
     out = tmp_path/"j"
     report = ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
     assert report["job"]["inputs"] == ev.job_inputs(splits=root["docs"], prepared=root["prepared"],
@@ -495,6 +496,9 @@ def test_completed_job_is_reused_only_for_the_same_request(root, tmp_path):
         "config": dict(config=dataclasses.replace(CFG, config_sha256="0"*64)),
         "windows": dict(splits={**root["docs"], "id_test": {**doc, "windows": doc["windows"][1:]}}),
         "prepared": dict(prepared={**root["prepared"], u: dataclasses.replace(root["prepared"][u], json_sha256="0"*64)}),
+        # S09b：准备 JSON 的 SHA 不变、数组本身换了
+        "arrays": dict(prepared={**root["prepared"], u: dataclasses.replace(root["prepared"][u], arrays={
+            **root["prepared"][u].arrays, "state": root["prepared"][u].arrays["state"] + 1e-3})}),
         "outcomes": dict(outcomes={**root["outcomes"], u: "failure"}),
         "provenance": dict(provenance=other_provenance(root)),
     }
@@ -506,6 +510,9 @@ def test_completed_job_is_reused_only_for_the_same_request(root, tmp_path):
         with pytest.raises(ValueError, match="complete for another request"):
             ev.evaluate_job(out, model=Toy(), condition=condition, **_job_kwargs(root, **over))
     with pytest.raises(ValueError, match="complete for another request"):         # 本次要两轴，旧的没跑
+        ev.evaluate_job(out, model=Toy(), condition="identity", extra_reader=SimpleNamespace(manifest_sha256="e"*64),
+                        **_job_kwargs(root))
+    with pytest.raises(ValueError, match="manifest_sha256"):                     # S09b：附加特征清单要有身份
         ev.evaluate_job(out, model=Toy(), condition="identity", extra_reader=object(), **_job_kwargs(root))
     # 旧任务 identity/OLD，新请求 po_jepa_full/2026/NEW（Codex 的反例）
     with pytest.raises(ValueError, match="complete for another request"):

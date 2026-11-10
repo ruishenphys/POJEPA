@@ -254,9 +254,20 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
     monkeypatch.setitem(droid.MAINS, "download", fake("download", write=False, code=75))
     assert droid.main(_entry(tmp_path, "download/ood_test")) == 75    # 退出码原样传出
     calls.clear()
-    for job in ("calibrate/sigma-z", "check/env", "summary", "eval/identity"):
-        assert droid.main(_entry(tmp_path, job)) == 2
-    assert calls == [] and not (tmp_path/"runs").exists()
+    # S09b：calibrate、check、eval、summary 都接上了；各阶段收到的参数（不写完成标志，入口按失败退出 1）
+    for stage in ("calibrate", "check", "eval", "summary"):
+        monkeypatch.setitem(droid.MAINS, stage, fake(stage, write=False))
+    run = ["--config", cfg, "--data-root", data, "--run-root", str(tmp_path/"runs")]
+    assert droid.main(_entry(tmp_path, "calibrate/lambda-po_jepa_full")) == 1
+    assert droid.main(_entry(tmp_path, "check/env")) == 1
+    assert droid.main(_entry(tmp_path, "eval/koopman/seed1703", "--time-limit-minutes", "30")) == 1
+    assert droid.main(_entry(tmp_path, "summary")) == 1
+    assert calls == [("calibrate", run + ["--job", "calibrate/lambda-po_jepa_full", "--device", "cuda"]),
+                     ("check", run + ["--device", "cuda"]),
+                     ("eval", run + ["--job", "eval/koopman/seed1703", "--device", "cuda", "--time-limit-minutes", "30"]),
+                     ("summary", run)]
+    assert droid.PENDING == {}
+    calls.clear()
     for bad in (_entry(tmp_path, "download/train-001"),                            # 试跑只有 train-000
                 _entry(tmp_path, "encode/val", "--delete-raw"),                     # 只有训练片带 --delete-raw
                 _entry(tmp_path, "download/val", "--time-limit-minutes", "5"),
@@ -454,14 +465,14 @@ def test_runner_on_the_real_pilot_graph_dry_run(tmp_path, capsys):
 
 
 def test_entry_as_a_script(tmp_path):
-    """tools/droid.py 作为脚本运行（自己找到 src 和 droid_jobs）：没写的阶段退出 2；完成标志已在时退出 0。"""
+    """tools/droid.py 作为脚本运行（自己找到 src 和 droid_jobs）：阶段出错退出 1、不写完成标志；完成标志已在时退出 0。"""
     def run(job, stage):
         return subprocess.run([sys.executable, "tools/droid.py", stage, "--config", "configs/droid/pilot.yaml",
                                "--data-root", str(tmp_path/"data"), "--run-root", str(tmp_path/"runs"), "--job", job],
                               cwd=ROOT, capture_output=True, text=True, timeout=120)
     r = run("summary", "summary")
-    assert r.returncode == 2 and "S13" in r.stderr
     flag = tmp_path/"runs/pilot/summary/COMPLETE.json"
+    assert r.returncode == 1 and "Error" in r.stderr and not flag.exists()      # 空数据根：汇总读不到索引
     flag.parent.mkdir(parents=True)
     flag.write_text("{}")
     r = run("summary", "summary")

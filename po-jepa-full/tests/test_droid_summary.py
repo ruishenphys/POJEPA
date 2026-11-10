@@ -553,23 +553,6 @@ def test_repeated_runs_are_byte_identical(tmp_path):
         assert (a/f).read_bytes() == (b/f).read_bytes(), f
 
 
-def test_default_readers_wait_for_s09(tmp_path):
-    """训练产物和评测来源的读法等 S09：默认读取函数报 NotImplementedError；统一入口的 summary 仍退出 2、不写文件。"""
-    data, run_root, _ = build(tmp_path)
-    with pytest.raises(NotImplementedError):
-        ds.run(CFG, data, run_root)
-    for f in (ds.read_train, ds.read_eval_view, ds.read_env):
-        with pytest.raises(NotImplementedError):
-            f(tmp_path)
-    assert not (run_root/CFG.name/"summary").exists()
-    droid = importlib.util.spec_from_file_location("droid_entry", w.ROOT/"tools"/"droid.py")
-    entry = importlib.util.module_from_spec(droid)
-    droid.loader.exec_module(entry)
-    assert entry.main(["summary", "--config", str(CONFIGS/"pilot.yaml"), "--data-root", str(tmp_path/"empty"),
-                       "--run-root", str(run_root), "--job", "summary"]) == 2
-    assert not (run_root/"pilot"/"summary").exists()
-
-
 # ---------------------------------------------------------------- 真实评测产物（S11a、S11b、S12）
 
 from test_droid_evaluate import LOSS, Identity, Toy  # noqa: E402

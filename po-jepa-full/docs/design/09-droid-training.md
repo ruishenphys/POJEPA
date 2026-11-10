@@ -280,3 +280,16 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 - 验证窗口在 `commanded` 配置下跳过 `passed_commanded` 为假的回合（同 10 §8.1，用 `evaluate._selected`），窗口数和跳过的回合记进登记。
 - 求谱后端只在 `type(model.spectrum) is GraphSpectrum` 时设（`FourierSpectrum` 是它的子类，fixed_fourier 不求谱）。
 - §8 的续跑测试按原文跑 30 步；14 §3 的“20 步、两次验证、完整目录”并进同一次运行核（第 0、10、20、30 步验证）。测试每步 2 个窗口 / 2 个 AC 片段，CPU 上 PO 类一步约 1.5 秒。
+
+## 11. S09b 实现补注（2026-11-10）
+
+代码和验收单见 `docs/segments/S09b.md`。实现 §3 标定（`droid/calibrate.py`）、§7 `check/env`（`droid/check.py`）、10 §8.1 的读检查点（`evaluate.load_selected`）、评测任务入口（`droid/eval_job.py`）和 13 §8.3 的三个读取函数。实现时定的（不改口径，Jerry 可以改）：
+
+- σ_z 的回合池直接取 `action_scale.json` 记的 `episodes[<source>]`（04 §6 的同一池），不重算。
+- `check/env` 跑 20 步时 λ 用占位值 1（真 λ 要等标定；只测时长和有限性，不影响参数量和初始哈希）；总时长 = U·单步中位数 + (U/V + 1)·一次验证用时（第 0 步也验证，§7 第 3 条写的“20 次”按 U/V 算）。
+- 数据加载器比最快条件的单步慢时按“不通过”处理（退出 1、写 FAILED.json），不只是提示。
+- 不训练的对照（identity、vjepa2_ac_zeroshot）的构造种子取配置的第一个种子；评测任务的 `--time-limit-minutes` 只记录（评测按批落盘，重排同一条命令接着做）。
+- 离线规划在 `evaluate_job` 的每个测试集循环里、写 COMPLETE.json 之前做，报告的 `axes.planning` 记上。
+- 训练登记新加 `splits_sha256`（`index/splits.json` 的 SHA），汇总的 `data_sha256` 由它、验证窗口和动作尺度的 SHA 组成。
+- 补 S11-fix1 留下的两处输入身份：`job_inputs` 加准备数组本身的 SHA（`prepared_arrays_sha256`）和测试附加特征清单的 SHA（清单内容的规范 JSON 的 SHA，`ExtraFeatureReader.manifest_sha256`）。主特征读取器在合成数据下的身份仍只靠来源字典（假编码器时特征清单 SHA 记 None），留作已知缺口。
+- `load_selected` 拿到的模型不是这个条件的类时报 ValueError（原来是 AttributeError）。

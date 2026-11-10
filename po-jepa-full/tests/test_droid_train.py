@@ -87,7 +87,11 @@ def _prepared(u: str, rows: int, seed: int) -> PreparedEpisode:
 
 @pytest.fixture(scope="module")
 def root(tmp_path_factory):
-    data = tmp_path_factory.mktemp("droid_train")
+    return build_root(tmp_path_factory.mktemp("droid_train"))
+
+
+def build_root(data):
+    """合成数据根（`root` 夹具的内容；别的测试文件用另一个目录调用）。"""
     prepared, manifests = {}, {}
     for shard, keys in SHARDS.items():
         entries = []
@@ -490,6 +494,9 @@ def test_load_data_reads_splits_windows_and_skips_commanded_failures(root, tmp_p
     prep = tr.pr.prepared_dir(base)
     (prep/tr.pr.WINDOWS_DIR).mkdir(parents=True)
     cache._write_json(prep/tr.pr.ACTION_SCALE_FILE, SCALE)
+    splits_file = tr.ix.index_dir(base)/tr.ix.SPLITS_FILE
+    splits_file.parent.mkdir(parents=True)
+    cache._write_json(splits_file, {"fake": "splits"})
 
     def config_for(source):
         action = dataclasses.replace(PILOT.action, source=source)
@@ -504,6 +511,7 @@ def test_load_data_reads_splits_windows_and_skips_commanded_failures(root, tmp_p
     assert got.train_set == plan["train-000"] and got.feature_manifest_sha256 == "f"*64
     assert got.val_windows_sha256 == cache.file_sha(prep/tr.pr.WINDOWS_DIR/"val.json")
     assert got.action_scale_sha256 == cache.file_sha(prep/tr.pr.ACTION_SCALE_FILE)
+    assert got.splits_sha256 == cache.file_sha(splits_file)
     got = tr.load_data(config_for("commanded"), base)
     assert got.val_windows == [w for w in windows if w["uuid"] == uid("E")] and got.val_skipped == [uid("F")]
     assert set(got.val_episodes) == {uid("E")}

@@ -9,11 +9,11 @@
   不存在算失败（退出 1）。训练片的编码任务（带 `--delete-raw`）的完成标志是 `features/<片>/_raw_deleted/<name>.json`，
   原始文件删完才写；特征已编完但没删完时重跑会进入编码阶段，跳过编码、把剩下的删掉（S14-fix1）。
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
-- 已接上的阶段：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b），以及评测阶段里
-  的 `eval/spectral-gap`（10 §8.8，S11b，`droid.spectral_gap.main`）、train（09 §4，S09a，`droid.train.main`；
-  `--retry` 删掉 FAILED.json 从最新检查点接着跑）。calibrate、check（S09b）、其余 eval（S11、S12，读检查点等 S09b）
-  还没写，summary（S13，`tools/droid_summary.py`）写好了但训练产物和评测来源的读取函数等 S09b：这几个阶段退出 2，
-  不写任何文件。
+- 全部阶段都已接上：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b）、calibrate
+  （09 §3，S09b，`droid.calibrate.main`）、check（09 §7，S09b，`droid.check.main`）、train（09 §4，S09a，
+  `droid.train.main`；`--retry` 删掉 FAILED.json 从最新检查点接着跑）、eval（`eval/spectral-gap` 是 10 §8.8 的
+  `droid.spectral_gap.main`，S11b；其余是 10 §8、11 的 `droid.eval_job.main`，S09b）、summary（13 §8，
+  `tools/droid_summary.py`，S13/S09b）。
 - 编码任务开始时由 `encode.load_frozen` 核上游提交（204698b）和编码器权重 SHA（= v7 `cache.CHECKPOINT_SHA`），
   不对就报错退出 1（12 §1）。`--fake-encoder` 只给 CPU 流程测试用（特征标成 synthetic_development_only）。
 """
@@ -25,7 +25,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import droid_jobs  # noqa: E402
+import droid_summary  # noqa: E402
+from po_jepa.droid import calibrate as cb  # noqa: E402
+from po_jepa.droid import check as ck  # noqa: E402
 from po_jepa.droid import download as dl  # noqa: E402
+from po_jepa.droid import eval_job as ej  # noqa: E402
 from po_jepa.droid import encode as en  # noqa: E402
 from po_jepa.droid import index as ix  # noqa: E402
 from po_jepa.droid import prepare as pp  # noqa: E402
@@ -34,9 +38,9 @@ from po_jepa.droid import train as tr  # noqa: E402
 from po_jepa.droid.config import load_config  # noqa: E402
 
 NOT_IMPLEMENTED = 2
-PENDING = {"calibrate": "S09b", "check": "S09b", "eval": "S11/S12",
-           "summary": "S13 is in tools/droid_summary.py; its train/eval-source readers wait for S09b"}
-assert set(PENDING) | {"index", "download", "prepare", "encode", "train"} == set(droid_jobs.STAGES)
+PENDING: dict[str, str] = {}       # 阶段整体还没接上的（S09b 之后没有了）
+assert set(PENDING) | {"index", "download", "prepare", "encode", "calibrate", "check", "train", "eval",
+                       "summary"} == set(droid_jobs.STAGES)
 
 
 def stage_argv(stage: str, rest: str, a: argparse.Namespace) -> list[str]:
@@ -53,19 +57,28 @@ def stage_argv(stage: str, rest: str, a: argparse.Namespace) -> list[str]:
         if a.fake_encoder:
             argv.append("--fake-encoder")
         return argv
-    if stage == "train":
-        argv = base + ["--run-root", str(a.run_root), "--job", a.job, "--device", a.device]
+    run = base + ["--run-root", str(a.run_root)]
+    if stage == "calibrate":
+        return run + ["--job", a.job, "--device", a.device]
+    if stage == "check":
+        return run + ["--device", a.device]
+    if stage in ("train", "eval"):
+        argv = run + ["--job", a.job, "--device", a.device]
         if a.time_limit_minutes is not None:
             argv += ["--time-limit-minutes", str(a.time_limit_minutes)]
         if a.retry:
             argv.append("--retry")
         return argv
+    if stage == "summary":
+        return run
     raise AssertionError(stage)
 
 
 MAINS = {"index": lambda argv: ix.main(argv), "download": lambda argv: dl.main(argv),
          "prepare": lambda argv: pp.main(argv), "encode": lambda argv: en.main(argv),
-         "train": lambda argv: tr.main(argv)}
+         "calibrate": lambda argv: cb.main(argv), "check": lambda argv: ck.main(argv),
+         "train": lambda argv: tr.main(argv), "eval": lambda argv: ej.main(argv),
+         "summary": lambda argv: droid_summary.main(argv)}
 # 阶段整体还没接上、但其中某个任务已经能跑的（S11b：截断间隙只读特征和 sigma_z.json）
 JOB_MAINS = {f"eval/{droid_jobs.SPECTRAL_GAP}": lambda argv: sg.main(argv)}
 

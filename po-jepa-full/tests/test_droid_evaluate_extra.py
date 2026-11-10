@@ -70,7 +70,11 @@ def _write(npy, js, array, extra):
 
 @pytest.fixture(scope="module")
 def root(tmp_path_factory):
-    data = tmp_path_factory.mktemp("droid_eval_extra")
+    return build_root(tmp_path_factory.mktemp("droid_eval_extra"))
+
+
+def build_root(data):
+    """合成数据根（`root` 夹具的内容；别的测试文件用另一个目录调用）。"""
     prepared, manifests, docs, extra_entries = {}, {}, {}, []
     for shard, keys in SPLIT_ROWS.items():
         entries = []
@@ -410,7 +414,16 @@ def test_evaluate_job_with_extra_axes(root, tmp_path):
                   outcomes=root["outcomes"], reader=root["reader"], control_spec=spec(), provenance=root["provenance"],
                   loss_config=LOSS, config=CFG, device="cpu")
     report = ev.evaluate_job(tmp_path/"j", model=Toy(), condition="po_jepa_full", extra_reader=root["extra"], **kwargs)
-    assert report["axes"] == {"windows": True, "frame_rate": True, "resolution": True}
+    assert report["axes"] == {"windows": True, "frame_rate": True, "resolution": True, "planning": False}
+    assert report["job"]["inputs"]["extra_manifest_sha256"] == root["extra"].manifest_sha256
+    # S09b：附加特征清单换了（同样的文件、清单里少一条回合）就不复用已完成的任务
+    manifest = {"schema": ft.EXTRA_MANIFEST_SCHEMA,
+                "episodes": [{"uuid": u, "shard": root["extra"].shard(u), "files": root["extra"]._entries[u]["files"]}
+                             for u in root["extra"].uuids()][:-1]}
+    other = ft.ExtraFeatureReader(root["data"], manifest)
+    assert other.manifest_sha256 != root["extra"].manifest_sha256
+    with pytest.raises(ValueError, match="complete for another request"):
+        ev.evaluate_job(tmp_path/"j", model=Toy(), condition="po_jepa_full", extra_reader=other, **kwargs)
     for split in ("id_test", "ood_test"):
         assert (tmp_path/"j"/split/ev.FRAME_RATE_FILE).exists() and (tmp_path/"j"/split/ev.RESOLUTION_FILE).exists()
         assert report["splits"][split]["frame_rate"]["counts"]["entries"] == len(root["docs"][split]["frame_rate"])
@@ -422,8 +435,6 @@ def test_evaluate_job_with_extra_axes(root, tmp_path):
     with pytest.raises(ValueError):
         ev.evaluate_job(tmp_path/"x", model=Toy(), condition="koopman", extra_reader=root["extra"],
                         ac_steps=lambda *a: None, **kwargs)
-    with pytest.raises(NotImplementedError):
-        ev.load_selected(tmp_path, condition="po_jepa_full", model=Toy(), loss_config=LOSS, config=CFG, provenance={})
 
 
 # ---------------------------------------------------------------- 截断间隙
@@ -540,9 +551,9 @@ def test_spectral_gap_inputs(root, tmp_path):
         sg.gap_windows({"id_test": root["docs"]["id_test"]})
 
 
-def test_spectral_gap_cli_through_the_entry_point(root, tmp_path):
+def test_spectral_gap_cli_through_the_entry_point(root, tmp_path, monkeypatch):
     """tools/droid.py eval --job eval/spectral-gap：读冻结窗口、两个测试片的特征清单、<name>/calibration/sigma_z.json，
-    写完成标志；其他 eval 任务仍退出 2。"""
+    写完成标志；其他 eval 任务转给 `droid.eval_job.main`（S09b）。"""
     import shutil
     import sys
     sys.path.insert(0, str(cache.ROOT/"tools"))
@@ -575,4 +586,8 @@ def test_spectral_gap_cli_through_the_entry_point(root, tmp_path):
     (cal/"sigma_z.json").write_text(json.dumps({"sigma_z": 12.0, "config_sha256": BASE.config_sha256}))
     with pytest.raises(ValueError, match="complete for another request"):  # S11b-fix1：入口不再凭完成标志跳过
         droid.main(argv + ["--job", "eval/spectral-gap"])
-    assert droid.main(argv + ["--job", "eval/identity"]) == 2
+    calls = []
+    monkeypatch.setitem(droid.MAINS, "eval", lambda a: calls.append(a) or 75)
+    assert droid.main(argv + ["--job", "eval/identity"]) == 75
+    assert calls == [["--config", str(CONFIGS/"pilot.yaml"), "--data-root", str(data), "--run-root", str(run),
+                      "--job", "eval/identity", "--device", "cuda"]]

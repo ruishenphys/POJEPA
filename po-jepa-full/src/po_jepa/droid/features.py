@@ -316,12 +316,15 @@ class ExtraFeatureReader:
 
     `rows(uuid, kind, 行号)` 和 `FeatureReader.rows` 一样：第一次打开时核特征 JSON 的 SHA 等于清单、`.npy` 的 dtype
     和形状等于 JSON，每读一行核这一行的 SHA。s5 的行号是 s5 文件自己的（第 j 行 = 第 5j 帧），不和主特征混用（§4）。
+    `manifest_sha256` 是清单内容的 SHA（评测任务的输入身份，S09b）。
     """
 
     def __init__(self, data_root: Path | str, manifest: dict) -> None:
         if manifest.get("schema") != EXTRA_MANIFEST_SCHEMA:
             raise ValueError("not a test-extra manifest")
         self.data_root = Path(data_root)
+        # 清单内容（规范化 JSON）的 SHA：评测任务的输入身份记它（S09b）；从文件读的清单与文件 SHA 一一对应
+        self.manifest_sha256 = hashlib.sha256(cache._json_bytes(manifest)).hexdigest()
         self._entries = {}
         for entry in manifest["episodes"]:
             if entry["uuid"] in self._entries:

@@ -90,6 +90,7 @@ class TrainData:
     action_scale_sha256: str
     val_windows_sha256: str
     reader: ft.FeatureReader
+    splits_sha256: str | None = None      # index/splits.json（13 §8.3 的“划分和窗口”核对，S09b 加进登记）
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,7 @@ def load_data(config: DroidConfig, data_root: Path | str) -> TrainData:
     provenance = bt.training_provenance(config, manifests, manifest_sha)
     return TrainData(data_root, manifests, manifest_sha, train_set, episodes, val_windows, val_episodes, sorted(skipped),
                      control_spec, provenance, cache.file_sha(scale_path), cache.file_sha(val_path),
-                     ft.FeatureReader(data_root, manifests))
+                     ft.FeatureReader(data_root, manifests), cache.file_sha(ix.index_dir(data_root)/ix.SPLITS_FILE))
 
 
 # ---------------------------------------------------------------- 小工具
@@ -225,6 +226,7 @@ def registration(*, condition: str, seed: int, config: DroidConfig, data: TrainD
         schema=REGISTRATION_SCHEMA, condition=condition, seed=seed, config_name=config.name,
         config_sha256=config.config_sha256,
         train_set=dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set)),
+        splits_sha256=data.splits_sha256,
         action_scale_sha256=data.action_scale_sha256, val_windows_sha256=data.val_windows_sha256,
         val_windows=dict(count=len(data.val_windows), skipped_episodes=list(data.val_skipped)),
         feature_manifest_sha256=data.feature_manifest_sha256,

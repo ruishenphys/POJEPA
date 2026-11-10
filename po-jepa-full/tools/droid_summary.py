@@ -22,14 +22,14 @@
 
 训练产物（09 §4–§5：registration.json、selection.json、report.json、train-log.jsonl）、`check/env.json` 和评测任务的
 job.json/source.json 里的来源字段，格式由 S09 定；这里只经过 `Readers` 的三个读取函数（`read_train`、`read_eval_view`、
-`read_env`，现在抛 NotImplementedError），13 §8.3 的核对和 D11 成本对着 `TrainView`、`EvalView` 写好。S09 补上这三个
-函数后，`tools/droid.py` 的 `MAINS` 加 `summary` 一行即可。评测任务自己的产物（rows、frame_rate.json、resolution.json、
+`read_env`，S09b 写好），13 §8.3 的核对和 D11 成本对着 `TrainView`、`EvalView` 写。`tools/droid.py summary` 已接上（S09b）。评测任务自己的产物（rows、frame_rate.json、resolution.json、
 planning/、report.json，S11a/S11b/S12）和 eval/spectral-gap、标定文件 sigma_z.json、lambda-<条件>.json 按已定格式直接读。
 """
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import dataclasses
 from dataclasses import dataclass
 import math
@@ -75,11 +75,11 @@ CEM_KEYS = ("position_error_m", "gripper_error", "position_relative")
 CHECK_ITEMS = ("配置", "特征", "划分和窗口", "训练集", "σ_z", "λ", "初始权重", "训练日志", "评测", "评测窗口")
 
 
-# ---------------------------------------------------------------- 训练和评测来源的读取接口（格式等 S09）
+# ---------------------------------------------------------------- 训练和评测来源的读取接口（S09b）
 
 @dataclass(frozen=True)
 class TrainView:
-    """一个训练任务 `train/<条件>/seed<种子>/`（09 §4.1）里汇总要用的字段。读法 `read_train` 等 S09。
+    """一个训练任务 `train/<条件>/seed<种子>/`（09 §4.1）里汇总要用的字段（`read_train` 读）。
 
     - `data_sha256`：{DATA_FILES 里的键: SHA}（登记里的 `splits.json`、`windows/val.json`、`action_scale.json`）
     - `lambdas`：带一致性的三个条件登记的 {"time_weight", "space_weight"}，其余为 None；`sigma_z` 同理（PO-JEPA 类）
@@ -110,7 +110,7 @@ class TrainView:
 @dataclass(frozen=True)
 class EvalView:
     """一个评测任务 `eval/<条件>[/seed<种子>]/` 的 job.json/source.json 里汇总要核的来源字段（10 §8.1、§8.9）。读法
-    `read_eval_view` 等 S09（读检查点的记录由 `evaluate.load_selected` 给）。
+    `read_eval_view`（读检查点的记录由 `evaluate.load_selected` 给）。
 
     - `checkpoint_sha256`：读的检查点 SHA（不训练的对照为 None）
     - `data_sha256`：{DATA_FILES 里的键: SHA}（`splits.json`、`windows/id_test.json`、`windows/ood_test.json`、`action_scale.json`）
@@ -124,18 +124,76 @@ class EvalView:
     construction_seed: int | None = None
 
 
+def _view_json(path: Path) -> dict:
+    return ix._loads(Path(path).read_bytes(), str(path))
+
+
 def read_train(path: Path) -> TrainView:
-    raise NotImplementedError("13 §8.1: reading train/<condition>/seed<seed>/ waits for the S09 registration, "
-                              "selection.json, report.json and train-log.jsonl format")
+    """一个完成的训练任务（09 §4.1、§4.2、§5，S09a 的格式；S09b 写）：registration.json、report.json（COMPLETE.json 绑定）、
+    selection.json、train-log.jsonl。收敛曲线：验证点的 (步, 均值)，训练 JEPA 损失取日志每行（100 步）的平均、记在该行末步。
+    GPU 小时 = report 的 total_seconds / 3600（日志里记了 GPU 时才算；CPU 上的运行记 None）。"""
+    from po_jepa.droid import train as tr
+    path = Path(path)
+    report = _view_json(path/"report.json")
+    if _view_json(path/"COMPLETE.json").get("report_sha256") != cache.file_sha(path/"report.json"):
+        raise ValueError(f"{path}: COMPLETE.json does not match report.json")
+    reg = _view_json(path/"registration.json")
+    selection = _view_json(path/"selection.json")
+    if (reg.get("schema") != tr.REGISTRATION_SCHEMA or report.get("schema") != tr.REPORT_SCHEMA
+            or selection.get("schema") != tr.SELECTION_SCHEMA):
+        raise ValueError(f"{path} does not hold a DROID training task")
+    if report.get("registration_sha256") != cache.file_sha(path/"registration.json"):
+        raise ValueError(f"{path}: report.json was written for another registration.json")
+    if (reg["condition"], reg["seed"]) != (report["condition"], report["seed"]):
+        raise ValueError(f"{path}: registration and report name different tasks")
+    rows = tr._read_lines(path/tr.LOG_FILE)
+    steps = [st for r in rows for st in r["steps"]]
+    peaks = [r["gpu"]["peak_memory_bytes"] for r in rows if r.get("gpu")]
+    lam = reg.get("lambda_weights")
+    backend = reg.get("spectral_backend")
+    return TrainView(
+        condition=reg["condition"], seed=reg["seed"], config_sha256=reg["config_sha256"],
+        feature_manifest_sha256=reg["feature_manifest_sha256"],
+        data_sha256={"splits.json": reg.get("splits_sha256"), "windows/val.json": reg["val_windows_sha256"],
+                     "action_scale.json": reg["action_scale_sha256"]},
+        train_set_sha256=reg["train_set"]["sha256"], sigma_z=reg["sigma_z"]["value"],
+        lambdas=None if lam is None else {k: lam[k] for k in ("time_weight", "space_weight")},
+        initial_model_sha256=reg["model"]["initial_model_sha256"], updates=reg["schedule"]["updates"],
+        completed=report["completed_steps"], log_ranges=tuple((r["first_step"], r["last_step"]) for r in rows),
+        best_checkpoint_sha256=selection["best"]["checkpoint_sha256"],
+        step_seconds=tuple(float(st["seconds"]) for st in steps),
+        peak_memory_bytes=max(peaks) if peaks else None,
+        gpu_hours=report["total_seconds"]/3600 if peaks else None, resumes=report["resumes"],
+        spectral_backend=None if backend is None else backend["eig_backend"],
+        curves={"validation": [(float(v["step"]), float(v["mean"])) for v in report["validations"]],
+                "train_jepa": [(float(r["last_step"]), math.fsum(st["losses"]["jepa"] for st in r["steps"])/len(r["steps"]))
+                               for r in rows if r["steps"]]})
 
 
 def read_eval_view(path: Path) -> EvalView:
-    raise NotImplementedError("13 §8.3: the checkpoint and data fields of eval job.json/source.json wait for S09 "
-                              "(evaluate.load_selected)")
+    """一个评测任务的 job.json（10 §8.9，S09b 的 `eval_job` 写）：条件、种子、读的检查点 SHA、数据文件 SHA、特征总清单 SHA；
+    vjepa2_ac_zeroshot 另有构造种子和初始权重哈希。source.json 的 SHA 必须等于 job.json 里记的。"""
+    from po_jepa.droid import eval_job as ej
+    path = Path(path)
+    job = _view_json(path/"job.json")
+    if job.get("kind") != ej.JOB_KIND:
+        raise ValueError(f"{path}/job.json was not written by a DROID evaluation task")
+    if job.get("source_sha256") != hashlib.sha256(cache._json_bytes(_view_json(path/"source.json"))).hexdigest():
+        raise ValueError(f"{path}: source.json differs from the one job.json recorded")
+    checkpoint = job.get("checkpoint")
+    return EvalView(condition=job["condition"], seed=job["seed"], feature_manifest_sha256=job["feature_manifest_sha256"],
+                    data_sha256=dict(job["data_sha256"]),
+                    checkpoint_sha256=None if checkpoint is None else checkpoint["sha256"],
+                    initial_model_sha256=job.get("initial_model_sha256"), construction_seed=job.get("construction_seed"))
 
 
 def read_env(path: Path) -> dict:
-    raise NotImplementedError("13 §8.1: the check/env.json format waits for S09 (09 §7)")
+    """`check/env.json`（09 §7，S09b 的 `droid.check` 写，只在全部通过时写）。"""
+    from po_jepa.droid import check as env_check
+    doc = _view_json(path)
+    if doc.get("schema") != env_check.SCHEMA or doc.get("status") != "passed":
+        raise ValueError(f"{path} is not a passed check/env record")
+    return doc
 
 
 @dataclass(frozen=True)

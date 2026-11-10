@@ -3,7 +3,7 @@
 S11a 做冻结测试窗口上的各轴（10 §8.2 的表、§8.3 动作干预、§8.6 AC 的处理、§8.7 成败分开、§8.9 的 rows/续跑/report）
 和 `commanded` 配置的跳过（§8.1 最后一条）。S11b 加原始帧率（§8.4，`evaluate_frame_rate`）、原始分辨率（§8.5，
 `evaluate_resolution`），由 `evaluate_job` 的 `extra_reader` 打开；截断间隙（§8.8）是单独的 CPU 任务，在
-`droid/spectral_gap.py`；读检查点（§8.1 前三条）的格式由 S09 定，这里只有接口 `load_selected`。
+`droid/spectral_gap.py`；读检查点（§8.1 前三条）是 `load_selected`（S09b），整个评测任务的命令行在 `droid/eval_job.py`。
 
 记号（10 §8.2）：窗口 w =（回合，时长 d，起点行 s），z 是第 s 行特征，z*_T 是第 s+T 行，u 是第 s … s+T−1 个周期的
 动作（`batches.make_eval_batch` 组装，和训练批相同）。每个窗口只算 T = d 的量。d(a, b) 是 JEPA 距离
@@ -797,14 +797,98 @@ def evaluate_resolution(output: Path | str, *, model, split: str, doc: Mapping, 
                        for d in sorted({r["duration"] for r in rows})})
 
 
-# ---------------------------------------------------------------- 读检查点（10 §8.1，等 S09）
+# ---------------------------------------------------------------- 读检查点（10 §8.1，S09b）
+
+DATA_FIELDS = ("evidence_role", "split", "paper_sha256", "upstream_commit", "encoder_checkpoint_sha256",
+               "preprocess_sha256", "feature_manifest_sha256", "protocol_sha256")     # 10 §4.2 第 6 步（不含源码 SHA）
+AC_CHECKPOINT_SCHEMA = "v7_vjepa2_ac_checkpoint_v1"
+
+
+def _read(path: Path) -> dict:
+    return ix._loads(Path(path).read_bytes(), str(path))
+
+
+def _snapshot(condition: str, payload: Mapping, model, loss_config: LossConfig) -> dict:
+    """10 §4.2 第 4 步的配置快照核对（DROID 的标签和规格）：PO-JEPA 类、Koopman、Transformer 类照 `addon.v7load`；AC 要求
+    schema、条件和规格快照等于现建模型的（DROID 的规格是 7 维官方规模 / 缩小版，不是 v7 的 `spec_for`）。"""
+    from po_jepa import ac_baseline
+    from po_jepa.runtime.addon import v7load
+    if condition in AC_CONDITIONS:
+        spec = ac_baseline.spec_snapshot(model.spec)
+        if (payload.get("schema") != AC_CHECKPOINT_SCHEMA or payload.get("condition") != condition
+                or payload.get("spec") != spec):
+            raise ValueError(f"{condition} checkpoint schema/condition/spec differs from the current build")
+        return dict(schema=AC_CHECKPOINT_SCHEMA, condition=condition, spec=payload["spec"], info=payload.get("info"))
+    try:
+        return v7load._payload_family(condition, payload, model, loss_config)
+    except AttributeError as e:                       # 传进来的模型不是这个条件的类（没有它的规格属性）
+        raise ValueError(f"the model given is not a {condition} model: {e}") from e
+
 
 def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: LossConfig, config: DroidConfig,
                   provenance: dict) -> dict:
-    """10 §8.1 的放宽读法：读 `selection.json` 选出的检查点，核文件 SHA、步数、配置快照、`model_state` 和来源里的数据
-    字段（`feature_manifest_sha256` 等），`source_files_sha256` 只记录；返回写进 `job.json` 的检查点记录（路径、SHA、步数）
-    和 `source.json` 的内容。检查点和 `selection.json` 的格式由 S09 定，所以这里只留接口。"""
-    raise NotImplementedError("10 §8.1 checkpoint loading waits for the S09 checkpoint and selection.json format")
+    """10 §8.1 的放宽读法（同 §4.2）：读训练任务 `train/<条件>/seed<种子>/`（09 §4.1）`selection.json` 选出的检查点进
+    `model`，`model.eval()`，不读优化器、不恢复随机状态。核：COMPLETE.json 绑定 report.json、没有 FAILED.json；报告的
+    条件、配置 SHA、完成步数 = U；`selection.json` 的最优 = 报告的最优 = 按 `validations/` 重算的选点（均值严格更小才换，
+    平局留早的）；检查点路径不越出 `checkpoints/`、在 `index.json` 里且是这一步的验证点、文件 SHA 对；`completed_steps`
+    等于选中步数；配置快照（`_snapshot`）；`model_state`（`training._check_model_state`）；来源里的数据字段
+    （`DATA_FIELDS`）等于本次评测按当前特征算出的 `provenance`。`source_files_sha256` 只记录（评测代码可能在训练之后才修好）。
+
+    返回 {"checkpoint": job.json 记的检查点（相对训练目录的路径、SHA、步数、验证均值），"source": source.json 的内容}。"""
+    import io
+    from po_jepa.droid import checkpoints as ck
+    from po_jepa.droid import train as tr
+    from po_jepa.runtime import training
+    root = Path(train_dir).resolve()
+    if (root/"FAILED.json").exists():
+        raise ValueError(f"{root} retains FAILED.json")
+    report_path = root/"report.json"
+    if not (root/"COMPLETE.json").exists() or _read(root/"COMPLETE.json").get("report_sha256") != cache.file_sha(report_path):
+        raise ValueError(f"{root}: the training task is not complete (COMPLETE.json missing or not bound to report.json)")
+    report = _read(report_path)
+    updates = config.training.updates
+    if (report.get("schema") != tr.REPORT_SCHEMA or report.get("condition") != condition
+            or report.get("config_sha256") != config.config_sha256 or report.get("completed_steps") != updates):
+        raise ValueError(f"{report_path} is not a finished {condition} training under this config")
+    selection = _read(root/"selection.json")
+    records = tr.validation_records(root, updates)
+    best = tr.best_of(records)
+    if (selection.get("schema") != tr.SELECTION_SCHEMA or selection.get("best") != report.get("best")
+            or selection["best"]["step"] != best["step"] or selection["best"]["mean"] != best["mean"]
+            or selection.get("validations") != [dict(step=r["step"], mean=r["mean"]) for r in records]):
+        raise ValueError(f"{root}: selection.json, report.json and the validation records disagree on the best step")
+    chosen = selection["best"]
+    path = (root/chosen["checkpoint"]).resolve()
+    if not path.is_relative_to(root/"checkpoints"):
+        raise ValueError("the selected checkpoint escaped its checkpoints directory")
+    entries = ck.read_index(root/"checkpoints")
+    entry = next((e for e in entries if e["path"] == path.name), None)
+    if (entry is None or entry["kind"] != "validation" or entry["step"] != chosen["step"]
+            or entry["sha256"] != chosen["checkpoint_sha256"]):
+        raise ValueError(f"{path.name} is not the indexed validation checkpoint of step {chosen['step']}")
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != chosen["checkpoint_sha256"]:
+        raise ValueError("checkpoint SHA mismatch before loading")
+    payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
+    if type(payload) is not dict or payload.get("completed_steps") != chosen["step"]:
+        raise ValueError("checkpoint completed_steps differs from the selected step")
+    snapshot = _snapshot(condition, payload, model, loss_config)
+    training._check_model_state(payload["model_state"], model)
+    found = {k: payload["provenance"].get(k) for k in DATA_FIELDS}
+    current = {k: provenance.get(k) for k in DATA_FIELDS}
+    if found != current:
+        raise ValueError("checkpoint data provenance differs from the current features: "
+                         f"{ {k: (found[k], current[k]) for k in DATA_FIELDS if found[k] != current[k]} }")
+    model.load_state_dict(payload["model_state"], strict=True)
+    model.eval()
+    checkpoint = dict(path=path.relative_to(root).as_posix(), sha256=digest, step=chosen["step"], mean=chosen["mean"])
+    source = dict(train_dir=str(root), report_sha256=cache.file_sha(report_path),
+                  selection_sha256=cache.file_sha(root/"selection.json"),
+                  registration_sha256=report.get("registration_sha256"), checkpoint=checkpoint, snapshot=snapshot,
+                  data_fields=found, source_files_sha256=payload["provenance"].get("source_files_sha256"),
+                  note="10 §8.1: data fields are checked; source_files_sha256 is recorded only")
+    return dict(checkpoint=checkpoint, source=source)
 
 
 # ---------------------------------------------------------------- 一个评测任务
@@ -813,26 +897,42 @@ def _sha(value) -> str:
     return hashlib.sha256(cache._json_bytes(value)).hexdigest()
 
 
+def prepared_arrays_sha256(prepared: Mapping, episodes: Sequence[str]) -> str:
+    """窗口里各回合准备数组本身（`PreparedEpisode.arrays` 里每个数组的 `prepare.array_sha256`）的 SHA（S09b 补 S11-fix1 的
+    遗留：只核准备 JSON 的 SHA 时，内存里换了数组的 `PreparedEpisode` 也会被当成同一份输入）。"""
+    from po_jepa.droid.prepare import array_sha256
+    return _sha({u: {name: array_sha256(a) for name, a in sorted(prepared[u].arrays.items())} for u in episodes})
+
+
 def job_inputs(*, splits: Mapping[str, Mapping], prepared: Mapping, outcomes: Mapping[str, str], provenance: Mapping,
-               config: DroidConfig, extra_reader=None) -> dict:
-    """写进 `job.json` 的输入身份（S11a-fix1）：两个测试集冻结窗口内容、窗口里各回合准备文件的 SHA、回合 outcome、
-    批的来源字典（特征清单、编码器、源码 SHA）和本次要不要跑原始帧率/分辨率两轴。续跑和复用完成结果都要求它不变。"""
+               config: DroidConfig, extra_reader=None, planning: bool = False) -> dict:
+    """写进 `job.json` 的输入身份（S11a-fix1，S09b 补两项）：两个测试集冻结窗口内容、窗口里各回合准备文件的 SHA 和准备数组
+    本身的 SHA、回合 outcome、批的来源字典（特征清单、编码器、源码 SHA）、测试附加特征清单的 SHA（`extra_reader.manifest_sha256`，
+    没有附加特征时为 None）和本次要不要跑原始帧率/分辨率/规划。续跑和复用完成结果都要求它不变。"""
     episodes = sorted({w["uuid"] for split in TEST_SPLITS for w in splits[split]["windows"]})
     missing = [u for u in episodes if u not in prepared]
     if missing:
         raise ValueError(f"no prepared episode for {missing[:3]}")
+    extra_sha = None
+    if extra_reader is not None:
+        extra_sha = getattr(extra_reader, "manifest_sha256", None)
+        if type(extra_sha) is not str or len(extra_sha) != 64:
+            raise ValueError("the test-extra reader carries no manifest_sha256")
     return dict(windows_sha256={split: _sha(splits[split]) for split in TEST_SPLITS},
                 prepared_sha256=_sha({u: prepared[u].json_sha256 for u in episodes}),
+                prepared_arrays_sha256=prepared_arrays_sha256(prepared, episodes),
                 outcomes_sha256=_sha({u: outcomes.get(u) for u in episodes}),
-                provenance_sha256=_sha(dict(provenance)), action_source=config.action.source,
-                axes=dict(frame_rate=extra_reader is not None, resolution=extra_reader is not None))
+                provenance_sha256=_sha(dict(provenance)), extra_manifest_sha256=extra_sha,
+                action_source=config.action.source,
+                axes=dict(frame_rate=extra_reader is not None, resolution=extra_reader is not None, planning=planning))
 
 
 def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None, job: Mapping, splits: Mapping[str, Mapping],
                  prepared: Mapping, outcomes: Mapping[str, str], reader, control_spec, provenance: dict,
                  loss_config: LossConfig, config: DroidConfig, device, bind: Bind | None = None,
-                 extra_reader=None, ac_steps: AcSteps | None = None) -> dict:
-    """`eval/<条件>/seed<种子>/`（10 §8.9）：`job.json`（`job` 由调用者给，读检查点的记录由 `load_selected` 给，等 S09）、
+                 extra_reader=None, ac_steps: AcSteps | None = None,
+                 planning: Callable[[str], dict] | None = None) -> dict:
+    """`eval/<条件>/seed<种子>/`（10 §8.9）：`job.json`（`job` 由调用者给，读检查点的记录由 `load_selected` 给）、
     两个测试集的 rows、`frame_rate.json` 和 `resolution.json`（给了 `extra_reader` 时，S11b）、`report.json`、
     `COMPLETE.json`。`job.json` 记调用者的 `job` 加条件、种子、配置和 `job_inputs` 的输入身份；已完成时这份身份与已存的
     `job.json`、`report.json` 的 `job` 完全相同才直接返回已有的报告，否则报错（S11a-fix1）；三角不等式有违反时写
@@ -840,6 +940,7 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
     模型在 eval 模式、no_grad 下跑，前后核对参数、梯度和 buffer 没变（10 §1）。
 
     `extra_reader` 是测试附加特征的 `features.ExtraFeatureReader`；不给时报告的 `axes` 记原始帧率和原始分辨率没做。
+    `planning(split)` 给了时在同一次 eval 模式里做这个测试集的离线规划（11，`<split>/planning/`），返回规划报告（S09b）。
     AC 的原始帧率要 `ac_steps(model, raw, actions, start_state, grid)`（S08b 的小步前向：`actions` 是物理单位的小步动作
     CPU float64 [B, n, 7]，`start_state` 是这次调用起点的状态 CPU float64 [B, 7]，返回 n 个小步之后的预测）。"""
     out = Path(output)
@@ -847,7 +948,7 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
         raise ValueError(f"an evaluation job covers both test splits {TEST_SPLITS}")
     head = dict(job, condition=condition, seed=seed, config_name=config.name, config_sha256=config.config_sha256,
                 inputs=job_inputs(splits=splits, prepared=prepared, outcomes=outcomes, provenance=provenance,
-                                  config=config, extra_reader=extra_reader))
+                                  config=config, extra_reader=extra_reader, planning=planning is not None))
     want = ix._loads(cache._json_bytes(head), "job")
     job_path = out/"job.json"
     out.mkdir(parents=True, exist_ok=True)
@@ -895,6 +996,8 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
                 results[split]["frame_rate"] = evaluate_frame_rate(out/split, ac_steps=ac_steps, **common)
                 results[split]["resolution"] = evaluate_resolution(out/split, reader=reader, provenance=provenance,
                                                                    bind=bind, **common)
+            if planning is not None:                           # 11：离线规划也在评测任务里做（10 §8.1，S09b 接上）
+                results[split]["planning"] = planning(split)
     finally:
         for module, flag in modes.items():
             module.training = flag
@@ -905,7 +1008,8 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
     ac = condition in AC_CONDITIONS
     report = dict(schema=SCHEMA_REPORT, job=head, status="failed" if problems else "passed", problems=problems,
                   splits=results, definitions=definitions(config),
-                  axes=dict(windows=True, frame_rate=extra_reader is not None, resolution=extra_reader is not None),
+                  axes=dict(windows=True, frame_rate=extra_reader is not None, resolution=extra_reader is not None,
+                            planning=planning is not None),
                   frame_rate_definitions=frame_rate_definitions(config),
                   resolution_definitions=dict(kinds=resolution_kinds(config), durations=list(config.evaluation.durations_id),
                                               note="same rows s, s + d of the r<R> files on regular_grid(R/16, R/16); "

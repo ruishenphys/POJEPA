@@ -139,7 +139,7 @@ T5 的 ε̂ 和有效斜率：ε̂ 是每个 (场景, 种子, 条件) 上 D4 窗
 
 代码 `tools/droid_summary.py`，测试 `tests/test_droid_summary.py`，说明和验收单 `docs/segments/S13.md`。统计、精度匹配、表格格式和画图复用 `tools/summarize_addon.py`。实现时定的几条（不改上面的口径）：
 
-- 训练任务的产物（09 §4–§5）、`check/env.json` 和评测任务 job.json/source.json 里的来源字段格式由 S09 定，汇总只经过三个读取函数（`read_train`、`read_eval_view`、`read_env`，现在抛 NotImplementedError），§8.3 的核对和 D11 对着 `TrainView`、`EvalView` 写好；S09 补上读取函数后在 `tools/droid.py` 的 `MAINS` 里接上 `summary`。
+- 训练任务的产物（09 §4–§5）、`check/env.json` 和评测任务 job.json/source.json 里的来源字段格式由 S09 定，汇总只经过三个读取函数（`read_train`、`read_eval_view`、`read_env`，S09b 写好：`read_train` 读 registration/report/selection/train-log、`read_eval_view` 读 `eval_job` 写的 job.json 并核 source.json 的 SHA、`read_env` 只认通过的 env.json），§8.3 的核对和 D11 对着 `TrainView`、`EvalView` 写好；`tools/droid.py summary` 已接上（S09b）。
 - 场景 = `index/episodes.jsonl` 的 (lab, scene_id)。自助法在抽到的群里按回合加权平均：每个场景回合数相同时就是场景平均，群是单条回合时和 §3 的按轨迹自助法逐位相同。
 - 未来误差在 D1 里把 T = 1、2、4、8 合在一起（和 13 §5 T1 相同），另出按时长分开的表；AC 的 `tcd_ln` 在 T = 1、3 上是插值，在按时长的表里单列（10 §8.6）。D2 时长留出既给 3、12、16 合起来的值（进 D7），也给每个时长。
 - ε̂（D8）取一个 (测试集, 种子, 条件) 上同分布时长全部窗口的 `tcd_normalized` 的中位数：DROID 每个窗口只有一个时长，没有仿真那种“同一批窗口 × 4 个时长”。
