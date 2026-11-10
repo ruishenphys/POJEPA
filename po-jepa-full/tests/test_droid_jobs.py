@@ -256,7 +256,6 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
     calls.clear()
     for job in ("calibrate/sigma-z", "check/env", "summary", "eval/identity"):
         assert droid.main(_entry(tmp_path, job)) == 2
-    assert droid.main(_entry(tmp_path, "train/koopman/seed1703", "--time-limit-minutes", "20")) == 2
     assert calls == [] and not (tmp_path/"runs").exists()
     for bad in (_entry(tmp_path, "download/train-001"),                            # 试跑只有 train-000
                 _entry(tmp_path, "encode/val", "--delete-raw"),                     # 只有训练片带 --delete-raw

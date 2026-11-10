@@ -269,3 +269,14 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 ## 9. S08b 实现补注（2026-11-10）
 
 代码和验收单见 `docs/segments/S08b.md`。实现时定的（不改口径）：官方规模按结构字段判断（v7 时与 `spec == OFFICIAL` 相同）；物理动作在 CPU float64 上由 `tick_actions` × scale + offset 算出（`ac_baseline.physical_tick_actions`），状态积分用它；`droid.ac.bind` 的起点 τ 离整数 ≤ 1e-9 个周期取整、越出 [0, 窗口时长] 报错；`ac_steps`（`droid.ac.ac_steps` → `ACPredictor.small_steps`）在 learned_constant 模式下忽略状态；`cpu_threads` 的份数是 `GraphSpectrum.eig_threads`（S09 工厂按 `resources.train.cpus` 设）；`check/env` 的一致标准用 `spectral_backends.agreement`。§8 “true_state 训练步和官方 train.py 参照逐位相同”实际是两项损失和除 `predictor_embed.bias` 外的全部参数逐位相同，这一项因官方先摊平各帧再过 Linear、求和顺序不同差约 1.5e-7（相对），改成摊平会动 v7 的数，不改。
+
+## 10. S09a 实现补注（2026-11-10）
+
+代码和验收单见 `docs/segments/S09a.md`。S09 拆成两段：S09a 是工厂（§2）和训练循环（§4、§5）；σ_z 和 λ 标定（§3）、`check/env`（§7）、评测读检查点和 S13 的读取函数留给 S09b。实现时定的（不改口径）：
+
+- λ 由训练任务从 `calibration/lambda-<条件>.json` 读（time_weight、space_weight 为有限正数；文件里记了 `config_sha256`、`sigma_z_sha256` 就必须对上），再传给 `conditions.build`；工厂不读文件。
+- 新加 `starts.jsonl`：每次启动一行（启动时的完成步数和从哪个检查点接上），`report.json` 的续跑次数 = 行数 − 1。
+- `selection.json` 每次启动按 `validations/` 和 `index.json` 重建，中断在验证文件写完、选点没写之间也能接上。
+- 验证窗口在 `commanded` 配置下跳过 `passed_commanded` 为假的回合（同 10 §8.1，用 `evaluate._selected`），窗口数和跳过的回合记进登记。
+- 求谱后端只在 `type(model.spectrum) is GraphSpectrum` 时设（`FourierSpectrum` 是它的子类，fixed_fourier 不求谱）。
+- §8 的续跑测试按原文跑 30 步；14 §3 的“20 步、两次验证、完整目录”并进同一次运行核（第 0、10、20、30 步验证）。测试每步 2 个窗口 / 2 个 AC 片段，CPU 上 PO 类一步约 1.5 秒。

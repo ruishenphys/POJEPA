@@ -1,7 +1,7 @@
 """DROID 所有阶段的统一入口（docs/design/12-droid-jobs.md §3；S14）。
 
   python tools/droid.py <阶段> --config configs/droid/<name>.yaml --data-root <数据根> --run-root <运行根> \\
-      --job <任务编号> [--delete-raw] [--time-limit-minutes <上限>]
+      --job <任务编号> [--delete-raw] [--time-limit-minutes <上限>] [--retry]
 
 - 任务编号必须在本配置的任务图里（`tools/droid_jobs.py`），阶段必须是编号的第一段。
 - 开始时完成标志已存在：什么都不做，退出 0；`eval/spectral-gap` 例外，照常调用阶段，由阶段核本次输入身份与已完成的
@@ -10,9 +10,10 @@
   原始文件删完才写；特征已编完但没删完时重跑会进入编码阶段，跳过编码、把剩下的删掉（S14-fix1）。
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
 - 已接上的阶段：index（02，S02/S03）、download（03，S04）、prepare（04，S05）、encode（05，S06a/S06b），以及评测阶段里
-  的 `eval/spectral-gap`（10 §8.8，S11b，`droid.spectral_gap.main`）。calibrate、check、train（S09）、其余 eval（S11、
-  S12，读检查点等 S09）还没写，summary（S13，`tools/droid_summary.py`）写好了但训练产物和评测来源的读取函数等 S09：
-  这几个阶段退出 2，不写任何文件。
+  的 `eval/spectral-gap`（10 §8.8，S11b，`droid.spectral_gap.main`）、train（09 §4，S09a，`droid.train.main`；
+  `--retry` 删掉 FAILED.json 从最新检查点接着跑）。calibrate、check（S09b）、其余 eval（S11、S12，读检查点等 S09b）
+  还没写，summary（S13，`tools/droid_summary.py`）写好了但训练产物和评测来源的读取函数等 S09b：这几个阶段退出 2，
+  不写任何文件。
 - 编码任务开始时由 `encode.load_frozen` 核上游提交（204698b）和编码器权重 SHA（= v7 `cache.CHECKPOINT_SHA`），
   不对就报错退出 1（12 §1）。`--fake-encoder` 只给 CPU 流程测试用（特征标成 synthetic_development_only）。
 """
@@ -29,12 +30,13 @@ from po_jepa.droid import encode as en  # noqa: E402
 from po_jepa.droid import index as ix  # noqa: E402
 from po_jepa.droid import prepare as pp  # noqa: E402
 from po_jepa.droid import spectral_gap as sg  # noqa: E402
+from po_jepa.droid import train as tr  # noqa: E402
 from po_jepa.droid.config import load_config  # noqa: E402
 
 NOT_IMPLEMENTED = 2
-PENDING = {"calibrate": "S09", "check": "S09", "train": "S09", "eval": "S11/S12",
-           "summary": "S13 is in tools/droid_summary.py; its train/eval-source readers wait for S09"}
-assert set(PENDING) | {"index", "download", "prepare", "encode"} == set(droid_jobs.STAGES)
+PENDING = {"calibrate": "S09b", "check": "S09b", "eval": "S11/S12",
+           "summary": "S13 is in tools/droid_summary.py; its train/eval-source readers wait for S09b"}
+assert set(PENDING) | {"index", "download", "prepare", "encode", "train"} == set(droid_jobs.STAGES)
 
 
 def stage_argv(stage: str, rest: str, a: argparse.Namespace) -> list[str]:
@@ -51,11 +53,19 @@ def stage_argv(stage: str, rest: str, a: argparse.Namespace) -> list[str]:
         if a.fake_encoder:
             argv.append("--fake-encoder")
         return argv
+    if stage == "train":
+        argv = base + ["--run-root", str(a.run_root), "--job", a.job, "--device", a.device]
+        if a.time_limit_minutes is not None:
+            argv += ["--time-limit-minutes", str(a.time_limit_minutes)]
+        if a.retry:
+            argv.append("--retry")
+        return argv
     raise AssertionError(stage)
 
 
 MAINS = {"index": lambda argv: ix.main(argv), "download": lambda argv: dl.main(argv),
-         "prepare": lambda argv: pp.main(argv), "encode": lambda argv: en.main(argv)}
+         "prepare": lambda argv: pp.main(argv), "encode": lambda argv: en.main(argv),
+         "train": lambda argv: tr.main(argv)}
 # 阶段整体还没接上、但其中某个任务已经能跑的（S11b：截断间隙只读特征和 sigma_z.json）
 JOB_MAINS = {f"eval/{droid_jobs.SPECTRAL_GAP}": lambda argv: sg.main(argv)}
 
@@ -69,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--job", required=True, help="任务编号，如 encode/train-007（12 §2）")
     p.add_argument("--delete-raw", action="store_true", help="训练片的编码任务（03 §4）")
     p.add_argument("--time-limit-minutes", type=int, help="训练和评测任务的时长上限（09 §4.5）")
-    p.add_argument("--device", default="cuda", help="编码用的设备（默认 cuda；排队系统用 CUDA_VISIBLE_DEVICES 分卡）")
+    p.add_argument("--retry", action="store_true", help="训练任务：删掉 FAILED.json，从最新检查点接着跑（09 §4.3）")
+    p.add_argument("--device", default="cuda", help="编码和训练用的设备（默认 cuda；排队系统用 CUDA_VISIBLE_DEVICES 分卡）")
     p.add_argument("--fake-encoder", action="store_true", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     stage, _, rest = a.job.partition("/")
@@ -86,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         p.error(f"--delete-raw is only for the encoding jobs of training shards, not {a.job}")
     if a.time_limit_minutes is not None and stage not in ("train", "eval"):
         p.error("--time-limit-minutes is only for train and eval jobs")
+    if a.retry and stage != "train":
+        p.error("--retry is only for train jobs")
     done = Path(job["complete"])
     if done.exists() and a.job not in JOB_MAINS:
         print(f"{a.job}: already complete ({done})")
