@@ -8,6 +8,7 @@
   python tools/make_v8_jobs.py --stage long     > jobs-v8-long.txt       # 长时程滚动（16–64 步；full 之后，S25c）
   python tools/make_v8_jobs.py --stage timing   > jobs-v8-timing.txt     # 时间采样按帧评测（帧率、抖动、曝光、切换；full 之后，S25d）
   python tools/make_v8_jobs.py --stage space    > jobs-v8-space.txt      # 空间采样评测（分辨率、缩小、平移、漂移；full 之后，S25e）
+  python tools/make_v8_jobs.py --stage readout  > jobs-v8-readout.txt    # 物理状态读出、VPT、反事实、模态频率（full、long 之后，S25f）
 
 和 v7 的区别（S21b）：
 - 场景是 po_jepa.protocols.SCENES：v7 的 5 个加 gray_scott、push。
@@ -29,6 +30,10 @@ S25d：--stage timing 排时间采样测试集（<场景>~<po_jepa.protocols.TIM
 
 S25e：--stage space 排空间采样测试集（<场景>~<po_jepa.protocols.SPACE_TESTS 之一> 的测试段，每类 200 条，只编码测试段，
 按原生分辨率编码）的编码、汇总和 tools/space_eval.py 评测（3 个种子 × 各条件；同一组窗口在基础测试集上配对；同样只评测）。
+S25f：--stage readout 排 tools/state_readout.py 的探针拟合（每个场景一个，主实验缓存验证段）和真值（CPU）、长时程滚动的
+读出和 VPT、反事实预测（3 个种子 × 各条件），以及 tools/modal_spectrum.py 的模态频率对照（只排线性场景
+advection_diffusion、spring_chain、wave 里在 --scenes 中的，只排 PO-JEPA 条件）。要用 --stage full 的主实验缓存和模型、
+--stage long 的长时程缓存，本文件不编码、不训练。
 """
 import argparse
 from pathlib import Path
@@ -45,6 +50,7 @@ SEEDS = (1703, 1704, 1705)
 # spring_chain 0.1；double_well 3.9 作对照），只有 wave 降到 32（docs/segments/S25a.md §4）
 ORACLE_SAMPLES = {"gray_scott": 16, "push": 32, "wave": 32}
 LONG_HORIZON = 128   # S25c：长时程测试集的 horizon（variants.HORIZONS 的最大值）
+MODAL_SCENES = ("advection_diffusion", "spring_chain", "wave")   # S25f：有解析线性模态的场景（runtime/modal_spectrum.LINEAR_SCENES）
 
 
 def split_scene(scene):
@@ -54,7 +60,7 @@ def split_scene(scene):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space"), required=True)
+    p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space", "readout"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=",".join(CONDITIONS), help="分布外评测和规划评哪些条件")
@@ -118,6 +124,39 @@ def main():
                           f"--horizon {LONG_HORIZON} --output {root}/long/{name(s)}/seed{seed}/{c}.json --device cuda:0{extra}")
         print("# ===== L4 汇总（CPU）=====")
         print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        return
+
+    if a.stage == "readout":
+        long = f"horizon={LONG_HORIZON}"
+        out = f"{root}/readout"
+        print("# 前提：--stage full 的 A–D 段（主实验缓存和模型）和 --stage long 的 L1–L2（长时程缓存）已完成；本文件不编码、不训练。")
+        print("# 指标见 src/po_jepa/runtime/state_readout.py、src/po_jepa/runtime/modal_spectrum.py（模态频率是探索性的）。")
+        print(f"# ===== R1 拟合探针（GPU，{len(scenes)} 条；主实验缓存的验证段，full 读出约 10 GB 内存）=====")
+        for s in scenes:
+            print(f"python tools/state_readout.py fit {ds(s)} --features {feats(s)} --output {out}/probe/{name(s)} --device cuda:0")
+        print(f"# ===== R2 真值（CPU，{len(scenes)} 条；反事实重新仿真，gray_scott 最慢）=====")
+        for s in scenes:
+            print(f"python tools/state_readout.py truth {ds(s)} --features {feats(s)} --long-features {feats(s, long)} "
+                  f"--horizon {LONG_HORIZON} --output {out}/truth/{name(s)}.json")
+        print(f"# ===== R3 长时程读出、反事实（GPU，{2*len(scenes)*len(seeds)*len(conditions)} 条，互不依赖）=====")
+        for s in scenes:
+            for seed in seeds:
+                for c in conditions:
+                    extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
+                    common = (f"--job {root}/{name(s)}/seed{seed}/{c} --probe {out}/probe/{name(s)} "
+                              f"--truth {out}/truth/{name(s)}.json")
+                    print(f"python tools/state_readout.py rollout {common} --features {feats(s, long)} --horizon {LONG_HORIZON} "
+                          f"--output {out}/rollout/{name(s)}/seed{seed}/{c}.json --device cuda:0{extra}")
+                    print(f"python tools/state_readout.py counterfactual {common} --features {feats(s)} "
+                          f"--output {out}/counterfactual/{name(s)}/seed{seed}/{c}.json --device cuda:0{extra}")
+        modal = [s for s in scenes if split_scene(s)[0] in MODAL_SCENES]
+        po = [c for c in conditions if c.startswith("po_jepa")]
+        print(f"# ===== R4 模态频率对照（GPU，{len(modal)*len(seeds)*len(po)} 条；只有线性场景、PO-JEPA 条件；探索性）=====")
+        for s in modal:
+            for seed in seeds:
+                for c in po:
+                    print(f"python tools/modal_spectrum.py --job {root}/{name(s)}/seed{seed}/{c} --features {feats(s)} "
+                          f"--output {out}/modal/{name(s)}/seed{seed}/{c}.json --device cuda:0")
         return
 
     if a.stage == "timing":
