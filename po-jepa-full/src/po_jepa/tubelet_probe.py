@@ -27,9 +27,13 @@ tubelet 吃真实的第 t−1、t 帧，PO-JEPA、损失和缓存格式都不变
 4. 线性探针：对偶形式的岭回归（核 K = XXᵀ，按训练集均值精确中心化），目标 sin θ、cos θ、θ̇（第 t 帧的瞬时角速度）、
    θ̄̇ = wrap(θ_t − θ_{t−1})/0.25 s（两帧之间的平均角速度）。按轨迹分 5 折（轨迹编号 mod 5）：第 k 折测试，
    第 k+1 折选 λ，其余训练；选好 λ 后在训练 + 选 λ 两折上重新拟合，报测试折的 R²，5 折取平均。
-5. 判据（可改的设计选择，只改这里的常数）：pair 在某个读出上 θ̇ 的 R² ≥ ADOPT_R2 = 0.9，且比同一读出的 dup
-   高 ≥ ADOPT_GAIN = 0.1，就采用两帧输入；同时要求该读出上 dup 的 sin θ、cos θ R² 都 ≥ POSITION_R2 = 0.9，
-   否则说明探针本身没读出位置，结论无效。
+5. 判据（可改的设计选择，只改这里的常数）：读出按嵌套方式选（S22-fix1）：每个外层折 k 在它选 λ 的那一折（第 k+1 折）
+   上挑 pair 的 θ̇ R² 最高的读出，测试折只用来打分，不参与挑选。各折所选读出上，pair 的 θ̇ 测试 R² 5 折平均
+   ≥ ADOPT_R2 = 0.9，且比同一读出的 dup 高 ≥ ADOPT_GAIN = 0.1，就采用两帧输入；同时要求所选读出上 dup 的 sin θ、
+   cos θ 测试 R²（5 折平均）都 ≥ POSITION_R2 = 0.9，否则说明探针本身没读出位置，结论无效。各读出的 5 折平均另列
+   诊断表，不进判据。
+6. 生成定义：definition() 是决定实验含义的常数（物理、动作、初值、随机流、画面、tubelet 帧号），编码清单记下它，
+   fit 要求每条轨迹的定义与当前代码相同。
 """
 import math
 
@@ -65,6 +69,18 @@ LAMBDA_EXPONENTS = tuple(np.arange(-7., 2.01, .5))
 ADOPT_R2 = .9
 ADOPT_GAIN = .1
 POSITION_R2 = .9
+
+
+def definition() -> dict:
+    """决定缓存含义的探针定义（JSON 可序列化）。改任何一项都必须重新编码；fit 与清单逐项比较。"""
+    return dict(probe_stream=PROBE_STREAM, rng_entropy=[1703, PROBE_STREAM, "trajectory_id", "stream"],
+                streams=dict(initial_state=0, controls=1, preprocess=2),
+                g_over_l=G_OVER_L, gamma=GAMMA, torque_per_action=TORQUE_PER_ACTION, substeps=SUBSTEPS, period=PERIOD,
+                intervals=INTERVALS, frames=FRAMES, frame_ticks=list(range(-1, INTERVALS)),
+                theta0=THETA0, omega0=OMEGA0, segments=list(SEGMENTS), zero_fraction=ZERO_FRACTION,
+                image_size=SIZE, rod_px=ROD_PX, bob_sigma=BOB_SIGMA, bob_color=BOB_COLOR.tolist(),
+                rod_color=ROD_COLOR.tolist(), rod_half_width=ROD_HALF_WIDTH,
+                clips={mode: [list(c) for c in clip_indices(mode)] for mode in ("dup", "pair")})
 
 
 def rng(trajectory_id: int, stream: int) -> np.random.Generator:
@@ -333,9 +349,10 @@ def _ridge_predict(k, fit, rows, model, lam):
 
 def ridge_cv(k: np.ndarray, y: np.ndarray, trajectory_of_row: np.ndarray, folds=FOLDS) -> dict:
     """对偶岭回归，按轨迹分折（轨迹编号 mod folds）。第 f 折测试、第 f+1 折选 λ、其余训练；每个目标各选 λ，
-    再在训练 + 选 λ 两折上重拟合，报测试折 R²。λ = trace(K̃)/n · 10^e，e ∈ LAMBDA_EXPONENTS。"""
+    再在训练 + 选 λ 两折上重拟合，报测试折 R²。λ = trace(K̃)/n · 10^e，e ∈ LAMBDA_EXPONENTS。
+    val_r2_per_fold 是每折选 λ 那一折上、所选 λ 的 R²（只用训练折拟合），供 decide() 在不看测试折的情况下挑读出。"""
     fold = np.asarray(trajectory_of_row) % folds
-    per_fold, lambdas, at_edge = [], [], []
+    per_fold, lambdas, at_edge, val_scores = [], [], [], []
     for f in range(folds):
         test = np.flatnonzero(fold == f); val = np.flatnonzero(fold == (f+1) % folds)
         train = np.flatnonzero((fold != f) & (fold != (f+1) % folds))
@@ -344,6 +361,7 @@ def ridge_cv(k: np.ndarray, y: np.ndarray, trajectory_of_row: np.ndarray, folds=
         model = _ridge_fit(k, y, train)
         scores = np.stack([r2(y[val], _ridge_predict(k, train, val, model, model[4]*10.**e)) for e in LAMBDA_EXPONENTS])
         best = scores.argmax(0)
+        val_scores.append(scores.max(0))
         refit = np.concatenate((train, val)); model = _ridge_fit(k, y, refit)
         pred = np.stack([_ridge_predict(k, refit, test, model, model[4]*10.**LAMBDA_EXPONENTS[b])[:, j]
                          for j, b in enumerate(best)], -1)
@@ -352,11 +370,14 @@ def ridge_cv(k: np.ndarray, y: np.ndarray, trajectory_of_row: np.ndarray, folds=
         at_edge.append([bool(b in (0, len(LAMBDA_EXPONENTS)-1)) for b in best])
     per_fold = np.array(per_fold)
     return dict(r2_mean=per_fold.mean(0).tolist(), r2_min=per_fold.min(0).tolist(), r2_per_fold=per_fold.tolist(),
-                lambda_exponent=lambdas, lambda_at_grid_edge=at_edge)
+                val_r2_per_fold=np.array(val_scores).tolist(), lambda_exponent=lambdas, lambda_at_grid_edge=at_edge)
 
 
 def decide(results: dict) -> dict:
-    """results[mode][readout]["r2_mean"] 按 TARGETS 排列 → 判据（模块说明第 5 条）。"""
+    """results[mode][readout] 是 ridge_cv 的输出（目标按 TARGETS 排列）→ 判据（模块说明第 5 条）。
+
+    嵌套选读出：外层折 f 只看 pair 在第 f 折的 val_r2_per_fold（选 λ 那一折）挑 θ̇ 最高的读出（并列取 READOUTS
+    里靠前的），再取该读出上 pair、dup 第 f 折的测试 R²。测试折不参与挑选，所以判据数值没有选择偏差。"""
     j = {t: i for i, t in enumerate(TARGETS)}
     rows = []
     for ro in READOUTS:
@@ -364,8 +385,22 @@ def decide(results: dict) -> dict:
         rows.append(dict(readout=ro, pair_omega=pair[j["omega"]], dup_omega=dup[j["omega"]],
                          gain=pair[j["omega"]]-dup[j["omega"]],
                          position_readable=bool(min(dup[j["sin_theta"]], dup[j["cos_theta"]]) >= POSITION_R2)))
-    best = max(rows, key=lambda r: r["pair_omega"])
-    adopt = bool(best["position_readable"] and best["pair_omega"] >= ADOPT_R2 and best["gain"] >= ADOPT_GAIN)
-    return dict(rule=dict(adopt_r2=ADOPT_R2, adopt_gain=ADOPT_GAIN, position_r2=POSITION_R2, target="omega"),
-                by_readout=rows, best_readout=best["readout"], position_readable=best["position_readable"],
-                adopt_two_frame=adopt)
+    folds = len(results["pair"][READOUTS[0]]["r2_per_fold"])
+    per_fold = []
+    for f in range(folds):
+        ro = max(READOUTS, key=lambda r: (results["pair"][r]["val_r2_per_fold"][f][j["omega"]], -READOUTS.index(r)))
+        pair = results["pair"][ro]["r2_per_fold"][f]; dup = results["dup"][ro]["r2_per_fold"][f]
+        per_fold.append(dict(fold=f, readout=ro, pair_val_omega=results["pair"][ro]["val_r2_per_fold"][f][j["omega"]],
+                             pair_omega=pair[j["omega"]], dup_omega=dup[j["omega"]],
+                             dup_sin_theta=dup[j["sin_theta"]], dup_cos_theta=dup[j["cos_theta"]]))
+    mean = lambda key: float(np.mean([r[key] for r in per_fold]))
+    pair_omega, dup_omega = mean("pair_omega"), mean("dup_omega")
+    position = bool(min(mean("dup_sin_theta"), mean("dup_cos_theta")) >= POSITION_R2)
+    gain = pair_omega-dup_omega
+    adopt = bool(position and pair_omega >= ADOPT_R2 and gain >= ADOPT_GAIN)
+    return dict(rule=dict(adopt_r2=ADOPT_R2, adopt_gain=ADOPT_GAIN, position_r2=POSITION_R2, target="omega",
+                          readout_selection="nested: per outer fold, highest pair omega R2 on that fold's lambda-selection fold"),
+                selected=dict(per_fold=per_fold, pair_omega=pair_omega, dup_omega=dup_omega, gain=gain,
+                              position_readable=position),
+                selected_readouts=[r["readout"] for r in per_fold], by_readout=rows,
+                position_readable=position, adopt_two_frame=adopt)

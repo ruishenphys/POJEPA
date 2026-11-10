@@ -1,4 +1,7 @@
-"""S22 两帧 tubelet 探针（tubelet_probe.py、tools/tubelet_probe.py）：单摆物理、画面、编码帧号、对偶岭回归、判据、端到端。"""
+"""S22 两帧 tubelet 探针（tubelet_probe.py、tools/tubelet_probe.py）：单摆物理、画面、编码帧号、对偶岭回归、判据、端到端。
+S22-fix1 补：真实预处理分支、全部 67 行、full 核精度到 R² 层面、嵌套选读出、缓存生成身份。"""
+import copy
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -55,6 +58,10 @@ def test_streams_controls_and_states():
     assert np.array_equal(s1[0], tp.initial_state(3))
     g = np.random.Generator(np.random.PCG64(np.random.SeedSequence([1703, 2200, 3, 0])))
     assert np.array_equal(tp.initial_state(3), [g.uniform(-np.pi, np.pi), g.uniform(-3, 3)])
+    # 预处理种子是随机流 2（独立重算，不调被测函数做参照）
+    for tid in (0, 3, 199):
+        expect = int(np.random.SeedSequence([1703, 2200, tid, 2]).generate_state(1, dtype=np.uint64)[0])
+        assert tp.preprocess_seed(tid) == expect
     # 动作分段：每段长度 ∈ {1,4,8}（最后一段可被截断）、值 ∈ [−0.5,0.5]
     for tid in range(30):
         u = tp.controls(tid)
@@ -177,13 +184,56 @@ def test_encode_trajectory_fake_rows_match_clips():
     assert out["dup"].shape == (34, 256, 1408) and out["pair"].shape == (33, 256, 1408)
     enc = tp.fake_tubelet_encoder()
     x = torch.from_numpy(frames).permute(0, 3, 1, 2).float()/255.
-    for mode, rows in (("dup", (0, 5, 33)), ("pair", (0, 12, 32))):
-        for r in rows:
+    for mode in ("dup", "pair"):
+        assert len(tp.clip_indices(mode)) == len(out[mode])
+        for r in range(len(out[mode])):
             p, c = tp.clip_indices(mode)[r]
             ref = enc(torch.stack((x[p:p+1], x[c:c+1]), 2)).double().numpy()[0]
             assert np.allclose(out[mode][r], ref, atol=1e-6)
     with pytest.raises(ValueError):
         tp.encode_trajectory(frames[:33], 2, fake=True)
+
+
+def test_encode_trajectory_real_preprocess_branch(monkeypatch):
+    """fake=False：每帧预处理前把 generator 重置到 preprocess_seed(轨迹) 的同一状态，一次只处理一帧、按帧号顺序；
+    编码器收到的 67 个 tubelet 的前、后帧正是 clip_indices 的预处理图，输出逐行等于单独编码。
+    预处理换成记录用的替身（真实裁剪要上游仓库），替身和真函数一样从 generator 抽一个种子决定“裁剪”。"""
+    tid = 5
+    s, _ = tp.trajectory(tid)
+    frames = tp.draw(s)
+    calls = []
+
+    def stub(rgb, *, spec, generator):
+        calls.append(dict(rgb=rgb.clone(), spec=spec, state=generator.get_state().clone()))
+        seed = int(torch.randint(0, 2**32, (), generator=generator, dtype=torch.int64))
+        shift = seed % 13
+        return (rgb.permute(0, 3, 1, 2).float().roll(shift, -1)-100.)/50.
+
+    monkeypatch.setattr(tp.vjepa, "preprocess_rgb", stub)
+    clip = tp.FrozenClipEncoder(loaded_tiny(), preprocess=preprocess(), encoder_device=torch.device("cpu"), autocast_dtype=None)
+    seen = []
+    real_encode = clip.encode_clip
+    monkeypatch.setattr(clip, "encode_clip", lambda prev, cur: seen.append((prev, cur)) or real_encode(prev, cur))
+    out = tp.encode_trajectory(frames, tid, encoder=clip, fake=False, batch=10)
+    # 预处理：34 次、每次一帧、按顺序、规格是 v7 的、初始 generator 状态都是同一个重置状态
+    start = torch.Generator().manual_seed(tp.preprocess_seed(tid)).get_state()
+    assert len(calls) == 34
+    for f, c in enumerate(calls):
+        assert torch.equal(c["rgb"], torch.from_numpy(frames[f:f+1]))
+        assert c["spec"] == preprocess() and torch.equal(c["state"], start)
+    # 独立重算每帧的预处理图（同一个重置状态 → 同一个裁剪）
+    pre = [stub(torch.from_numpy(frames[f:f+1]), spec=preprocess(), generator=torch.Generator().manual_seed(tp.preprocess_seed(tid)))
+           for f in range(34)]
+    calls.clear()
+    prevs = torch.cat([p for p, _ in seen]); curs = torch.cat([c for _, c in seen])
+    clips = tp.clip_indices("dup")+tp.clip_indices("pair")
+    assert len(prevs) == 67
+    for i, (a, b) in enumerate(clips):
+        assert torch.equal(prevs[i], pre[a][0]) and torch.equal(curs[i], pre[b][0])
+    for mode in ("dup", "pair"):
+        for r, (a, b) in enumerate(tp.clip_indices(mode)):
+            ref = real_encode(pre[a], pre[b]).double().numpy()[0]
+            assert np.array_equal(out[mode][r], ref)
 
 
 # —————————————————————————— 探针 ——————————————————————————
@@ -218,6 +268,33 @@ def test_gram_concat_and_centering_exact():
     sel = tp.select_rows(k, 34, tp.sample_rows("dup"), 2)
     idx = np.concatenate([i*34+np.arange(1, 34) for i in range(2)])
     assert np.array_equal(sel, k[np.ix_(idx, idx)])
+
+
+def test_full_gram_precision_at_r2_level():
+    """强相关特征（大的共同偏移 + 低秩信号 + 小噪声，float16 存储）：full 读出分块 fp32 乘、float64 累加的核，
+    与 float64 参考核在最小 λ 的预测和 5 折 R² 上一致。"""
+    g = torch.Generator().manual_seed(4)
+    n_traj, per = 5, 17
+    n = n_traj*per
+    common = 3.+torch.randn(1, 256, 1408, generator=g)
+    factors = torch.randn(n, 3, generator=g)
+    basis = torch.randn(3, 256, 1408, generator=g)*.05
+    z = (common+torch.einsum("nk,kij->nij", factors, basis)+.002*torch.randn(n, 256, 1408, generator=g)).half()
+    x = z.reshape(n, -1).double(); xc = x-x.mean(0)
+    ref = (xc@xc.T).numpy()
+    k = tp.gram(z, "full")
+    y = np.stack((factors[:, 0].numpy(), (factors[:, 1]+.5*factors[:, 2]).numpy(), np.random.default_rng(0).normal(size=n)), -1)
+    traj = np.repeat(np.arange(n_traj), per)
+    fit, rows = np.flatnonzero(traj != 0), np.flatnonzero(traj == 0)
+    for kk in (k, ref):
+        kk.setflags(write=False)
+    m_ref, m = tp._ridge_fit(ref, y, fit), tp._ridge_fit(k, y, fit)
+    lam = m_ref[4]*10.**min(tp.LAMBDA_EXPONENTS)
+    p_ref, p = tp._ridge_predict(ref, fit, rows, m_ref, lam), tp._ridge_predict(k, fit, rows, m, lam)
+    assert np.abs(p-p_ref).max() < 1e-3*np.abs(p_ref).max()
+    a, b = tp.ridge_cv(k, y, traj), tp.ridge_cv(ref, y, traj)
+    assert a["r2_mean"][0] > .99 and a["r2_mean"][1] > .99
+    assert np.allclose(a["r2_per_fold"], b["r2_per_fold"], atol=1e-4)
 
 
 def test_dual_ridge_equals_primal():
@@ -256,19 +333,56 @@ def test_ridge_cv_splits_by_trajectory():
     assert tp.ridge_cv(x@x.T, y, np.arange(len(traj)))["r2_mean"][0] > .9
 
 
+def table(pair_omega, dup_omega, dup_pos=.99, val=None):
+    """每个读出、每折相同的 ridge_cv 结果；val[ro] 给 pair 各折选 λ 那一折的 θ̇ R²（默认等于测试 R²）。"""
+    res = {}
+    for mode, om in (("pair", pair_omega), ("dup", dup_omega), ("dup_concat", 0.)):
+        res[mode] = {}
+        for ro in tp.READOUTS:
+            o = om[ro] if isinstance(om, dict) else om
+            row = [dup_pos if mode == "dup" else .99]*2+[o, o]
+            v = [row[:2]+[val[ro][f]]*2 for f in range(5)] if (val and mode == "pair") else [row]*5
+            res[mode][ro] = dict(r2_mean=row, r2_per_fold=[row]*5, val_r2_per_fold=v)
+    return res
+
+
 def test_decide_rule():
-    def table(pair_omega, dup_omega, dup_pos=.99):
-        res = {}
-        for mode, om in (("pair", pair_omega), ("dup", dup_omega), ("dup_concat", 0.)):
-            res[mode] = {ro: dict(r2_mean=[dup_pos if mode == "dup" else .99]*2+[om, om]) for ro in tp.READOUTS}
-        return res
     assert tp.decide(table(.95, .1))["adopt_two_frame"]
     assert not tp.decide(table(.85, .1))["adopt_two_frame"]
     assert not tp.decide(table(.95, .9))["adopt_two_frame"]                 # 提升不到 0.1
     assert not tp.decide(table(.95, .1, dup_pos=.5))["adopt_two_frame"]     # 位置都读不出：探针无效
-    t = table(.5, .1); t["pair"]["pool4"]["r2_mean"][2] = .93
-    d = tp.decide(t)
-    assert d["best_readout"] == "pool4" and d["adopt_two_frame"]
+    d = tp.decide(table(dict(mean=.5, pool4=.93, full=.6), .1))
+    assert d["selected_readouts"] == ["pool4"]*5 and d["adopt_two_frame"]
+    assert d["by_readout"][1]["readout"] == "pool4" and d["by_readout"][1]["pair_omega"] == .93
+
+
+def test_decide_selects_readout_on_validation_folds_only():
+    """读出由每折选 λ 那一折上的 pair θ̇ R² 挑，测试 R² 不参与挑选：测试上 full 最高（0.95），但验证上 mean 最高，
+    判据取 mean 的测试值（0.85）→ 不采用；按测试均值挑最大会选 full 并误判采用。"""
+    test = dict(mean=.85, pool4=.80, full=.95)
+    val = dict(mean=[.9]*5, pool4=[.8]*5, full=[.7]*5)
+    d = tp.decide(table(test, .1, val=val))
+    assert d["selected_readouts"] == ["mean"]*5 and not d["adopt_two_frame"]
+    assert d["selected"]["pair_omega"] == pytest.approx(.85) and d["selected"]["gain"] == pytest.approx(.75)
+    # 每折可以选不同的读出，判据是各折所选读出测试 R² 的平均
+    val = dict(mean=[.9, .1, .1, .1, .1], pool4=[.1]*5, full=[.1, .9, .9, .9, .9])
+    d = tp.decide(table(test, .1, val=val))
+    assert d["selected_readouts"] == ["mean"]+["full"]*4
+    assert d["selected"]["pair_omega"] == pytest.approx((.85+4*.95)/5) and d["adopt_two_frame"]
+    # dup 的 θ̇ 取同一个所选读出（full）上的值
+    d = tp.decide(table(test, dict(mean=.5, pool4=.4, full=.2), val=dict(mean=[.1]*5, pool4=[.1]*5, full=[.9]*5)))
+    assert d["selected"]["dup_omega"] == pytest.approx(.2) and d["selected"]["gain"] == pytest.approx(.75)
+    # 位置用所选读出上 dup 的 sin/cos
+    for bad in ([.5, .99, .1, .1], [.99, .5, .1, .1]):        # sin、cos 各单独读不出（其他读出都读得出）
+        t = table(test, .1, val=dict(mean=[.9]*5, pool4=[.1]*5, full=[.1]*5))
+        for f in range(5):
+            t["dup"]["mean"]["r2_per_fold"][f] = list(bad)
+        assert not tp.decide(t)["position_readable"]
+    # ridge_cv 给出 val_r2_per_fold：每折、每个目标所选 λ 在验证折上的 R²
+    g = np.random.default_rng(5)
+    x = g.normal(size=(20*33, 6)); y = np.stack((x@g.normal(size=6), g.normal(size=len(x))), -1)
+    res = tp.ridge_cv(x@x.T, y, np.repeat(np.arange(20), 33))
+    assert np.array(res["val_r2_per_fold"]).shape == (5, 2) and min(r[0] for r in res["val_r2_per_fold"]) > .99
 
 
 # —————————————————————————— 工具端到端 ——————————————————————————
@@ -285,12 +399,15 @@ def test_tool_end_to_end_fake(tmp_path):
         assert r.returncode == 0, r.stderr
     m = json.loads((out/"0003"/"manifest.json").read_text())
     assert m["features"]["pair"]["clips"][0] == [0, 1] and m["features"]["dup"]["shape"] == [34, 256, 1408]
-    assert m["generation"]["evidence_role"] == "synthetic_development_only"
+    assert m["generation"]["identity"]["evidence_role"] == "synthetic_development_only"
     assert np.array_equal(np.load(out/"0003"/"states.npy"), tp.trajectory(3)[0])
     r = run_tool("fit", "--trajectories", "10", "--output", str(out), "--device", "cpu")
     assert r.returncode == 0, r.stderr
     rep = json.loads((out/"report.json").read_text())
     assert rep["evidence_role"] == "synthetic_development_only" and rep["samples"] == 330
+    assert rep["generation_identity"] == m["generation"]["identity"] and len(rep["manifest_sha256"]) == 10
+    assert set(rep["fit_source_sha256"]) == set(rep["generation_identity"]["generation_source_sha256"])
+    assert rep["decision"]["rule"]["readout_selection"].startswith("nested")
     assert set(rep["results"]) == set(tp.MODES)
     j = tp.TARGETS.index("omega")
     # 假编码器也是按 tubelet 取块：单帧复制读不出角速度，两帧能读出一部分
@@ -319,3 +436,166 @@ def test_tool_jobs_and_guards(tmp_path):
     r = run_tool("encode", "--trajectories", "10", "--output", str(tmp_path), "--device", "cpu")
     assert r.returncode != 0 and "--upstream-root" in r.stderr
     assert run_tool("fit", "--trajectories", "4", "--output", str(tmp_path)).returncode != 0
+
+
+# —————————————————————————— 缓存生成身份（S22-fix1） ——————————————————————————
+
+def tool_module():
+    spec = importlib.util.spec_from_file_location("tubelet_probe_tool", ROOT/"tools"/"tubelet_probe.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def encoded(tmp_path_factory):
+    out = tmp_path_factory.mktemp("ident")/"probe"
+    tool = tool_module()
+    tool.main(["encode", "--trajectories", "5", "--output", str(out), "--fake-encoder", "--device", "cpu"])
+    return out
+
+
+def rewrite(folder, change):
+    """把第 folder 条的清单里的生成身份按 change 改掉，再把身份 SHA、清单 SHA、COMPLETE 全部改成自洽的。"""
+    from po_jepa.runtime import cache
+    tool = tool_module()
+    m = json.loads((folder/"manifest.json").read_bytes())
+    change(m)
+    m["generation"]["identity_sha256"] = tool.identity_sha(m["generation"]["identity"])
+    (folder/"manifest.json").write_bytes(cache._json_bytes(m))
+    (folder/"COMPLETE.json").write_bytes(cache._json_bytes(dict(manifest_sha256=cache.file_sha(folder/"manifest.json"))))
+
+
+def real_identity(tool):
+    from po_jepa.runtime import cache
+    arch = tool.v7_architecture()
+    report = vjepa.CheckpointReport(Path("w.pth"), cache.CHECKPOINT_SHA, "target_encoder", (), (), True, arch)
+    return tool.generation_identity(tool.REAL, tool.encoder_identity(report, tool.v7_load_spec("w.pth"), arch))
+
+
+def load(tool, out, n=5):
+    from po_jepa.runtime import cache
+    return tool.load(out, n, "pair", np, cache)
+
+
+@pytest.fixture
+def cache_copy(encoded, tmp_path):
+    import shutil
+    out = tmp_path/"probe"; shutil.copytree(encoded, out)
+    return out
+
+
+def test_identity_recorded_and_consistent_cache_loads(cache_copy):
+    tool = tool_module()
+    _, _, ident, shas = load(tool, cache_copy)
+    assert ident["evidence_role"] == tool.SYNTHETIC and ident["definition"] == tp.definition()
+    assert ident["definition"]["clips"]["pair"][0] == [0, 1] and len(shas) == 5
+    # 真实编码器身份（v7 权重、上游提交、架构、加载规则、预处理）能通过：先证明正例可过，下面的反例才只差一项
+    real = real_identity(tool)
+    for t in range(5):
+        rewrite(cache_copy/f"{t:04d}", lambda m: m["generation"].__setitem__("identity", copy.deepcopy(real)))
+    assert load(tool, cache_copy)[2]["evidence_role"] == tool.REAL
+
+
+@pytest.mark.parametrize("name,change,match", [
+    ("mixed_source", lambda i: i["generation_source_sha256"].__setitem__("src/po_jepa/tubelet_probe.py", "0"*64), "混了两套"),
+    ("mixed_role", lambda i: i.__setitem__("evidence_role", "synthetic_development_only") or
+        i.__setitem__("encoder", copy.deepcopy(tool_module().FAKE_ENCODER)) or i.__setitem__("preprocess", None), "混了两套"),
+])
+def test_mixed_identities_rejected(cache_copy, name, change, match):
+    """所有文件 SHA 都自洽，只有一条轨迹的生成身份与其他条不同 → 拒绝。"""
+    tool = tool_module(); real = real_identity(tool)
+    for t in range(5):
+        rewrite(cache_copy/f"{t:04d}", lambda m: m["generation"].__setitem__("identity", copy.deepcopy(real)))
+    load(tool, cache_copy)
+    rewrite(cache_copy/"0003", lambda m: change(m["generation"]["identity"]))
+    with pytest.raises(ValueError, match=match):
+        load(tool, cache_copy)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("checkpoint_sha256", "1"*64), ("upstream_commit", "deadbeef"), ("encoder_key", "encoder"),
+    ("missing_keys", ["x"]), ("initialization_seed", 1), ("architecture", None), ("load_rules", None), ("extra_field", 1),
+])
+def test_real_role_needs_v7_encoder(cache_copy, field, value):
+    """全部轨迹一致地声称真实编码器，但编码器身份有一项不是 v7 的 → 拒绝（不再只看 evidence_role 字符串）。"""
+    tool = tool_module(); real = real_identity(tool)
+    if field == "architecture":
+        value = dict(real["encoder"]["architecture"], tubelet_size=1)
+    if field == "load_rules":
+        value = dict(real["encoder"]["load_rules"], strip_prefixes=["module."])
+    real["encoder"][field] = value
+    for t in range(5):
+        rewrite(cache_copy/f"{t:04d}", lambda m: m["generation"].__setitem__("identity", copy.deepcopy(real)))
+    with pytest.raises(ValueError, match="v7"):
+        load(tool, cache_copy)
+
+
+def test_real_role_needs_v7_preprocess(cache_copy):
+    tool = tool_module()
+    for change in (lambda p: p.__setitem__("rule", "one_generator_for_all_frames"),
+                   lambda p: p["spec"].__setitem__("crop_size", 224)):
+        real = real_identity(tool); change(real["preprocess"])
+        for t in range(5):
+            rewrite(cache_copy/f"{t:04d}", lambda m: m["generation"].__setitem__("identity", copy.deepcopy(real)))
+        with pytest.raises(ValueError, match="preprocess"):
+            load(tool, cache_copy)
+
+
+def test_definition_schema_and_clips_checked(cache_copy):
+    tool = tool_module()
+    # 全部轨迹一致，但探针定义与当前代码不同（pair 帧号反序）→ 拒绝
+    def reverse(m):
+        m["generation"]["identity"]["definition"]["clips"]["pair"] = [[b, a] for a, b in tp.clip_indices("pair")]
+        m["features"]["pair"]["clips"] = [[b, a] for a, b in tp.clip_indices("pair")]
+    for t in range(5):
+        rewrite(cache_copy/f"{t:04d}", reverse)
+    with pytest.raises(ValueError, match="探针定义"):
+        load(tool, cache_copy)
+
+
+def test_feature_clips_and_schema_checked(cache_copy):
+    tool = tool_module()
+    rewrite(cache_copy/"0002", lambda m: m["features"]["pair"].__setitem__("clips", [[b, a] for a, b in tp.clip_indices("pair")]))
+    with pytest.raises(ValueError, match="帧号或形状"):
+        load(tool, cache_copy)
+
+
+def test_old_schema_and_bad_identity_sha_rejected(cache_copy):
+    tool = tool_module()
+    rewrite(cache_copy/"0001", lambda m: m.__setitem__("schema", "s22_tubelet_probe_v1"))
+    with pytest.raises(ValueError, match="清单格式"):
+        load(tool, cache_copy)
+
+
+def test_identity_sha_must_match_content(cache_copy):
+    from po_jepa.runtime import cache
+    tool = tool_module(); folder = cache_copy/"0004"
+    m = json.loads((folder/"manifest.json").read_bytes())
+    m["generation"]["identity"]["generation_source_sha256"]["tools/tubelet_probe.py"] = "0"*64     # 不改身份 SHA
+    (folder/"manifest.json").write_bytes(cache._json_bytes(m))
+    (folder/"COMPLETE.json").write_bytes(cache._json_bytes(dict(manifest_sha256=cache.file_sha(folder/"manifest.json"))))
+    with pytest.raises(ValueError, match="身份与它的 SHA"):
+        load(tool, cache_copy)
+
+
+def test_resume_refuses_other_identity(cache_copy):
+    """续跑：同一身份的已完成轨迹跳过；身份不同的已完成轨迹不覆盖、不混用，直接报错。"""
+    tool = tool_module()
+    before = (cache_copy/"0002"/"pair.npy").stat().st_mtime_ns
+    tool.main(["encode", "--trajectories", "5", "--output", str(cache_copy), "--fake-encoder", "--device", "cpu"])
+    assert (cache_copy/"0002"/"pair.npy").stat().st_mtime_ns == before
+    saved = {n: (cache_copy/"0002"/n).read_bytes() for n in ("manifest.json", "COMPLETE.json")}
+    rewrite(cache_copy/"0002", lambda m: m["generation"]["identity"]["generation_source_sha256"].__setitem__("src/po_jepa/vjepa.py", "0"*64))
+    manifest = (cache_copy/"0002"/"manifest.json").read_bytes()
+    with pytest.raises(SystemExit, match="生成身份与本次不同"):
+        tool.main(["encode", "--trajectories", "5", "--output", str(cache_copy), "--fake-encoder", "--device", "cpu"])
+    assert (cache_copy/"0002"/"manifest.json").read_bytes() == manifest
+    assert (cache_copy/"0002"/"pair.npy").stat().st_mtime_ns == before
+    # 已完成但清单被改过（COMPLETE 里的 SHA 对不上）：也不覆盖，报错（先把 0002 复原，只差这一项）
+    for n, b in saved.items():
+        (cache_copy/"0002"/n).write_bytes(b)
+    tool.main(["encode", "--trajectories", "5", "--output", str(cache_copy), "--fake-encoder", "--device", "cpu"])
+    from po_jepa.runtime import cache
+    (cache_copy/"0003"/"COMPLETE.json").write_bytes(cache._json_bytes(dict(manifest_sha256="0"*64)))
+    with pytest.raises(SystemExit, match="清单 SHA 不符"):
+        tool.main(["encode", "--trajectories", "5", "--output", str(cache_copy), "--fake-encoder", "--device", "cpu"])
