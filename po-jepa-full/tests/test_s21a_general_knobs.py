@@ -176,7 +176,7 @@ def test_occluders_on_gray_scott_go_through_finish():
     """gray_scott 的渲染很慢：直接用小场核 _finish 的遮挡（与 push 同一个函数）。"""
     v = variants.parse("gray_scott", "occluders=2")
     image = np.full((2, 256, 256, 3), 30.)
-    out = new_systems._finish(image, 4, "gray_scott", v)
+    out = new_systems._finish(image, 4, "gray_scott", v, ticks=[0, 1])   # S24-fix1：部分帧要给 ticks
     mask = _occluder_mask(4, 2, new_systems.rng("gray_scott", 4, 7))
     assert (out[:, mask] == systems.OCCLUDER_COLOR.astype(np.uint8)).all() and (out[:, ~mask] == 30).all()
 

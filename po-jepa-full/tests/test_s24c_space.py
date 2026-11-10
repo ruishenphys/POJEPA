@@ -63,6 +63,16 @@ def raw_at(tid, times, view=None):
             return sc.draw(states, np.asarray(times, dtype=np.float64))
 
 
+def clipped_overlap(x, s, n=256):
+    """独立实现：足迹 [x − s/2, x + s/2] 与画布像素 [k, k+1)（0 ≤ k < n，不回绕）的重叠长度 / s → [len(x), n]。"""
+    A = np.zeros((len(x), n))
+    for i, xi in enumerate(x):
+        a, b = xi-s/2, xi+s/2
+        for k in range(max(0, math.floor(a)), min(n, math.ceil(b))):
+            A[i, k] += max(0., min(b, k+1)-max(a, k))/s
+    return A
+
+
 def overlap_matrix(x, s, n=256):
     """独立实现：足迹 [x − s/2, x + s/2] 与画布像素 [k, k+1)（k 按 n 周期回绕）的重叠长度 / s → [len(x), n]。"""
     A = np.zeros((len(x), n))
@@ -265,15 +275,49 @@ VIEWS = [View(192, 256/(192*.5), -128., -128.), View(320, 256/(320*.7), -40.3, -
 @pytest.mark.parametrize("kind", ["grid", "plain", "checker", "noise"])
 @pytest.mark.parametrize("view", VIEWS)
 def test_texture_is_the_exact_area_average(kind, view):
-    """camera.texture = 画布纹理（256×256 分段常数，周期延拓）在每个输出像素足迹上的面积平均（独立的重叠矩阵）。"""
+    """camera.texture = 画布纹理（256×256 分段常数）在每个输出像素足迹与画布的交集上的面积平均（独立的重叠矩阵；
+    Codex 复审 S24c 起不再周期延拓）。完全在画布里的像素与周期延拓的平均相同。"""
     P = systems._texture(kind)
-    Ar, Ac = overlap_matrix(view.rows(), view.scale), overlap_matrix(view.cols(), view.scale)
+    Ar, Ac = clipped_overlap(view.rows(), view.scale), clipped_overlap(view.cols(), view.scale)
+    keep_r, keep_c = Ar.sum(1) > 0, Ac.sum(1) > 0                # 这一轴上与画布有交集的像素（其余的值会被 canvas_mask 盖掉）
+    Ar[keep_r] /= Ar[keep_r].sum(1, keepdims=True); Ac[keep_c] /= Ac[keep_c].sum(1, keepdims=True)
     want = np.stack([Ar@P[..., ch]@Ac.T for ch in range(3)], -1)
     got = camera.texture(kind, view)
-    assert got.shape == (view.size, view.size, 3)
-    np.testing.assert_allclose(got, want, rtol=0, atol=1e-9)
+    assert got.shape == (view.size, view.size, 3) and np.isfinite(got).all()
+    keep = keep_r[:, None] & keep_c[None, :]
+    np.testing.assert_allclose(got[keep], want[keep], rtol=0, atol=1e-9)
+    inside = camera.square_cover(view, 0., 0., 256.) == 1.
+    Pr, Pc = overlap_matrix(view.rows(), view.scale), overlap_matrix(view.cols(), view.scale)
+    periodic = np.stack([Pr@P[..., ch]@Pc.T for ch in range(3)], -1)
+    np.testing.assert_allclose(got[inside], periodic[inside], rtol=0, atol=1e-9)
     with systems.camera_view(view):
         assert np.array_equal(systems._texture(kind), got)
+
+
+EDGE_VIEWS = VIEWS+[View(192, 2., -63., -64.), View(320, 256/(320*.6), -71.1, -84.9)]
+
+
+@pytest.mark.parametrize("kind", ["grid", "plain", "checker", "noise"])
+@pytest.mark.parametrize("view", EDGE_VIEWS)
+def test_texture_and_canvas_edge_together_are_the_area_average(kind, view):
+    """Codex 复审 S24c：纹理与画布边合起来（canvas_mask(texture)）= 整个足迹的面积平均，画布里是纹理、画布外是
+    SURROUND（独立的不回绕重叠矩阵）。原来纹理先周期延拓平均、再按覆盖比例混色，跨画布边的像素偏色。"""
+    P = systems._texture(kind)
+    Ar, Ac = clipped_overlap(view.rows(), view.scale), clipped_overlap(view.cols(), view.scale)
+    cover = Ar.sum(1)[:, None]*Ac.sum(1)[None, :]
+    want = np.stack([Ar@P[..., ch]@Ac.T for ch in range(3)], -1)+camera.SURROUND*(1.-cover)[..., None]
+    got = camera.canvas_mask(camera.texture(kind, view), view)
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-9)
+    assert ((cover > 0) & (cover < 1)).sum() > view.size          # 确实有跨画布边的像素
+
+
+def test_canvas_edge_counterexample_from_the_review():
+    """Codex 报告的确定反例：View(192, 2, −63, −64)，中心在 (行 0, 列 11) 的输出像素足迹 [−1,1]×[10,12]，grid 背景：
+    画布内那半是网格色 (36,40,44)，画布外是 SURROUND (8,10,12)，正确值 (22,25,28)（原实现 (19,22,25)）。"""
+    view = View(192, 2., -63., -64.)
+    assert view.rows()[31] == 0. and view.cols()[37] == 11.
+    got = camera.canvas_mask(camera.texture("grid", view), view)[31, 37]
+    np.testing.assert_allclose(got, [22., 25., 28.], atol=1e-12)
 
 
 @pytest.mark.parametrize("view", VIEWS)
@@ -317,6 +361,48 @@ def test_occluders_inside_the_camera(use):
     np.testing.assert_allclose(cam[0][inside], want[inside], atol=1e-9)
     full = inside & (cover > 1-1e-12)
     assert full.sum() > 500 and np.array_equal(cam[0][full], np.broadcast_to(systems.OCCLUDER_COLOR, cam[0][full].shape))
+
+
+class _Corners:
+    """遮挡块的随机流替身：integers() 返回给定的左上角（只测混色，不测抽样）。"""
+    def __init__(self, corners):
+        self.corners = np.asarray(corners)
+
+    def integers(self, lo, hi, shape):
+        assert shape == self.corners.shape and lo <= self.corners.min() and self.corners.max() < hi
+        return self.corners.copy()
+
+
+def test_overlapping_occluders_counterexample_from_the_review():
+    """Codex 报告的确定反例：View(192, 2, −64, −64)，遮挡块 (37,150)、(37,170)，输出像素 (50,122) 的足迹
+    [36,38]×[180,182] 下半被两块同时盖住：并集覆盖 0.5 → (67,70,76)（原实现逐块混色得 0.75 → (88.5,91,98)）。"""
+    view = View(192, 2., -64., -64.)
+    image = np.broadcast_to(systems.BACKGROUND, (1, 192, 192, 3)).astype(np.float64)
+    with systems.camera_view(view):
+        out = systems.occlude(image, _Corners([[37, 150], [37, 170]]), 2)
+    np.testing.assert_allclose(out[0, 50, 122], [67., 70., 76.], atol=1e-12)
+
+
+@pytest.mark.parametrize("view", VIEWS+[View(192, 2., -64., -64.)])
+def test_overlapping_occluders_mix_by_the_union_area(view):
+    """三块互相重叠的遮挡块：相机里每个像素 = 背景与遮挡色按并集覆盖比例混合（独立：画布上的并集掩码 × 重叠矩阵）；
+    一块时与逐块混色逐位相同。"""
+    corners = [[37, 150], [60, 170], [70, 140]]
+    mask = np.zeros((256, 256))
+    for r, c in corners:
+        mask[r:r+48, c:c+48] = 1.
+    Ar, Ac = clipped_overlap(view.rows(), view.scale), clipped_overlap(view.cols(), view.scale)
+    cover = Ar@mask@Ac.T
+    image = np.broadcast_to(systems.BACKGROUND, (1, view.size, view.size, 3)).astype(np.float64)
+    with systems.camera_view(view):
+        out = systems.occlude(image, _Corners(corners), 3)[0]
+        one = systems.occlude(image, _Corners(corners[:1]), 1)[0]
+    want = systems.BACKGROUND+(systems.OCCLUDER_COLOR-systems.BACKGROUND)*cover[..., None]
+    np.testing.assert_allclose(out, want, atol=1e-9)
+    assert ((cover > 1e-9) & (cover < 1-1e-9)).sum() > 10 and (cover > 1-1e-12).sum() > 100
+    c1 = camera.square_cover(view, 37., 150., 48.)[..., None]
+    old = np.where(c1 == 1., systems.OCCLUDER_COLOR, image[0]+(systems.OCCLUDER_COLOR-image[0])*c1)
+    assert np.array_equal(one, old)
 
 
 # —— 场的插值 ——

@@ -122,12 +122,12 @@ def test_gray_scott_render_is_invertible_and_unsaturated(gs_fields):
     """线性渲染：(U, V) 能从 RGB 解回；大幅改变 V 或 U 一定改变画面；任何颜色/背景都不触到 255。"""
     _, (U, V, p) = gs_fields
     t = 0
-    f = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, Variant(background="plain")).astype(float)[0]
+    f = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, Variant(background="plain"), ticks=[t]).astype(float)[0]   # S24-fix1：部分帧要给 ticks
     bg = _texture("plain")
     A = np.stack((GS.MIX_V*(np.array(COLORS["orange"])-bg[0, 0]), GS.MIX_U*(GS.COLOR_U-bg[0, 0])), 1)   # [3,2]
     w, *_ = np.linalg.lstsq(A, (f-bg).reshape(-1, 3).T, rcond=None)
     rep = 256//GS.N; up = lambda X: np.repeat(np.repeat(X, rep, 0), rep, 1).ravel()
-    ring = GS.draw(np.ones((1, GS.N, GS.N)), np.zeros((1, GS.N, GS.N)), p[t:t+1], 3, Variant(background="plain"))[0]
+    ring = GS.draw(np.ones((1, GS.N, GS.N)), np.zeros((1, GS.N, GS.N)), p[t:t+1], 3, Variant(background="plain"), ticks=[t])[0]
     free = (np.abs(ring.astype(float)-bg).max(-1) < 1).ravel()        # 去掉注入点圆环盖住的像素
     assert np.abs(w[0]-up(V[t]))[free].max() < .02 and np.abs(w[1]-(1-up(U[t])))[free].max() < .02
     V2 = V[t].copy(); r, c = np.unravel_index(np.argmax(V2), V2.shape); V2[r, c] += .1
@@ -135,10 +135,10 @@ def test_gray_scott_render_is_invertible_and_unsaturated(gs_fields):
     for color in COLORS:
         for background in ("grid", "plain", "checker", "noise"):
             v = Variant(color=color, background=background)
-            f0 = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, v)
+            f0 = GS.draw(U[t:t+1], V[t:t+1], p[t:t+1], 3, v, ticks=[t])
             assert f0.max() < 255
-            assert not np.array_equal(f0, GS.draw(U[t:t+1], V2[None], p[t:t+1], 3, v))
-            assert not np.array_equal(f0, GS.draw(U2[None], V[t:t+1], p[t:t+1], 3, v))
+            assert not np.array_equal(f0, GS.draw(U[t:t+1], V2[None], p[t:t+1], 3, v, ticks=[t]))
+            assert not np.array_equal(f0, GS.draw(U2[None], V[t:t+1], p[t:t+1], 3, v, ticks=[t]))
 
 
 @pytest.mark.parametrize("params", [{"feed": .035, "kill": .063, "inject": 0.}, {"feed": .05, "kill": .0595, "inject": 0.}])
@@ -234,7 +234,7 @@ def test_push_initial_state_never_overlaps_and_is_paired():
 
 def test_push_frames_show_orientation_and_knobs():
     q = np.array([[1.5, 1.5, 0., 0., .3], [1.5, 1.5, 0., 0., .3+math.pi]])
-    f = PU.draw(q, 0, {}, Variant())
+    f = PU.draw(q, 0, {}, Variant(), ticks=[0, 1])      # S24-fix1：部分帧要给 ticks
     assert f.shape == (2, 256, 256, 3) and not np.array_equal(f[0], f[1])   # 方块转 180° 画面不同
     u = controls(1)
     s, f1 = PU.frames(1, u, {}, Variant())

@@ -335,8 +335,9 @@ def frame_ticks(L, ticks, horizon=TICKS):
             raise ValueError("会动的干扰光点和像素噪声需要知道每帧的 tick：只画部分帧时要传 ticks")
         return np.arange(horizon+1)
     ticks = np.asarray(ticks)
-    if ticks.shape != (L,) or ticks.min() < 0 or ticks.max() > horizon:
-        raise ValueError(f"ticks 必须是 [L] 个 0…{horizon} 的整数")
+    if (ticks.shape != (L,) or not (np.issubdtype(ticks.dtype, np.integer) or np.issubdtype(ticks.dtype, np.floating))
+            or not np.isfinite(ticks).all() or ticks.min() < 0 or ticks.max() > horizon):
+        raise ValueError(f"ticks 必须是 [L] 个 0…{horizon} 的数（像素噪声另要整数）")
     return ticks
 
 
@@ -370,22 +371,25 @@ def pixel_noise(g, sigma, shape, ticks=None, horizon=TICKS):
 
 def occlude(image, g, count):
     """不透明遮挡块：左上角在 [16, 256−16−48] 均匀取整（随机流 7），整条轨迹静止；画在场景之上、像素噪声之前。
-    S24c：相机里按像素被遮挡块盖住的面积比例混合（完全盖住的像素就是遮挡块颜色）。"""
+    S24c：相机里按像素被遮挡块（几块的并集，重叠处不重复计）盖住的面积比例混合一次（完全盖住的像素就是遮挡块颜色；
+    Codex 复审 S24c：原来逐块混色，两块重叠盖住同一半个像素时按 1 − (1 − ½)² = ¾ 算，偏深）。"""
     image = image.copy()
-    for r, c in g.integers(16, SIZE-16-OCCLUDER_SIZE+1, (count, 2)):
-        if _VIEW[0] is None:
+    corners = g.integers(16, SIZE-16-OCCLUDER_SIZE+1, (count, 2))
+    if _VIEW[0] is None:
+        for r, c in corners:
             image[:, r:r+OCCLUDER_SIZE, c:c+OCCLUDER_SIZE] = OCCLUDER_COLOR
-        else:
-            from . import camera
-            cover = camera.square_cover(_VIEW[0], float(r), float(c), float(OCCLUDER_SIZE))[..., None]
-            image = np.where(cover == 1., OCCLUDER_COLOR, image+(OCCLUDER_COLOR-image)*cover)
-    return image
+        return image
+    from . import camera
+    cover = camera.occluder_cover(_VIEW[0], corners, float(OCCLUDER_SIZE))[..., None]
+    return np.where(cover == 1., OCCLUDER_COLOR, image+(OCCLUDER_COLOR-image)*cover)
 
 
 def compose(rc, colors, sigma, v, trajectory_id, backdrop=None, ticks=None):
     """可调渲染：背景 → （场景底图）→ 静止干扰光点 → 会动的干扰光点 → 场景光点 → 遮挡块 → 像素噪声。
-    rc:[L,P,2]（行、列）。ticks：每帧的 tick，只在有会动的干扰光点时用到（见 frame_ticks）。"""
+    rc:[L,P,2]（行、列）。ticks：每帧的 tick，会动的干扰光点和像素噪声要用（见 frame_ticks）；
+    只画部分帧时不管开没开这两项都必须给、且在 0…horizon 内（Codex 复审 S24a：原来只在两项开着时才核）。"""
     L = rc.shape[0]
+    frame_ticks(L, ticks, v.horizon)
     base = _texture(v.background).astype(np.float64)
     if backdrop is not None:
         base = base+backdrop[..., None]*np.array([30., 34., 40.])
@@ -738,7 +742,9 @@ class AdvectionDiffusion(System):
 
     def draw_fields(self, fields, trajectory_id, v, ticks=None):
         """ticks：每帧的 tick，只画部分帧且有像素噪声时必须给（见 pixel_noise）。
-        S24c：相机里先把 256 格的浓度场在视野像素中心上周期双线性插值（po_jepa.camera.sample_field）。"""
+        S24c：相机里先把 256 格的浓度场在视野像素中心上周期双线性插值（po_jepa.camera.sample_field）。
+        只画部分帧时 ticks 无条件必须给、且在 0…horizon 内（Codex 复审 S24a）。"""
+        frame_ticks(len(fields), ticks, v.horizon)
         if _VIEW[0] is not None:
             from . import camera
             fields = camera.sample_field(fields, 1.)

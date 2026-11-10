@@ -50,7 +50,8 @@ def _check_controls(u):
 
 
 def _finish(image, trajectory_id, system, v, ticks=None):
-    """ticks：每帧的 tick；只画部分帧且有像素噪声时必须给（S21b，见 systems.pixel_noise）。"""
+    """ticks：每帧的 tick；只画部分帧时必须给、且在 0…horizon 内（S21b；Codex 复审 S24a 起不管开没开像素噪声都核）。"""
+    frame_ticks(image.shape[0], ticks, v.horizon)
     if v.occluders:          # S21a：遮挡块画在场景之上、像素噪声之前（与 systems.compose 同一顺序、同一随机流）
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if systems._RAW[0]:           # S24b：timing 要像素噪声和取整之前的画面（systems.raw_images）

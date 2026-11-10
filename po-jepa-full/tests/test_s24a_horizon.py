@@ -194,6 +194,9 @@ def test_first_33_frames_equal_the_32_tick_dataset(use, system):
     tid = 1801 if system != "gray_scott" else 1800
     use(system, KNOBS[system], count=2000)
     s, f = systems.get().frames(tid)
+    if system in variants.SECOND_ORDER:
+        sp32, fp32 = systems.get().frames_with_prev(tid)       # 32 tick 数据集的 34 帧（含 t=−1），切换 horizon 之前存下
+        assert fp32.shape == (34, 256, 256, 3)
     use(system, join(KNOBS[system], "horizon=64"), count=2000)
     sl, fl = systems.get().frames(tid)
     assert fl.shape == (65, 256, 256, 3) and fl.dtype == np.uint8 and sl.shape[0] == 65
@@ -202,6 +205,8 @@ def test_first_33_frames_equal_the_32_tick_dataset(use, system):
     if system in variants.SECOND_ORDER:
         sp, fp = systems.get().frames_with_prev(tid)
         assert fp.shape == (66, 256, 256, 3) and np.array_equal(fp[1:], fl) and np.array_equal(sp[1:], sl)
+        # Codex 复审 S24a：前 34 帧（含 t=−1 那一帧）直接和 32 tick 数据集比，不只比 [1:]
+        assert np.array_equal(fp[:34], fp32) and np.array_equal(sp[:34], sp32)
 
 
 @pytest.mark.parametrize("system", ("double_well", "van_der_pol", "multi_particle", "advection_diffusion"))
@@ -265,6 +270,33 @@ def test_partial_redraw_after_tick_32(use, system, knobs):
          else s.draw(full[:1], 6, v, ticks=np.array([65])))
 
 
+@pytest.mark.parametrize("system", ("double_well", "landscape", "advection_diffusion", "gray_scott", "push", "pendulum", "wave"))
+def test_partial_redraw_checks_ticks_without_movers_or_pixel_noise(use, system):
+    """Codex 复审 S24a：部分帧重画的 tick 检查原来只在 movers/像素噪声开着时做；现在不管开没开都核
+    （不给 ticks、tick 越界、长度不符都报错），合法的 ticks 照常画、与整条轨迹那一帧相同。"""
+    use(system, "shape=ring,horizon=64" if system == "landscape" else "horizon=64")
+    s = systems.get(); v = datasets.active().knobs
+    if system == "advection_diffusion":
+        states = s.variant_fields(5, v, ticks=1)
+        draw = lambda x, **kw: s.draw_fields(x, 5, v, **kw)
+    else:
+        states = s.variant_trajectory(5, v, ticks=1)
+        draw = lambda x, **kw: s.draw(x, 5, v, **kw)
+    assert len(states) == 2
+    good = draw(states, ticks=np.array([0, 1]))
+    assert good.shape == (2, 256, 256, 3) and good.dtype == np.uint8
+    low = -2 if system in variants.SECOND_ORDER else -1           # 二阶场景 tick −1 合法（预跑那一帧）
+    for bad in (None, np.array([0, 65]), np.array([low, 0]), np.array([0]), np.array([0., np.nan])):
+        with pytest.raises(ValueError):
+            draw(states, ticks=bad)
+    if system in variants.SECOND_ORDER:                            # 不经过 SecondOrderSystem.draw，直接调 second_order 的画法
+        impl = second_order.SYSTEMS[system]
+        with pytest.raises(ValueError):
+            impl.draw(states, 5, dict(v.params), v, None)
+        with pytest.raises(ValueError):
+            impl.draw(states, 5, dict(v.params), v, np.array([0, 65]))
+
+
 def test_pure_modules_accept_long_controls_only_from_horizons():
     """new_systems、second_order 收 [H,2]（H ∈ HORIZONS）的执行动作，别的长度报错；推进 H 个 tick。"""
     from po_jepa import new_systems
@@ -308,3 +340,17 @@ def test_encode_probe_and_plan_refuse_long_horizon(tmp_path):
     r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/plan_v7.py"), "--job", str(job), "--fake-encoder",
                         "--device", "cpu", "--output", str(tmp_path/"plan.json")], env=_clean_env(), capture_output=True, text=True)
     assert r.returncode != 0 and "长时程" in r.stderr and not (tmp_path/"plan.json").exists()
+
+
+@pytest.mark.parametrize("test_variant,word", [("horizon=128", "长时程"), ("fps=8", "时间采样"), ("resolution=384", "空间采样")])
+def test_plan_refuses_an_unsupported_test_variant_before_loading_the_model(tmp_path, test_variant, word):
+    """Codex 复审 S24a/S24b/S24c：训练数据集是默认的 32 tick、只有 --test-variant 带长时程/时间采样/空间采样时，原来要先
+    建模型、读训练报告、载 checkpoint 才拒绝。这里条件是 po_jepa_full、任务目录里没有训练产物：拒绝必须在读 checkpoint
+    之前（否则先报找不到 report.json）。"""
+    job = tmp_path/"job"; job.mkdir()
+    (job/"job.json").write_text(json.dumps(dict(seed=0, updates=1, dataset="double_well-40", condition="po_jepa_full")))
+    r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/plan_v7.py"), "--job", str(job), "--fake-encoder", "--device", "cpu",
+                        "--test-variant", test_variant, "--output", str(tmp_path/"plan.json")],
+                       env=_clean_env(), capture_output=True, text=True)
+    assert r.returncode != 0 and word in r.stderr and "Traceback" not in r.stderr, r.stderr[-2000:]
+    assert not (tmp_path/"plan.json").exists()

@@ -98,14 +98,15 @@ def _layers(system, trajectory_id, v, L, ticks, sigma):
 
 
 def _finish(image, system, trajectory_id, v, ticks):
-    """遮挡块（流 7）→ 像素噪声（流 4，一次抽 horizon+2 帧（默认 34），第 f 帧用 tick f−1 那份）→ uint8。"""
+    """遮挡块（流 7）→ 像素噪声（流 4，一次抽 horizon+2 帧（默认 34），第 f 帧用 tick f−1 那份）→ uint8。
+    ticks 不管开没开像素噪声都核（Codex 复审 S24a）：不给时必须是整条 horizon+2 帧，给了必须在 −1…horizon 内。"""
+    t = frame_ticks(image.shape[0], ticks, v.horizon)
     if v.occluders:
         image = occlude(image, rng(system, trajectory_id, 7), v.occluders)
     if systems._RAW[0]:           # S24b：timing 要像素噪声和取整之前的画面（systems.raw_images）
         return image
     if v.pixel_noise:
         noise = rng(system, trajectory_id, 4).normal(0., v.pixel_noise, (v.horizon+2,)+image.shape[1:])
-        t = frame_ticks(image.shape[0], ticks, v.horizon)
         if not np.issubdtype(t.dtype, np.integer):
             raise ValueError("像素噪声按整 tick 取：ticks 必须是整数（tick 内部的帧由 po_jepa.timing 加噪声）")
         image = image+noise[t+1]

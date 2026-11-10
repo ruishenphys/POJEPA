@@ -121,6 +121,19 @@ def _job_env(job_dir):
     return job_dir, job
 
 
+def _refuse_unsupported(knobs, ticks):
+    """规划还没接的数据集直接退出（在建模型、读 checkpoint、编码之前调用）。"""
+    if knobs.horizon != ticks:
+        # S24a：规划按 32 tick 的回合（start+horizon ≤ 32、TrajectoryControls）；长时程规划在第 6 阶段接
+        raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
+    if knobs.changes_timing():
+        # S24b：规划按每 tick 一帧、逐 tick 的动作；时间采样的规划在第 6 阶段接
+        raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
+    if knobs.changes_space():
+        # S24c：规划的目标画面按单帧重画（不经过相机）；空间采样的规划在第 6 阶段接
+        raise SystemExit("带空间采样调节项（resolution/zoom/pan/drift）的数据集：规划还没接（S24c 只做数据生成）")
+
+
 def main():
     a = _parse()
     job_dir, job = _job_env(a.job)
@@ -140,15 +153,11 @@ def main():
     device = torch.device(a.device)
     condition = job["condition"]
     base = datasets.active()
-    if base.knobs.horizon != systems.TICKS:
-        # S24a：规划按 32 tick 的回合（start+horizon ≤ 32、TrajectoryControls）；长时程规划在第 6 阶段接
-        raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
-    if base.knobs.changes_timing():
-        # S24b：规划按每 tick 一帧、逐 tick 的动作；时间采样的规划在第 6 阶段接
-        raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
-    if base.knobs.changes_space():
-        # S24c：规划的目标画面按单帧重画（不经过相机）；空间采样的规划在第 6 阶段接
-        raise SystemExit("带空间采样调节项（resolution/zoom/pan/drift）的数据集：规划还没接（S24c 只做数据生成）")
+    # 训练数据集和 --test-variant 给出的测试数据集都在建模型、读 checkpoint 之前核（Codex 复审 S24a–c：原来测试变体在模型载入后才拒绝）
+    test_spec = base if a.test_variant is None else datasets.DatasetSpec(
+        base.system, base.count, variants.format(base.system, variants.parse(base.system, a.test_variant)))
+    for checked in (base, test_spec):
+        _refuse_unsupported(checked.knobs, systems.TICKS)
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":
@@ -162,15 +171,9 @@ def main():
         del opt
     model.eval()
     if a.test_variant is not None:
-        datasets._set_for_tests(datasets.DatasetSpec(base.system, base.count,
-                                                     variants.format(base.system, variants.parse(base.system, a.test_variant))))
+        datasets._set_for_tests(test_spec)
     spec = datasets.active(); v = spec.knobs; system = systems.get()
-    if v.horizon != systems.TICKS:      # S24a：--test-variant 也不许带 horizon（同上）
-        raise SystemExit("horizon≠32 的长时程数据集：规划还没接（S24a 只做数据生成）")
-    if v.changes_timing():              # S24b：--test-variant 也不许带时间采样调节项（同上）
-        raise SystemExit("带时间采样调节项（fps/jitter/exposure/switch_offset）的数据集：规划还没接（S24b 只做数据生成）")
-    if v.changes_space():               # S24c：--test-variant 也不许带空间采样调节项（同上）
-        raise SystemExit("带空间采样调节项（resolution/zoom/pan/drift）的数据集：规划还没接（S24c 只做数据生成）")
+    assert spec == test_spec
 
     # —— 编码器 ——
     if a.fake_encoder:

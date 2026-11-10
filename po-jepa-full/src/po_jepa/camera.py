@@ -16,7 +16,10 @@
   （输出像素比画布像素大时按输出像素抗锯齿；默认 1 个画布像素）。gray_scott、wave 的 1 像素宽圆环标记，s > 1 时
   方差加 (s² − 1)/12、幅值按 σ/σ' 缩小（像素面积平均的高斯近似）。
 - 背景纹理（网格线、棋盘、静态噪声块）和遮挡块是分段常数：按输出像素的面积平均（可分离的盒式滤波，精确）。
-  网格线 1 个画布像素宽，s > 1 时点采样会整条漏掉，所以必须面积平均。
+  网格线 1 个画布像素宽，s > 1 时点采样会整条漏掉，所以必须面积平均。纹理只在足迹与画布的交集上平均（跨画布边的
+  像素：画布内那部分的纹理均值，再由 canvas_mask 按画布覆盖比例混 SURROUND，合起来就是整个足迹的面积平均；
+  Codex 复审 S24c：原来按周期延拓平均，画布外的纹理混进了边界像素）。多个遮挡块按它们的并集的覆盖比例混合一次
+  （容斥，occluder_cover；原来逐块混色，重叠处偏深）。
 - 场（advection_diffusion 的 256 格浓度、gray_scott 的 128 格 U/V、wave 的 128 格位移）在格点中心之间周期双线性插值，
   再按原来的颜色映射上色。
 - 画布外：整块画布画完后按像素面积和 SURROUND 色混合（canvas_mask）。SURROUND 比所有背景都暗，画布的边在画面里
@@ -93,6 +96,23 @@ def _box(F, x, s):
     return (F(x+s/2)-F(x-s/2))/s
 
 
+def _clipped(x, s):
+    """足迹 [x − s/2, x + s/2] 与画布 [0, 256] 的交集 → (lo, hi, 长度)。整个足迹在画布里时长度就是 s（逐位与不裁剪相同）；
+    这一轴上完全在画布外（交集为空）时取原足迹（值随便，canvas_mask 会整个盖成 SURROUND）。"""
+    lo, hi = x-s/2, x+s/2
+    inside = (lo >= 0.) & (hi <= CANVAS)
+    a, b = np.maximum(lo, 0.), np.minimum(hi, float(CANVAS))
+    empty = b <= a
+    a = np.where(inside | empty, lo, a); b = np.where(inside | empty, hi, b)
+    return a, b, np.where(inside | empty, s, b-a)
+
+
+def _clipped_box(F, x, s):
+    """1 维盒式滤波，只在足迹与画布的交集上平均：(F(b) − F(a))/(b − a)。"""
+    a, b, n = _clipped(x, s)
+    return (F(b)-F(a))/n
+
+
 def interval_cover(x, s, a, b) -> np.ndarray:
     """足迹 [x − s/2, x + s/2] 落在 [a, b) 里的比例。整个足迹都在里面时精确取 1（不受 (min − max)/s 的舍入影响，
     canvas_mask 和遮挡块靠 cover == 1 判断“完全盖住”）。"""
@@ -113,8 +133,8 @@ def _checker_integral(x):
 
 
 def _cell_weights(x, s, cell, count):
-    """[len(x), count]：足迹落在第 m 个格子 [cell·m, cell·(m+1))（m 按 count 周期回绕）里的比例。"""
-    lo, hi = x-s/2, x+s/2
+    """[len(x), count]：足迹与画布的交集落在第 m 个格子 [cell·m, cell·(m+1))（m 按 count 周期回绕）里的比例。"""
+    lo, hi, s = _clipped(x, s)
     m0 = np.floor(lo/cell).astype(np.int64); m1 = np.floor(hi/cell).astype(np.int64)
     W = np.zeros((len(x), count))
     rows = np.arange(len(x))
@@ -126,17 +146,18 @@ def _cell_weights(x, s, cell, count):
 
 
 def texture(kind: str, view: View) -> np.ndarray:
-    """systems._texture 的四种背景在视野上的面积平均 [R,R,3]（画布外按周期延拓，最后由 canvas_mask 盖成 SURROUND）。"""
+    """systems._texture 的四种背景在视野上的面积平均 [R,R,3]：每个输出像素只在足迹与画布的交集上平均（跨画布边的像素
+    再由 canvas_mask 按覆盖比例混 SURROUND；完全在画布外的像素值无意义，会被整个盖掉）。"""
     r, c, s = view.rows(), view.cols(), view.scale
     bg = systems.BACKGROUND
     if kind == "grid":
-        lr, lc = _box(_line_integral, r, s), _box(_line_integral, c, s)
+        lr, lc = _clipped_box(_line_integral, r, s), _clipped_box(_line_integral, c, s)
         on = 1.-(1.-lr)[:, None]*(1.-lc)[None, :]
         return bg+(systems.GRID-bg)*on[..., None]
     if kind == "plain":
         return np.broadcast_to(bg, (view.size, view.size, 3)).astype(np.float64)
     if kind == "checker":
-        sr, sc = _box(_checker_integral, r, s), _box(_checker_integral, c, s)
+        sr, sc = _clipped_box(_checker_integral, r, s), _clipped_box(_checker_integral, c, s)
         odd = (1.-sr[:, None]*sc[None, :])/2
         return bg+14.*odd[..., None]
     if kind == "noise":
@@ -150,6 +171,26 @@ def square_cover(view: View, top: float, left: float, side: float) -> np.ndarray
     """[R,R]：每个输出像素被画布上的正方形 [top, top+side) × [left, left+side) 盖住的面积比例。"""
     s = view.scale
     return interval_cover(view.rows(), s, top, top+side)[:, None]*interval_cover(view.cols(), s, left, left+side)[None, :]
+
+
+def occluder_cover(view: View, corners, side: float) -> np.ndarray:
+    """[R,R]：每个输出像素被几个同色正方形（左上角 corners [K,2]（行、列），边长 side）的并集盖住的面积比例。
+    轴对齐矩形的交集还是矩形，按容斥原理精确求并集面积；有一块整个盖住时精确取 1（与 interval_cover 同一约定）。"""
+    from itertools import combinations
+    corners = [(float(r), float(c)) for r, c in corners]
+    s = view.scale; rows, cols = view.rows(), view.cols()
+    total = np.zeros((view.size, view.size)); full = np.zeros((view.size, view.size), dtype=bool)
+    for k in range(1, len(corners)+1):
+        for subset in combinations(corners, k):
+            top = max(r for r, _ in subset); bottom = min(r for r, _ in subset)+side
+            left = max(c for _, c in subset); right = min(c for _, c in subset)+side
+            if bottom <= top or right <= left:
+                continue
+            part = interval_cover(rows, s, top, bottom)[:, None]*interval_cover(cols, s, left, right)[None, :]
+            if k == 1:
+                full |= part == 1.
+            total = total+(part if k % 2 else -part)
+    return np.where(full, 1., np.clip(total, 0., 1.))
 
 
 def canvas_mask(image: np.ndarray, view: View) -> np.ndarray:

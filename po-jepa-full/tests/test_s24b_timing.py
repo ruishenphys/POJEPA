@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from scipy.linalg import expm
 
-from po_jepa import datasets, simulation, systems, timing, variants
+from po_jepa import datasets, new_systems, simulation, systems, timing, variants
 from po_jepa.variants import Variant
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -250,6 +250,27 @@ def test_partial_step_is_continuous_with_the_substep_grid(use, system):
     for a, b in ((0, 3), (1, 4), (2, 5)):
         d = np.abs(flat[a]-flat[b]).max()
         assert 0. < d < 1e-4, (a, d)
+
+
+def test_gray_scott_off_grid_short_step_uses_the_actual_duration(use):
+    """Codex 复审 S24b：连续性测试放得过错误的时间缩放（如 dt′ = DT·r²，在 r→0、r→1 处仍连续）。这里取离网格比例
+    r = 0.3：从子步网格点 t0 出发走 0.3 个子步得到的状态，必须等于用 dt′ = 0.5·0.3 = 0.15 时间单位独立做一整步 Strang
+    分裂（new_systems.GrayScott._run，units = dt = 0.15，只走一步）的结果。"""
+    use("gray_scott", "fps=8")
+    tid = 6
+    v = datasets.active().knobs
+    sc = timing._scene(systems.get(), tid, v, 32)
+    impl = sc.impl
+    assert impl.DT == .5 and impl.UNITS_PER_TICK == 20. and sc.S == 40
+    u4 = u4_of(tid)
+    t0 = 1+2/40; t1 = 1+2.3/40
+    (U0, V0, p0), (U1, V1, p1) = timing.simulate(sc, u4, [t0, t1])
+    velocity = impl.SPEED*u4[4]*.25/20.                       # tick 1 的执行动作（fps=8、无 switch_offset：四个 1/4 tick 相同）
+    assert np.array_equal(u4[4], u4[5])
+    F, kk, a = (new_systems.param("gray_scott", dict(v.params), n) for n in ("feed", "kill", "inject"))
+    Ur, Vr, pr = impl._run(U0, V0, p0, velocity, .15, .15, F, kk, a)
+    assert np.abs(U1-Ur).max() < 1e-12 and np.abs(V1-Vr).max() < 1e-12 and np.abs(p1-pr).max() < 1e-12
+    assert np.abs(U1-U0).max() > 1e-6                           # 确实走了一段（不是原地）
 
 
 @pytest.mark.parametrize("system", ALL)
