@@ -46,7 +46,8 @@ def expected(name: str, train_shards: int, seeds: list[int]) -> dict[str, tuple[
     for s in shards:
         jobs[f"download/{s}"] = (["index"], f"{DATA}/raw/{s}/_complete/{name}.json", "download")
         jobs[f"prepare/{s}"] = ([f"download/{s}"], f"{DATA}/prepared/{s}/_complete/{name}.json", "prepare")
-        jobs[f"encode/{s}"] = ([f"prepare/{s}"], f"{DATA}/features/{s}/_complete/{name}.json", "encode")
+        cleanup = "_raw_deleted" if s.startswith("train-") else "_complete"   # 训练片删完原始文件才算完成（S14-fix1）
+        jobs[f"encode/{s}"] = ([f"prepare/{s}"], f"{DATA}/features/{s}/{cleanup}/{name}.json", "encode")
     jobs["prepare/stats"] = ([f"prepare/{s}" for s in shards], f"{DATA}/prepared/_complete/stats-{name}.json", "stats")
     jobs["encode/test-extra"] = (["prepare/id_test", "prepare/ood_test"],
                                  f"{DATA}/features/test_extra/_complete/{name}.json", "encode")
@@ -222,6 +223,8 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
                         "prepare": (tmp_path/"data/prepared/_complete/stats-pilot.json" if job == "stats"
                                     else tmp_path/f"data/prepared/{job}/_complete/pilot.json"),
                         "encode": (tmp_path/"data/features/test_extra/_complete/pilot.json" if job == "test-extra"
+                                   else tmp_path/f"data/features/{job}/_raw_deleted/pilot.json"
+                                   if (job or "").startswith("train-")
                                    else tmp_path/f"data/features/{job}/_complete/pilot.json")}[stage]
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("{}")
@@ -342,7 +345,7 @@ def test_runner_skips_done_requeues_75_and_logs(tmp_path, capsys):
     assert started(tmp_path) == ["b", "b", "b", "c"]                 # a 已完成，b 重排两次
     log = (tmp_path/"runs/fake/logs/b.log").read_text()
     assert log.count("start (attempt") == 3 and log.count("exit 75") == 2 and log.count("attempt 3 action 0") == 1
-    assert not (tmp_path/"runs/fake/logs/RUNNER.pid").exists()
+    assert (tmp_path/"runs/fake/logs/RUNNER.pid").read_text() == ""        # 锁文件留着，退出时清空、锁随描述符释放
     out = capsys.readouterr().out
     assert "重排第 2 次" in out
     capsys.readouterr()
@@ -464,3 +467,73 @@ def test_entry_as_a_script(tmp_path):
     flag.write_text("{}")
     r = run("summary", "summary")
     assert r.returncode == 0 and "already complete" in r.stdout
+
+
+# ---------------------------------------------------------------- 运行器锁（S14-fix1，Codex S14-P2-1）
+
+LOCK_WORKER = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import droid_run
+lock, go, hold = Path(sys.argv[2]), Path(sys.argv[3]), float(sys.argv[4])
+while not go.exists():           # 所有进程都已启动、都在等；同时放行，尽量撞在一起
+    time.sleep(0.001)
+try:
+    fd = droid_run._acquire(lock)
+except SystemExit as e:
+    print("refused", e, flush=True)
+    sys.exit(3)
+print("acquired", flush=True)
+time.sleep(hold)                 # 持锁期间其他进程都该被拒
+droid_run._release(fd)
+"""
+
+
+def _lock_workers(tmp_path, n, hold):
+    script = tmp_path/"lock_worker.py"
+    script.write_text(LOCK_WORKER)
+    lock, go = tmp_path/"runs/fake/logs/RUNNER.pid", tmp_path/"go"
+    procs = [subprocess.Popen([sys.executable, str(script), str(ROOT/"tools"), str(lock), str(go), str(hold)],
+                              stdout=subprocess.PIPE, text=True) for _ in range(n)]
+    time.sleep(1.0)
+    go.write_text("")
+    outs = [p.communicate(timeout=60)[0] for p in procs]
+    return [p.returncode for p in procs], outs, lock
+
+
+def test_runner_lock_is_exclusive_across_processes(tmp_path):
+    codes, outs, lock = _lock_workers(tmp_path, 8, 2.0)
+    assert sorted(codes) == [0] + [3]*7, outs              # 同时抢：恰好一个取得
+    assert sum("acquired" in o for o in outs) == 1
+    assert all("另一个 droid_run.py 正在用" in o for o, c in zip(outs, codes) if c == 3)
+    assert lock.read_text() == ""
+    codes, _, _ = _lock_workers(tmp_path, 1, 0.0)
+    assert codes == [0]                                     # 释放后能再取
+
+
+def test_runner_lock_survives_a_killed_holder_and_names_it(tmp_path):
+    lock = tmp_path/"runs/fake/logs/RUNNER.pid"
+    holder = subprocess.Popen([sys.executable, "-c", f"""
+import sys, time
+sys.path.insert(0, {str(ROOT/'tools')!r})
+import droid_run
+from pathlib import Path
+droid_run._acquire(Path({str(lock)!r}))
+print("held", flush=True)
+time.sleep(60)
+"""], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        with pytest.raises(SystemExit, match=f"进程 {holder.pid}"):
+            droid_run._acquire(lock)
+        path = fake_graph(tmp_path, [("a", [], 0, 1, 1, 0)])
+        with pytest.raises(SystemExit, match="另一个 droid_run.py"):      # 整个运行器也被拒，什么都不跑
+            runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1")
+        assert started(tmp_path) == []
+    finally:
+        holder.kill()
+        holder.wait()
+    fd = droid_run._acquire(lock)                            # 持锁进程被杀：内核释放，没有陈旧锁
+    assert lock.read_text() == str(os.getpid())
+    droid_run._release(fd)

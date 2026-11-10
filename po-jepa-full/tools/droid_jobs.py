@@ -106,6 +106,8 @@ def complete_path(job_id: str, config: DroidConfig, data_root: Path | str, run_r
         return pp.complete_path(data_root, rest, config)
     if job_id == f"encode/{TEST_EXTRA}":
         return ft.extra_complete_path(data_root, config)
+    if stage == "encode" and is_train_shard(rest):   # 带 --delete-raw：删完原始文件才算完成（S14-fix1）
+        return ft.raw_cleanup_path(data_root, rest, config)
     if stage == "encode":
         return ft.complete_path(data_root, rest, config)
     if job_id == "calibrate/sigma-z":

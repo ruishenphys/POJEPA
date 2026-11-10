@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import sys
 import types
 from pathlib import Path
 
@@ -521,3 +522,51 @@ def test_command_line_with_fake_encoder(raw, mp4_bytes, tmp_path, monkeypatch, c
     assert en.main(["--config", "x.yaml", "--data-root", str(tmp_path), "--shard", "val", "--fake-encoder"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["shard"] == "val" and out["statuses"] == {"encoded": 2, "current": 0}
+
+
+def test_interrupted_raw_cleanup_is_finished_by_rerunning_the_job(raw, mp4_bytes, tmp_path, monkeypatch, capsys):
+    """S14-fix1（Codex S14-P2-2）：特征完成记录写了、删原始文件删到一半中断，统一入口和运行器都不能当它已完成。"""
+    sys.path.insert(0, str(ROOT/"tools"))
+    import droid  # noqa: E402
+    import droid_jobs  # noqa: E402
+    cfg, episodes, plan = setup(raw, tmp_path, mp4_bytes)
+    monkeypatch.setattr(droid, "load_config", lambda path: cfg)
+    monkeypatch.setattr(en, "load_config", lambda path: cfg)
+    shard = "train-000"
+    runs = tmp_path/"runs"
+    argv = ["encode", "--config", "x.yaml", "--data-root", str(tmp_path), "--run-root", str(runs),
+            "--job", f"encode/{shard}", "--delete-raw", "--fake-encoder"]
+    job = droid_jobs.find_job(droid_jobs.build_graph(cfg, "x.yaml", str(tmp_path), str(runs)), f"encode/{shard}")
+    flag = ft.raw_cleanup_path(tmp_path, shard, cfg)
+    assert Path(job["complete"]) == flag and flag.parent.name == "_raw_deleted"
+    val = droid_jobs.find_job(droid_jobs.build_graph(cfg, "x.yaml", str(tmp_path), str(runs)), "encode/val")
+    assert Path(val["complete"]) == ft.complete_path(tmp_path, "val", cfg)      # 不删原始文件的片不变
+
+    real_unlink, calls = Path.unlink, []
+
+    def crash_on_second_raw_file(self, missing_ok=False):
+        if self.parent.parent.name == shard and self.name != dl.RAW_DELETED_FILE and self.suffix in (".h5", ".mp4"):
+            calls.append(self)
+            if len(calls) == 2:
+                raise OSError("simulated crash while deleting raw files")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", crash_on_second_raw_file)
+    with pytest.raises(OSError, match="simulated crash"):
+        droid.main(argv)
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert ft.complete_path(tmp_path, shard, cfg).is_file()                 # 特征编完的证据在
+    assert not flag.exists()                                                  # 任务没完成
+    left = [f for u in plan[shard] for f in _raw_files(tmp_path, shard, u, episodes) if f.exists()]
+    assert left
+    capsys.readouterr()
+    assert droid.main(argv) == 0                                              # 同一条命令重跑：进入编码阶段、删完
+    assert "already complete" not in capsys.readouterr().out
+    result = json.loads(flag.read_text(encoding="utf-8"))
+    manifest = ft.verify_shard(tmp_path, shard, cfg)
+    assert result["schema"] == "droid_raw_cleanup_complete_v1" and result["shard"] == shard
+    assert result["encode_complete_sha256"] == cache.file_sha(ft.complete_path(tmp_path, shard, cfg))
+    assert result["episodes_raw_deleted"] == len(manifest["episodes"])
+    for entry in manifest["episodes"]:
+        assert not any(f.exists() for f in _raw_files(tmp_path, shard, entry["uuid"], episodes))
+    assert droid.main(argv) == 0 and "already complete" in capsys.readouterr().out

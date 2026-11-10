@@ -30,11 +30,13 @@ from po_jepa.runtime import cache
 
 FEATURES_DIR = "features"
 COMPLETE_DIR = "_complete"
+RAW_CLEANUP_DIR = "_raw_deleted"        # 训练片 `encode/<片> --delete-raw` 的完成标志（S14-fix1）
 MANIFEST_PREFIX = "MANIFEST."
 TEMP_SUFFIX = ".tmp"                    # 05 §2 第 3 条：先写 .tmp 再改名
 FEATURE_SCHEMA = "droid_features_v1"
 MANIFEST_SCHEMA = "droid_feature_manifest_v1"
 COMPLETE_SCHEMA = "droid_encode_complete_v1"
+RAW_CLEANUP_SCHEMA = "droid_raw_cleanup_complete_v1"
 STORAGE_DTYPE = "float16"
 FLOAT16_MAX = 65504.0                   # 05 §2 第 3 条：转之前最大绝对值必须 < 65504
 TOKENS = 256                            # 16×16 网格
@@ -63,6 +65,12 @@ def manifest_path(data_root: Path | str, shard: str, config: DroidConfig) -> Pat
 
 def complete_path(data_root: Path | str, shard: str, config: DroidConfig) -> Path:
     return features_dir(data_root)/shard/COMPLETE_DIR/f"{config.name}.json"
+
+
+def raw_cleanup_path(data_root: Path | str, shard: str, config: DroidConfig) -> Path:
+    """训练片编码任务（带 `--delete-raw`）的完成标志：`features/<片>/_raw_deleted/<name>.json`。由
+    `encode.delete_raw_files` 在整片原始文件都删完之后才写（S14-fix1）；`complete_path` 只说明特征编完，不说明删完。"""
+    return features_dir(data_root)/shard/RAW_CLEANUP_DIR/f"{config.name}.json"
 
 
 # ---------------------------------------------------------------- 数组

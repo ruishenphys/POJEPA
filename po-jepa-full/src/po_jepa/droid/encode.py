@@ -389,7 +389,8 @@ def delete_raw_files(config: DroidConfig, data_root: Path | str, shard: str) -> 
     """03 §4：先把清单重新读一遍核对（`features.verify_shard`：每条特征 JSON 的 SHA、`.npy` 整个文件的 SHA、每行 SHA），
     通过后对每条编过的回合先写 `RAW_DELETED.json`（删除时间、特征 JSON 的 SHA、删的文件），再删 h5 和 MP4；
     保留 `metadata.json` 和 `DOWNLOADED.json`。准备没通过、没编的回合不删（S06 定：留着查原因，每片约 1%）。
-    只对训练片。"""
+    只对训练片。全部删完后写 `features.raw_cleanup_path`（S14-fix1：特征的完成记录先于删除写出，所以统一入口和
+    运行器对训练片编码任务看的是这个标志，删到一半中断后重跑同一条命令会把剩下的删掉）。"""
     if not shard.startswith(sp.SHARD_PREFIX):
         raise ValueError(f"--delete-raw is only for training shards; {shard} keeps its raw files (03 §4)")
     manifest = ft.verify_shard(data_root, shard, config)
@@ -410,7 +411,17 @@ def delete_raw_files(config: DroidConfig, data_root: Path | str, shard: str) -> 
             deleted += 1
         for name in files:                       # 标记写好之后再删（中断后重跑会把剩下的删掉）
             (directory/name).unlink(missing_ok=True)
-    return {"deleted": deleted, "already_deleted": already, "kept": [s["uuid"] for s in manifest["skipped"]]}
+    result = {"deleted": deleted, "already_deleted": already, "kept": [s["uuid"] for s in manifest["skipped"]]}
+    flag = ft.raw_cleanup_path(data_root, shard, config)   # 整片删完才写：任务图里训练片编码任务看的是这个标志
+    if not flag.exists():
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.with_name(flag.name + ".partial").unlink(missing_ok=True)
+        cache._write_json(flag, {"schema": ft.RAW_CLEANUP_SCHEMA, "shard": shard, "config": config.name,
+                                 "config_sha256": config.config_sha256,
+                                 "encode_complete_sha256": cache.file_sha(ft.complete_path(data_root, shard, config)),
+                                 "manifest_sha256": cache.file_sha(ft.manifest_path(data_root, shard, config)),
+                                 "episodes_raw_deleted": len(manifest["episodes"]), "kept": result["kept"]})
+    return result
 
 
 # ---------------------------------------------------------------- 05 §7 真实编码器核对（GPU 机器上）

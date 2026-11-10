@@ -11,7 +11,8 @@
 - 本机没有时长上限：训练任务带着配置里的 --time-limit-minutes，到点存档退出 75 再被重排，和集群上的行为一致。
 - 断电或 Ctrl-C 后重新运行同一条命令即可：完成的跳过，没完成的从断点接着做（各任务自己续跑，12 §3）。Ctrl-C 时
   把 SIGINT 转给正在跑的任务，等它们退出（最多 --grace-seconds 秒，之后强制结束），退出 130。
-- 日志：`<run_root>/<config>/logs/<任务编号的 / 换成 __>.log`，重排和重跑时追加。同一个日志目录同时只能有一个运行器。
+- 日志：`<run_root>/<config>/logs/<任务编号的 / 换成 __>.log`，重排和重跑时追加。同一个日志目录同时只能有一个运行器
+  （`logs/RUNNER.pid` 上的 flock 排他锁，运行期间一直持有；只支持 Linux/macOS）。
 - 命令在 --workdir（默认本文件所在的 po-jepa-full/）下运行；命令的第一个词是 `python` 时换成运行本脚本的解释器。
 - --dry-run 只打印将要运行的顺序（假定每个任务都成功、一次跑一个），不写任何文件。
 
@@ -20,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -115,16 +117,26 @@ def dry_run(graph: dict, workdir: Path) -> int:
     return 0
 
 
-def _acquire(lock: Path) -> None:
+def _acquire(lock: Path) -> int:
+    """取运行器锁：`flock` 排他锁，从取得到运行器退出一直持有（S14-fix1：原先先看文件在不在再写 PID，两个运行器
+    可以同时取得）。锁跟着打开的文件描述符走，进程不管怎么退出（包括被杀）内核都会释放，没有陈旧锁要处理；锁文件
+    不删（删了别的进程可能锁在已删的旧文件上）。文件内容只是当前持锁进程的 PID，给人看。返回描述符，`_release` 关。"""
     lock.parent.mkdir(parents=True, exist_ok=True)
-    if lock.exists():
-        try:
-            pid = int(lock.read_text())
-            os.kill(pid, 0)
-            raise SystemExit(f"另一个 droid_run.py 正在用 {lock.parent}（进程 {pid}）")
-        except (ProcessLookupError, ValueError):
-            pass
-    lock.write_text(str(os.getpid()))
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = os.pread(fd, 64, 0).decode(errors="replace").strip() or "?"
+        os.close(fd)
+        raise SystemExit(f"另一个 droid_run.py 正在用 {lock.parent}（进程 {holder}）") from None
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, str(os.getpid()).encode(), 0)
+    return fd
+
+
+def _release(fd: int) -> None:
+    os.ftruncate(fd, 0)
+    os.close(fd)
 
 
 def run(graph: dict, workdir: Path, gpus: list[str], cpus: int, mem_gb: float, *, poll: float = 1.0,
@@ -262,13 +274,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.dry_run:
         return dry_run(graph, workdir)
     lock = workdir/graph["run_root"]/graph["config"]/"logs"/LOCK
-    _acquire(lock)
+    fd = _acquire(lock)
     try:
         return run(graph, workdir, gpus, a.cpus, a.mem_gb, poll=a.poll_seconds, max_requeues=a.max_requeues,
                    grace=a.grace_seconds)
     finally:
-        if lock.exists() and lock.read_text() == str(os.getpid()):
-            lock.unlink()
+        _release(fd)
 
 
 if __name__ == "__main__":

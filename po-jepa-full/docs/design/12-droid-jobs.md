@@ -23,7 +23,7 @@
 | 下载 | `download/<片>` | 4 / 23 | `index` | `raw/<片>/_complete/<name>.json` |
 | 准备 | `prepare/<片>` | 4 / 23 | `download/<片>` | `prepared/<片>/_complete/<name>.json` |
 | 统计 | `prepare/stats` | 1 / 1 | 全部 `prepare/<片>` | `prepared/_complete/stats-<name>.json` |
-| 编码 | `encode/<片>` | 4 / 23 | `prepare/<片>` | `features/<片>/_complete/<name>.json` |
+| 编码 | `encode/<片>` | 4 / 23 | `prepare/<片>` | 训练片 `features/<片>/_raw_deleted/<name>.json`（原始文件删完才写，S14-fix1）；`val`、`id_test`、`ood_test` 是 `features/<片>/_complete/<name>.json` |
 | 测试附加 | `encode/test-extra` | 1 / 1 | `prepare/id_test`、`prepare/ood_test` | `features/test_extra/_complete/<name>.json` |
 | σ_z | `calibrate/sigma-z` | 1 / 1 | `prepare/stats`、全部 `encode/<片>` | `<name>/calibration/sigma_z.json` |
 | 环境检查 | `check/env` | 1 / 1 | `calibrate/sigma-z` | `<name>/check/env.json` |
@@ -93,7 +93,7 @@ S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推�
 - 本机没有时长上限，训练任务传配置里的上限，到点同样会存档退出 75 再被重排，所以本机和集群上的行为一致。
 - 断电或 Ctrl-C 后重新运行同一条命令即可：完成的跳过，没完成的从断点接着做。
 - `--dry-run` 只打印将要运行的顺序。
-- S14 补注：排在前面的任务资源不够时，后面放得下的先跑；CPU 任务的 `CUDA_VISIBLE_DEVICES` 为空；命令的 `python` 换成运行器自己的解释器；每个任务最多重排 `--max-requeues`（默认 100）次；退出 0 但没写完成标志、要的资源超过本机总量都算失败；同一运行根同时只能有一个运行器（`logs/RUNNER.pid`）；Ctrl-C 时把 SIGINT 转给正在跑的任务，等 `--grace-seconds`（默认 60）秒后强制结束，退出 130。
+- S14 补注：排在前面的任务资源不够时，后面放得下的先跑；CPU 任务的 `CUDA_VISIBLE_DEVICES` 为空；命令的 `python` 换成运行器自己的解释器；每个任务最多重排 `--max-requeues`（默认 100）次；退出 0 但没写完成标志、要的资源超过本机总量都算失败；同一运行根同时只能有一个运行器（`logs/RUNNER.pid` 上的 flock 排他锁，运行期间一直持有，进程退出或被杀时内核释放；锁文件不删，内容是持锁进程的 PID，S14-fix1）；Ctrl-C 时把 SIGINT 转给正在跑的任务，等 `--grace-seconds`（默认 60）秒后强制结束，退出 130。
 
 这和 v7 的 `run_jobs.py` 是同一种用法，只是按依赖调度而不是按段。
 
