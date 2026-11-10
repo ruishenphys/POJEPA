@@ -26,7 +26,7 @@ from . import calibration
 from po_jepa.fourier import build_fixed_fourier
 from po_jepa.losses import LossConfig
 
-IMPORT_RECORD = "IMPORTED.json"
+IMPORT_RECORD = check.IMPORT_RECORD
 # 和 tools/import_v7_calibration.py 的 V7_COMMITS 相同（测试核对）：只接受 token 写法 0ac45fe 导入的 v7 标定
 V7_COMMIT = "0ac45fe03bf43b96bf861446b8aa2ada4f4a8987"
 

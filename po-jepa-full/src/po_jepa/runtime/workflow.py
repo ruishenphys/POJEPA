@@ -346,6 +346,11 @@ def calibrate_weights(features,output,device):
     训练 pretrain_updates 步，越过初始化瞬态后，再在紧接着的 batches 个训练 batch 上量梯度。
     初始化状态的数值也一并记录，便于对照。不写 checkpoint；结果写 calibration.json 并自动写入 v4.yaml。
     """
+    if checks.is_v7():   # S26a-fix1：不覆写导入的 v7 标定（覆写后本目录的 v7 补跑会用上重算的值）
+        path=checks.v7_calibration_path();record=path.parent/checks.IMPORT_RECORD
+        if path.exists() and record.exists() and path.name in read(record).get('files',{}):
+            raise ValueError(f'{path.name} 是从 v7 导入的（{checks.IMPORT_RECORD} 有记录）：本目录不能重新 calibrate 覆写它；'
+                             'v8 的标定请在另一份工作树里跑')
     output.mkdir(parents=True,exist_ok=False)
     if checks.is_v7():
         sigma=calibrate_sigma_z(features,checks.load_protocol())

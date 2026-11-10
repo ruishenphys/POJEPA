@@ -1,4 +1,5 @@
-"""S06a：`compute_new_pose`（docs/design/09-droid-training.md §6.2；验收 14 §3 S06）和官方函数逐位相同。"""
+"""S06a：`compute_new_pose`（docs/design/09-droid-training.md §6.2；验收 14 §3 S06）和官方函数逐位相同（同一环境执行上游原函数），
+和存档金标准在跨平台容差内相同（S06a-fix1）。"""
 
 import ast
 import hashlib
@@ -37,15 +38,35 @@ def test_compute_new_pose_is_verbatim_upstream():
     assert ast.dump(ours.args) == ast.dump(upstream.args)
 
 
+def _upstream_compute_new_pose():
+    """从上游副本里取出 compute_new_pose 原函数（AST 原样编译执行，不导入上游的 tqdm/logging 依赖）。"""
+    from scipy.spatial.transform import Rotation
+    fn = _function(ast.parse(OFFICIAL.read_text(encoding="utf-8")), "compute_new_pose")
+    namespace = dict(np=np, torch=torch, Rotation=Rotation)
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(OFFICIAL), "exec"), namespace)
+    return namespace["compute_new_pose"]
+
+
+# 存档金标准（docs/design/droid-golden，在生成它的平台上算出）的跨平台容差（S06a-fix1，Codex S06a-P3-1）：
+# scipy 的欧拉角↔矩阵在不同 CPU/数学库上末位可以不同（macOS ARM64 实测最大 4.44e-16），逐位相同只在同一环境里要求，
+# 由上面执行上游原函数来核。1e-12 与 README 里“积分回到下一真实状态差小于 1e-12”同一量级，远小于任何物理意义的位姿差。
+GOLDEN_ATOL = 1e-12
+
+
 @pytest.mark.parametrize("k", range(5))
-def test_compute_new_pose_matches_golden_bit_for_bit(k):
+def test_compute_new_pose_matches_upstream_and_golden(k):
     ep = json.loads((GOLDEN/"droid_samples_golden.json").read_text(encoding="utf-8"))["episodes"][k]
     st = np.asarray(ep["stride15_states"], dtype=np.float64)
     acts = np.asarray(ep["official_actions"], dtype=np.float64)
-    out = poses.compute_new_pose(torch.from_numpy(st[:-1, None]), torch.from_numpy(acts[:, None]))
+    pose_in, act_in = torch.from_numpy(st[:-1, None]), torch.from_numpy(acts[:, None])
+    out = poses.compute_new_pose(pose_in, act_in)
     assert out.dtype == torch.float64 and tuple(out.shape) == (len(st) - 1, 1, 7)
+    # 同一环境里和上游原函数逐位相同
+    assert out.numpy().tobytes() == _upstream_compute_new_pose()(pose_in.clone(), act_in.clone()).numpy().tobytes()
+    # 和存档金标准在容差内相同（跨平台）
     want = np.asarray(ep["official_new_pose"], dtype=np.float64)
-    assert out[:, 0].numpy().tobytes() == want.tobytes()
+    assert want.shape == out[:, 0].shape
+    assert np.abs(out[:, 0].numpy() - want).max() < GOLDEN_ATOL
     # 积分回到下一个真实状态（官方参照的性质，README：差小于 1e-12）
     assert np.abs(out[:, 0].numpy() - st[1:]).max() < 1e-12
 

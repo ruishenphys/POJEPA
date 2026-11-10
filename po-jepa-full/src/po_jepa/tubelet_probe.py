@@ -286,24 +286,20 @@ def readout(z: torch.Tensor, kind: str) -> torch.Tensor:
 
 def gram(z: torch.Tensor, kind: str, *, device="cpu", chunk=32768) -> np.ndarray:
     """读出特征的核 K = XXᵀ [n,n] float64。先减去全体样本的均值（只为数值条件；之后按每折的训练集均值精确中心化，
-    任何常数平移都不改变中心化后的核）。full 按特征维分块，每块 float32 乘、float64 累加；fp32 matmul 用 highest 精度。"""
+    任何常数平移都不改变中心化后的核）。full 按特征维分块，每块 float64 乘、float64 累加（S22-fix2：Codex 审出 float32 块乘在
+    病态核、最小 λ 下预测差 1.7e−2、分折 R² 差 3e−3，超过精度验收；200 条规模两个 full 核在 GPU 上 float64 约 3.3e13 次浮点运算）。"""
     n = z.shape[0]
-    before = torch.get_float32_matmul_precision()
-    torch.set_float32_matmul_precision("highest")
-    try:
-        if kind != "full":
-            x = torch.cat([readout(z[s:s+512], kind) for s in range(0, n, 512)]).double()
-            x = (x-x.mean(0)).to(device)
-            return (x@x.T).cpu().numpy()
-        flat = z.reshape(n, -1)
-        k = torch.zeros(n, n, dtype=torch.float64, device=device)
-        for s in range(0, flat.shape[1], chunk):
-            x = flat[:, s:s+chunk].to(device).double()
-            x = (x-x.mean(0)).float()
-            k += (x@x.T).double()
-        return k.cpu().numpy()
-    finally:
-        torch.set_float32_matmul_precision(before)
+    if kind != "full":
+        x = torch.cat([readout(z[s:s+512], kind) for s in range(0, n, 512)]).double()
+        x = (x-x.mean(0)).to(device)
+        return (x@x.T).cpu().numpy()
+    flat = z.reshape(n, -1)
+    k = torch.zeros(n, n, dtype=torch.float64, device=device)
+    for s in range(0, flat.shape[1], chunk):
+        x = flat[:, s:s+chunk].to(device).double()
+        x = x-x.mean(0)
+        k += x@x.T
+    return k.cpu().numpy()
 
 
 def concat_gram(k_dup: np.ndarray, n_traj: int) -> np.ndarray:

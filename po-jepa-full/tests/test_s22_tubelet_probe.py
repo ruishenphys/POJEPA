@@ -271,8 +271,10 @@ def test_gram_concat_and_centering_exact():
 
 
 def test_full_gram_precision_at_r2_level():
-    """强相关特征（大的共同偏移 + 低秩信号 + 小噪声，float16 存储）：full 读出分块 fp32 乘、float64 累加的核，
-    与 float64 参考核在最小 λ 的预测和 5 折 R² 上一致。"""
+    """强相关特征（大的共同偏移 + 低秩信号 + 小噪声，float16 存储）：full 读出分块 float64 乘、float64 累加的核，
+    与 float64 参考核在核本身、最小 λ 的预测和 5 折 R² 上一致。S22-fix2（Codex S22-P2-1）：原 fp32 块乘在 macOS ARM64 上
+    预测差 1.7e−2、R² 差 3e−3；在 Linux x86 上是核 4e−8、预测 1.8e−4、R² 2.8e−5，也过不了下面收紧后的阈值（float64 实测约
+    核 4e−16、预测 4e−12、R² 1e−12）。"""
     g = torch.Generator().manual_seed(4)
     n_traj, per = 5, 17
     n = n_traj*per
@@ -283,6 +285,7 @@ def test_full_gram_precision_at_r2_level():
     x = z.reshape(n, -1).double(); xc = x-x.mean(0)
     ref = (xc@xc.T).numpy()
     k = tp.gram(z, "full")
+    assert k.dtype == np.float64 and np.abs(k-ref).max() < 1e-12*np.abs(ref).max()
     y = np.stack((factors[:, 0].numpy(), (factors[:, 1]+.5*factors[:, 2]).numpy(), np.random.default_rng(0).normal(size=n)), -1)
     traj = np.repeat(np.arange(n_traj), per)
     fit, rows = np.flatnonzero(traj != 0), np.flatnonzero(traj == 0)
@@ -291,10 +294,11 @@ def test_full_gram_precision_at_r2_level():
     m_ref, m = tp._ridge_fit(ref, y, fit), tp._ridge_fit(k, y, fit)
     lam = m_ref[4]*10.**min(tp.LAMBDA_EXPONENTS)
     p_ref, p = tp._ridge_predict(ref, fit, rows, m_ref, lam), tp._ridge_predict(k, fit, rows, m, lam)
-    assert np.abs(p-p_ref).max() < 1e-3*np.abs(p_ref).max()
+    assert np.abs(p-p_ref).max() < 1e-8*np.abs(p_ref).max()
     a, b = tp.ridge_cv(k, y, traj), tp.ridge_cv(ref, y, traj)
     assert a["r2_mean"][0] > .99 and a["r2_mean"][1] > .99
-    assert np.allclose(a["r2_per_fold"], b["r2_per_fold"], atol=1e-4)
+    assert np.allclose(a["r2_per_fold"], b["r2_per_fold"], rtol=0, atol=1e-8)
+    assert a["lambda_exponent"] == b["lambda_exponent"]
 
 
 def test_dual_ridge_equals_primal():

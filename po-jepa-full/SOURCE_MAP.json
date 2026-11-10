@@ -153,9 +153,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "6a0086a5a7cc2c5e33810a4ce83e54cdb51a269189de0a0d5d17aa50be6d96e7",
+      "candidate_sha256": "ac0633f18a89d22df369e4cfc2f66547dbed7df4e490d94dc45c72340a46520d",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "26d3f030df7f037e481b9164d6cfa6e8fb81cf9d5324645172a047329991a06b",
+      "executable_ast_sha256": "2ea46f83f61b7f7b69628f1ff4d1d12e0723fc834f1ce1b6cd04bb6d8edddf1f",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -383,9 +383,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "1ca4c7cfbafe15b9ba11903acf9e7dbca0c871088ffd81fc6848b5740434584a",
+      "candidate_sha256": "fba54f265e78bdfe0b05db628f82348a4daba2d5863972b0a56a8510299123c1",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "090ca6163181f0310f7441cb47c88d87a5cbcd16318fb0472e6c787163cda139",
+      "executable_ast_sha256": "abb7b872c9a17fe02fc5cdcf80ed5e794189487eae7a71c0bdb7fb7d2fa83fc8",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "v7_previous_candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df"

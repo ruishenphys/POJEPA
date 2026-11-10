@@ -91,6 +91,37 @@ def test_local_calibration_refuses_an_imported_file(local):
     assert calibrate.require_local_calibration() == cache.file_sha(local)   # 只看这个文件名的记录
 
 
+def test_overwritten_import_is_refused_by_every_base_calibration_reader(local, tmp_path):
+    """S26a-fix1（Codex S26a-P2-1）：导入后被本目录 calibrate 覆写，新开的 v7 单项消融不能静默用重算的 λ/σ_z。"""
+    from po_jepa.runtime import comparison
+    w.write_v7_calibration(dict(sigma_z=1.25, time_weight=.03, space_weight=4.0), "imported")
+    _imported(local)
+    w.require_calibrated_weights(swept=True)
+    _, loss = comparison.build_condition("po_jepa_time_only", CPU)
+    assert (loss.time_weight, loss.space_weight) == (.03, 0.)
+    assert checks.load_protocol()["model"]["graph"]["sigma_z"] == 1.25
+    before = local.read_bytes()
+    with pytest.raises(ValueError, match="是从 v7 导入的.*不能重新 calibrate"):     # calibrate 不覆写导入文件，也不建输出目录
+        w.calibrate_weights(tmp_path/"features", tmp_path/"cal-out", CPU)
+    assert local.read_bytes() == before and not (tmp_path/"cal-out").exists()
+    w.write_v7_calibration(dict(sigma_z=2.5, time_weight=.7, space_weight=8.0), "local overwrite")   # 绕过 calibrate 的覆写
+    for call in (lambda: w.require_calibrated_weights(swept=True), checks.load_protocol,
+                 lambda: comparison.build_condition("po_jepa_time_only", CPU),
+                 lambda: comparison.build_condition("po_jepa_space_only", CPU),
+                 lambda: comparison.build_condition("po_jepa_full", CPU)):
+        with pytest.raises(ValueError, match="IMPORTED.json 的导入记录不符"):
+            call()
+    with pytest.raises(ValueError, match="导入记录不符"):
+        calibrate.require_imported_v7_calibration()
+    # 记录只看这个文件名：别的文件的记录不影响；没有记录（v8 local）照常
+    (local.parent/"IMPORTED.json").write_bytes(cache._json_bytes(dict(schema="addon_v7_calibration_import_v1", files={
+        "other-2000-u10000.yaml": dict(sha256="0"*64)})))
+    assert checks.load_protocol()["loss"]["time_weight"] == .7
+    (local.parent/"IMPORTED.json").unlink()
+    w.require_calibrated_weights(swept=True)
+    assert checks.load_protocol()["model"]["graph"]["sigma_z"] == 2.5
+
+
 def test_local_calibration_checks_header_and_values(local, monkeypatch):
     good = local.read_text(encoding="utf-8")
     local.write_text(good.replace("push-2000", "push-200", 1), encoding="utf-8")

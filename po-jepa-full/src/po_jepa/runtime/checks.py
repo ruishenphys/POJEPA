@@ -76,6 +76,22 @@ def v7_calibration_path() -> Path:
     """每个数据集（系统+条数）和训练步数各自一份标定：λ_time、λ_space、σ_z。"""
     return ROOT/"configs/calibration"/f"{datasets.active().tag}-u{v7_updates()}.yaml"
 
+IMPORT_RECORD = "IMPORTED.json"   # tools/import_v7_calibration.py 写的导入记录，和标定文件同目录
+
+def require_import_record_matches(path: Path) -> None:
+    """S26a-fix1：IMPORTED.json 里有这个标定文件名的记录时，文件当前的 SHA 必须等于记录的 SHA。
+    导入后又被本目录 run.py calibrate 覆写（v7 补跑与 v8 混用一份工作树）就报错，不让任何读基础标定的路径静默用重算的 λ/σ_z。
+    没有记录（v7 树自己标定、v8 local）不受影响。"""
+    record = path.parent/IMPORT_RECORD
+    if not record.exists():
+        return
+    entry = json.loads(record.read_text(encoding="utf-8")).get("files", {}).get(path.name)
+    if entry is None:
+        return
+    if entry.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+        raise ValueError(f"{path.name} 和 {IMPORT_RECORD} 的导入记录不符：导入的 v7 标定被改过（同一工作树里 v8 的 calibrate 覆写了它？）。"
+                         "v7 补跑与 v8 不能共用一份工作树，请换工作树重新导入")
+
 def load_protocol() -> dict:
     """核原稿与固定协议原字节，缺项或改动报错，不补默认研究参数。"""
     data.cache.verify_fixed_protocol()
@@ -90,6 +106,7 @@ def load_protocol() -> dict:
             merged = _merge_v4(merged, dict(model=v7["model"]))
         path = v7_calibration_path()
         if path.exists():
+            require_import_record_matches(path)
             cal = yaml.safe_load(path.read_text(encoding="utf-8"))
             merged = _merge_v4(merged, dict(model=dict(graph=dict(sigma_z=cal["sigma_z"]))))
             if cal.get("time_weight") is not None:
