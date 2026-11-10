@@ -476,8 +476,47 @@ def test_spectral_gap_windows_values_and_rule(root, tmp_path):
     assert other["windows"][0]["grids"]["16"]["lambda_k"] != report["windows"][0]["grids"]["16"]["lambda_k"]
     sha = hashlib.sha256((tmp_path/"g"/"report.json").read_bytes()).hexdigest()
     assert json.loads((tmp_path/"g"/"COMPLETE.json").read_text()) == {"report_sha256": sha}
-    assert sg.run_spectral_gap(tmp_path/"g", docs=root["docs"], reader=root["reader"], config=CFG, sigma_z=1.,
-                               provenance={}) == report
+    assert sg.run_spectral_gap(tmp_path/"g", docs=root["docs"], reader=root["reader"], config=CFG, sigma_z=sigma,
+                               provenance={"x": 1}) == report
+    with pytest.raises(ValueError, match="complete for another request"):          # S11b-fix1：不再返回旧报告
+        sg.run_spectral_gap(tmp_path/"g", docs=root["docs"], reader=root["reader"], config=CFG, sigma_z=1.,
+                            provenance={})
+
+
+def test_spectral_gap_completed_job_needs_the_same_inputs(root, tmp_path):
+    """S11b-P1-1：完成后换 sigma_z、来源、配置或 d = 1 测试窗口都报错，不返回旧报告；job.json、report 的 job 或窗口
+    列表被改也报错；同样的输入直接返回。"""
+    out = tmp_path/"g"
+    prov = {"windows_sha256": {"id_test": "a"*64, "ood_test": "b"*64}, "feature_manifest_sha256": "c"*64,
+            "sigma_z_sha256": "d"*64}
+    run = lambda **over: sg.run_spectral_gap(out, **{**dict(docs=root["docs"], reader=root["reader"], config=CFG,
+                                                             sigma_z=9.5, provenance=prov), **over})
+    report = run()
+    assert run() == report
+    doc = root["docs"]["id_test"]
+    first = next(i for i, w in enumerate(doc["windows"]) if w["duration"] == 1)
+    fewer = {**root["docs"], "id_test": {**doc, "windows": doc["windows"][:first] + doc["windows"][first + 1:]}}
+    moved = {**root["docs"], "id_test": {**doc, "windows": [dict(w, start=w["start"] + 1) if i == first else w
+                                                            for i, w in enumerate(doc["windows"])]}}
+    for over in (dict(sigma_z=9.0), dict(provenance={**prov, "feature_manifest_sha256": "e"*64}),
+                 dict(provenance={**prov, "sigma_z_sha256": "f"*64}),
+                 dict(config=dataclasses.replace(CFG, config_sha256="0"*64)), dict(docs=fewer), dict(docs=moved)):
+        with pytest.raises(ValueError, match="complete for another request"):
+            run(**over)
+    job_bytes = (out/"job.json").read_bytes()
+    (out/"job.json").write_bytes(job_bytes.replace(b"9.5", b"9.0"))
+    with pytest.raises(ValueError, match="complete for another request"):
+        run()
+    (out/"job.json").write_bytes(job_bytes)
+    for edit in (lambda b: b["job"].update(sigma_z=9.0), lambda b: b["windows"].pop()):
+        body = json.loads((out/"report.json").read_text())
+        edit(body)
+        (out/"report.json").unlink()
+        (out/"COMPLETE.json").unlink()
+        (out/"report.json").write_text(json.dumps(body))
+        (out/"COMPLETE.json").write_text(json.dumps({"report_sha256": hashlib.sha256((out/"report.json").read_bytes()).hexdigest()}))
+        with pytest.raises(ValueError, match="complete for another request"):
+            run()
 
 
 def test_spectral_gap_inputs(root, tmp_path):
@@ -531,4 +570,9 @@ def test_spectral_gap_cli_through_the_entry_point(root, tmp_path):
     report = json.loads((out/"report.json").read_text())
     assert report["graph"]["sigma_z"] == 11.0 and (out/"COMPLETE.json").exists()
     assert set(report["job"]["inputs"]) == {"windows_sha256", "feature_manifest_sha256", "sigma_z_sha256"}
+    assert droid.main(argv + ["--job", "eval/spectral-gap"]) == 0          # 已完成、输入相同：返回 0，报告不变
+    assert json.loads((out/"report.json").read_text()) == report
+    (cal/"sigma_z.json").write_text(json.dumps({"sigma_z": 12.0, "config_sha256": BASE.config_sha256}))
+    with pytest.raises(ValueError, match="complete for another request"):  # S11b-fix1：入口不再凭完成标志跳过
+        droid.main(argv + ["--job", "eval/spectral-gap"])
     assert droid.main(argv + ["--job", "eval/identity"]) == 2

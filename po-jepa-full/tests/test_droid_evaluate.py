@@ -458,3 +458,117 @@ def test_evaluate_job_report_complete_and_checks(root, tmp_path, monkeypatch):
         ev.evaluate_job(tmp_path/"tri", model=model, condition="po_jepa_full", **kwargs)
     assert (tmp_path/"tri"/"FAILED.json").exists() and not (tmp_path/"tri"/"COMPLETE.json").exists()
     assert json.loads((tmp_path/"tri"/"report.json").read_text())["status"] == "failed"
+
+
+# ---------------------------------------------------------------- S11a-fix1（Codex S11a-P1-1、S11a-P2-1）
+
+def other_provenance(root):
+    """同一个合成来源，只是某个源码文件的 SHA 不同（假编码器的特征清单 SHA 记 None，换它不改来源）。"""
+    prov = json.loads(json.dumps(root["provenance"]))
+    name = sorted(prov["source_files_sha256"])[0]
+    prov["source_files_sha256"][name] = "0"*64
+    assert prov != root["provenance"]
+    return prov
+
+
+def _job_kwargs(root, **over):
+    kwargs = dict(seed=1703, job={"checkpoint_sha256": "OLD"}, splits=root["docs"], prepared=root["prepared"],
+                  outcomes=root["outcomes"], reader=root["reader"], control_spec=spec(), provenance=root["provenance"],
+                  loss_config=LOSS, config=CFG, device="cpu")
+    return {**kwargs, **over}
+
+
+def test_completed_job_is_reused_only_for_the_same_request(root, tmp_path):
+    """完成缓存（S11a-P1-1）：同一请求直接返回；换条件、种子、检查点、配置、冻结窗口、准备文件、outcome、来源、两轴
+    开关中任何一项都报错，不返回旧报告；job.json 或 report 里的 job 被改也报错。"""
+    out = tmp_path/"j"
+    report = ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
+    assert report["job"]["inputs"] == ev.job_inputs(splits=root["docs"], prepared=root["prepared"],
+                                                    outcomes=root["outcomes"], provenance=root["provenance"], config=CFG)
+    assert ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root)) == report
+    u = uid("A")
+    doc = root["docs"]["id_test"]
+    changed = {
+        "condition": dict(condition="po_jepa_full"),
+        "seed": dict(seed=2026),
+        "checkpoint": dict(job={"checkpoint_sha256": "NEW"}),
+        "config": dict(config=dataclasses.replace(CFG, config_sha256="0"*64)),
+        "windows": dict(splits={**root["docs"], "id_test": {**doc, "windows": doc["windows"][1:]}}),
+        "prepared": dict(prepared={**root["prepared"], u: dataclasses.replace(root["prepared"][u], json_sha256="0"*64)}),
+        "outcomes": dict(outcomes={**root["outcomes"], u: "failure"}),
+        "provenance": dict(provenance=other_provenance(root)),
+    }
+    for name, over in changed.items():
+        condition = over.pop("condition", "identity")
+        assert ev.job_inputs(**{k: v for k, v in _job_kwargs(root, **over).items()
+                                if k in ("splits", "prepared", "outcomes", "provenance", "config")}) != report["job"]["inputs"] \
+            or name in ("condition", "seed", "checkpoint", "config"), name
+        with pytest.raises(ValueError, match="complete for another request"):
+            ev.evaluate_job(out, model=Toy(), condition=condition, **_job_kwargs(root, **over))
+    with pytest.raises(ValueError, match="complete for another request"):         # 本次要两轴，旧的没跑
+        ev.evaluate_job(out, model=Toy(), condition="identity", extra_reader=object(), **_job_kwargs(root))
+    # 旧任务 identity/OLD，新请求 po_jepa_full/2026/NEW（Codex 的反例）
+    with pytest.raises(ValueError, match="complete for another request"):
+        ev.evaluate_job(out, model=Toy(), condition="po_jepa_full", **_job_kwargs(root, seed=2026,
+                                                                                  job={"checkpoint_sha256": "NEW"}))
+    # 只改 job.json（report 和 COMPLETE 不动）、或改 report 的 job 并重签 COMPLETE：都不复用
+    job_bytes = (out/"job.json").read_bytes()
+    (out/"job.json").write_bytes(job_bytes.replace(b'"OLD"', b'"OTHER"'))
+    with pytest.raises(ValueError, match="complete for another request"):
+        ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
+    (out/"job.json").write_bytes(job_bytes)
+    body = json.loads((out/"report.json").read_text())
+    body["job"]["seed"] = 1
+    (out/"report.json").write_text(json.dumps(body))
+    (out/"COMPLETE.json").write_text(json.dumps({"report_sha256": hashlib.sha256((out/"report.json").read_bytes()).hexdigest()}))
+    with pytest.raises(ValueError, match="complete for another request"):
+        ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
+
+
+def test_unfinished_job_does_not_resume_under_other_inputs(root, tmp_path):
+    """没完成的任务：输入身份（来源、outcome）变了不续跑；不变时续跑得到同一份报告。"""
+    out = tmp_path/"r"
+    report = ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
+    (out/"COMPLETE.json").unlink()
+    (out/"report.json").unlink()
+    for over in (dict(provenance=other_provenance(root)),
+                 dict(outcomes={**root["outcomes"], uid("B"): "success"})):
+        with pytest.raises(ValueError, match="differs from this command"):
+            ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root, **over))
+    again = ev.evaluate_job(out, model=Toy(), condition="identity", **_job_kwargs(root))
+    assert again["job"] == report["job"] and again["splits"]["id_test"]["counts"]["batches_written"] == 0
+    assert all(again["splits"][s]["macro"] == report["splits"][s]["macro"] for s in ("id_test", "ood_test"))
+
+
+def test_single_window_group_with_a_skipped_donor(root, tmp_path):
+    """S11a-P2-1：一批里某个分布内时长只剩一个窗口、它的替身回合被跳过时，这个窗口 delta_act 记 None，其余量照常
+    （和整组一起算的值相同），评测不报错。"""
+    cmd = dataclasses.replace(CFG, action=dataclasses.replace(CFG.action, source="commanded"))
+    u = uid("B")
+    prepared = {**root["prepared"], u: dataclasses.replace(_prepared(u, 36, 100 + ord("B"), passed=(True, False)),
+                                                           json_sha256=root["prepared"][u].json_sha256)}
+    doc = root["docs"]["id_test"]
+    by_id = {w["id"]: w for w in doc["windows"]}
+    kept, kept_episodes, skipped = ev._selected(doc, prepared, "commanded")
+    assert skipped == {u}
+    lonely = [w for w in kept if w["duration"] in CFG.evaluation.durations_id and by_id[doc["donors"][w["id"]]]["uuid"] == u]
+    healthy = [w for w in kept if w["duration"] in CFG.evaluation.durations_id and w not in lonely]
+    assert lonely and healthy
+    episodes = bt.episode_arrays(prepared, kept_episodes, "commanded")
+    common = dict(model=Toy(), doc=doc, skipped=skipped, reader=root["reader"], episodes=episodes,
+                  outcomes=root["outcomes"], control_spec=spec("commanded"), provenance=root["provenance"],
+                  loss_config=LOSS, config=cmd, device="cpu")
+    full = {r["id"]: r for r in ev.chunk_rows(kept, **common)}
+    for w in lonely[:3]:
+        [r] = ev.chunk_rows([w], **common)
+        assert r["values"]["delta_act"] is None
+        assert r["values"]["future:g=16"] is not None and r["triangle_ok"] is True
+        want = full[w["id"]]["values"]
+        assert set(r["values"]) == set(want)
+        for name, v in r["values"].items():
+            assert v == pytest.approx(want[name], rel=1e-5, abs=1e-6) if v is not None else want[name] is None, name
+    # 同组里另有一个可用窗口时照旧借它的动作占位，可用窗口的 delta_act 是数
+    w = next(x for x in lonely if any(y["duration"] == x["duration"] for y in healthy))
+    mate = next(y for y in healthy if y["duration"] == w["duration"])
+    rows = {r["id"]: r for r in ev.chunk_rows([w, mate], **common)}
+    assert rows[w["id"]]["values"]["delta_act"] is None and type(rows[mate["id"]]["values"]["delta_act"]) is float

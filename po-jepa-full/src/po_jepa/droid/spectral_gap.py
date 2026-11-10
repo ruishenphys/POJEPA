@@ -11,7 +11,7 @@ window_gaps`）；报告每个网格上的 5、25、50、75、95 分位数和预
 09 §3.1，S09 写）。K、σ_x 必须等于 DROID 配置的 `model.modes`、`model.sigma_x`。图和条件、种子无关。
 
 输出 `<run-root>/<name>/eval/spectral-gap/`：`job.json`、`report.json`、`COMPLETE.json`（`report.json` 的 SHA）。
-已完成就直接返回；没完成时整份重算（几千个 256×256 的 eigh，CPU 几分钟）。
+已完成且 job（配置、sigma_z、输入 SHA）和窗口都与本次相同时直接返回，不同报错；没完成时整份重算（几千个 256×256 的 eigh，CPU 几分钟）。
 
   python -m po_jepa.droid.spectral_gap --config configs/droid/<name>.yaml --data-root <数据根> --run-root <运行根>
 """
@@ -93,29 +93,36 @@ def gap_windows(docs: Mapping[str, Mapping]) -> list[dict]:
 def run_spectral_gap(output: Path | str, *, docs: Mapping[str, Mapping], reader: ft.FeatureReader, config: DroidConfig,
                      sigma_z: float, provenance: Mapping) -> dict:
     """`<output>/job.json`、`report.json`、`COMPLETE.json`。`provenance` 是写进 job.json 的输入 SHA（窗口文件、特征
-    清单、sigma_z.json）。已完成就返回已有的报告。"""
+    清单、sigma_z.json）。已完成时，本次的 job 和 d = 1 窗口与已存的完全相同才返回已有的报告，否则报错。"""
     out = Path(output)
-    if (out/"COMPLETE.json").exists():
+    spectrum, graph = build_spectrum(config, sigma_z)          # 先核 sigma_z、K、σ_x，再看完成缓存（S11b-fix1）
+    k = graph["max_modes"]
+    job = dict(schema=SCHEMA_JOB, kind="droid_spectral_gap", config_name=config.name, config_sha256=config.config_sha256,
+               duration=DURATION, k=k, sigma_z=sigma_z, inputs=dict(provenance))
+    want = ix._loads(cache._json_bytes(job), "job")
+    selected = gap_windows(docs)
+    job_path = out/"job.json"
+    if (out/"COMPLETE.json").exists():                 # 完成缓存只在配置、sigma_z、来源和窗口都相同时复用
         report = ix._loads((out/"report.json").read_bytes(), "report.json")
         if ix._loads((out/"COMPLETE.json").read_bytes(), "COMPLETE.json").get("report_sha256") != cache.file_sha(out/"report.json"):
             raise ValueError(f"{out}: COMPLETE.json does not match report.json")
+        stored = [{n: w.get(n) for n in ("split", "id", "uuid", "start")} for w in report.get("windows", [])]
+        if (not job_path.exists() or ix._loads(job_path.read_bytes(), "job.json") != want
+                or report.get("job") != want or stored != selected):
+            raise ValueError(f"{out} is complete for another request (config, sigma_z, inputs or test windows "
+                             "changed); use a new output directory")
         return report
     out.mkdir(parents=True, exist_ok=True)
     for stale in out.glob("*.partial"):
         stale.unlink()
-    spectrum, graph = build_spectrum(config, sigma_z)
-    k = graph["max_modes"]
-    job = dict(schema=SCHEMA_JOB, kind="droid_spectral_gap", config_name=config.name, config_sha256=config.config_sha256,
-               duration=DURATION, k=k, sigma_z=sigma_z, inputs=dict(provenance))
-    job_path = out/"job.json"
-    if job_path.exists() and ix._loads(job_path.read_bytes(), "job.json") != ix._loads(cache._json_bytes(job), "job"):
+    if job_path.exists() and ix._loads(job_path.read_bytes(), "job.json") != want:
         raise ValueError(f"{job_path} differs from this command (config, sigma_z or inputs changed)")
     if not job_path.exists():
         cache._write_json(job_path, job)
     grid = regular_grid(ev.GRID, ev.GRID)
     windows = []
     with torch.no_grad():
-        for w in gap_windows(docs):
+        for w in selected:
             raw = reader.rows(w["uuid"], [w["start"]])                 # [1, 256, 1408]，逐行核 SHA
             windows.append(dict(w, grids=sim.window_gaps(spectrum, raw, grid, k)))
     report = dict(schema=SCHEMA_REPORT, job=job,

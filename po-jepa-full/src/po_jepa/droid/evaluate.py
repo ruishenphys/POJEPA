@@ -41,6 +41,7 @@ S11a 做冻结测试窗口上的各轴（10 §8.2 的表、§8.3 动作干预、
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -194,7 +195,7 @@ def group_values(model, batch, start_states: torch.Tensor, donor_batch, *, durat
     """一组时长都等于 `duration` 的窗口（`make_eval_batch` 组装的 `batch`）上的全部量。
 
     `donor_batch` 是同序的替身窗口批（同分布时长才要），某一行为 None 时该行 `delta_act` 记 None：传入时
-    `donor_batch = (批, 有效掩码)`，掩码为假的行用的是占位动作，结果丢弃。返回 ({键: [B 个值]}, 三角不等式逐行结果)。
+    `donor_batch = (批, 有效掩码)`，掩码为假的行用的是占位动作，结果丢弃；掩码全假时批可以是 None（不做替身前向）。返回 ({键: [B 个值]}, 三角不等式逐行结果)。
     """
     names = value_names(duration, config)
     ids, held, long = _axes(config)
@@ -224,14 +225,18 @@ def group_values(model, batch, start_states: torch.Tensor, donor_batch, *, durat
         out["tcd_normalized"] = metrics.temporal_composition_rms_defect(record).values/scale.to(direct.device)
     if duration in ids:
         donor, valid = donor_batch
-        if isinstance(model, POJEPA) and bind is None:                                 # 10 §8.3
+        if donor is None:                                                              # 整组替身都被跳过
+            if any(valid):
+                raise ValueError("a donor batch is required when some donor is valid")
+            delta = None
+        elif isinstance(model, POJEPA) and bind is None:                               # 10 §8.3
             delta = metrics.action_intervention_margin(model, raw, controls, donor.controls, dur, grid16, target,
                                                        loss_config=loss_config).values
         else:
             metrics._action_pair(raw, controls, donor.controls, dur)
             phi_donor = _predictor(model, bind, start_states, donor.controls)
             delta = jepa(phi_donor(raw, donor.controls, dur, grid16), target) - out["future:g=16"]
-        out["delta_act"] = [v if ok else None for v, ok in zip(_list(delta), valid)]
+        out["delta_act"] = [None]*b if delta is None else [v if ok else None for v, ok in zip(_list(delta), valid)]
     for h in SCD_GRIDS:
         if duration in ids or (h == 12 and duration in JOINT_HELDOUT):
             transfer = build_spatial_transfer(grid16, target_height=h, target_width=h)
@@ -339,7 +344,10 @@ def chunk_rows(chunk: Sequence[Mapping], *, model, doc: Mapping, skipped: set[st
                 ok = other["uuid"] not in skipped
                 donors.append(other if ok else w)       # 占位：替身回合被跳过时借本窗口的动作，结果丢弃
                 valid.append(ok)
-            if not all(valid):
+            if not any(valid):
+                # 整组的替身回合都被跳过（如按 64 切批后这个时长只剩一个窗口）：不做替身前向，delta_act 全记 None（10 §8.2）
+                donor = (None, valid)
+            elif not all(valid):
                 # 占位行借本窗口的动作时 source id 相同，_action_pair 会拒；换成同组里编号不同的另一个可用窗口（结果仍丢弃）
                 pool = group + [d for d, ok in zip(donors, valid) if ok]
                 for k, (w, ok) in enumerate(zip(group, valid)):
@@ -348,8 +356,9 @@ def chunk_rows(chunk: Sequence[Mapping], *, model, doc: Mapping, skipped: set[st
                         if spare is None:
                             raise ValueError(f"no placeholder donor for {w['id']}")
                         donors[k] = spare
-            donor_batch, _ = bt.make_eval_batch(donors, reader, episodes, control_spec, provenance, device)
-            donor = (donor_batch, valid)
+            if donor is None:
+                donor_batch, _ = bt.make_eval_batch(donors, reader, episodes, control_spec, provenance, device)
+                donor = (donor_batch, valid)
         values, triangle = group_values(model, batch, states, donor, duration=duration, config=config,
                                         loss_config=loss_config, bind=bind)
         for k, i in enumerate(index):
@@ -800,24 +809,56 @@ def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: 
 
 # ---------------------------------------------------------------- 一个评测任务
 
+def _sha(value) -> str:
+    return hashlib.sha256(cache._json_bytes(value)).hexdigest()
+
+
+def job_inputs(*, splits: Mapping[str, Mapping], prepared: Mapping, outcomes: Mapping[str, str], provenance: Mapping,
+               config: DroidConfig, extra_reader=None) -> dict:
+    """写进 `job.json` 的输入身份（S11a-fix1）：两个测试集冻结窗口内容、窗口里各回合准备文件的 SHA、回合 outcome、
+    批的来源字典（特征清单、编码器、源码 SHA）和本次要不要跑原始帧率/分辨率两轴。续跑和复用完成结果都要求它不变。"""
+    episodes = sorted({w["uuid"] for split in TEST_SPLITS for w in splits[split]["windows"]})
+    missing = [u for u in episodes if u not in prepared]
+    if missing:
+        raise ValueError(f"no prepared episode for {missing[:3]}")
+    return dict(windows_sha256={split: _sha(splits[split]) for split in TEST_SPLITS},
+                prepared_sha256=_sha({u: prepared[u].json_sha256 for u in episodes}),
+                outcomes_sha256=_sha({u: outcomes.get(u) for u in episodes}),
+                provenance_sha256=_sha(dict(provenance)), action_source=config.action.source,
+                axes=dict(frame_rate=extra_reader is not None, resolution=extra_reader is not None))
+
+
 def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None, job: Mapping, splits: Mapping[str, Mapping],
                  prepared: Mapping, outcomes: Mapping[str, str], reader, control_spec, provenance: dict,
                  loss_config: LossConfig, config: DroidConfig, device, bind: Bind | None = None,
                  extra_reader=None, ac_steps: AcSteps | None = None) -> dict:
     """`eval/<条件>/seed<种子>/`（10 §8.9）：`job.json`（`job` 由调用者给，读检查点的记录由 `load_selected` 给，等 S09）、
     两个测试集的 rows、`frame_rate.json` 和 `resolution.json`（给了 `extra_reader` 时，S11b）、`report.json`、
-    `COMPLETE.json`。已完成就直接返回已有的报告；三角不等式有违反时写 `FAILED.json` 并报错。
+    `COMPLETE.json`。`job.json` 记调用者的 `job` 加条件、种子、配置和 `job_inputs` 的输入身份；已完成时这份身份与已存的
+    `job.json`、`report.json` 的 `job` 完全相同才直接返回已有的报告，否则报错（S11a-fix1）；三角不等式有违反时写
+    `FAILED.json` 并报错。
     模型在 eval 模式、no_grad 下跑，前后核对参数、梯度和 buffer 没变（10 §1）。
 
     `extra_reader` 是测试附加特征的 `features.ExtraFeatureReader`；不给时报告的 `axes` 记原始帧率和原始分辨率没做。
     AC 的原始帧率要 `ac_steps(model, raw, actions, start_state, grid)`（S08b 的小步前向：`actions` 是物理单位的小步动作
     CPU float64 [B, n, 7]，`start_state` 是这次调用起点的状态 CPU float64 [B, 7]，返回 n 个小步之后的预测）。"""
     out = Path(output)
+    if set(splits) != set(TEST_SPLITS):
+        raise ValueError(f"an evaluation job covers both test splits {TEST_SPLITS}")
+    head = dict(job, condition=condition, seed=seed, config_name=config.name, config_sha256=config.config_sha256,
+                inputs=job_inputs(splits=splits, prepared=prepared, outcomes=outcomes, provenance=provenance,
+                                  config=config, extra_reader=extra_reader))
+    want = ix._loads(cache._json_bytes(head), "job")
+    job_path = out/"job.json"
     out.mkdir(parents=True, exist_ok=True)
-    if (out/"COMPLETE.json").exists():
+    if (out/"COMPLETE.json").exists():                 # 完成缓存只在本次请求的身份与已存的完全相同时复用
         report = ix._loads((out/"report.json").read_bytes(), "report.json")
         if ix._loads((out/"COMPLETE.json").read_bytes(), "COMPLETE.json").get("report_sha256") != cache.file_sha(out/"report.json"):
             raise ValueError(f"{out}: COMPLETE.json does not match report.json")
+        if (not job_path.exists() or ix._loads(job_path.read_bytes(), "job.json") != want
+                or report.get("job") != want):
+            raise ValueError(f"{out} is complete for another request (condition, seed, checkpoint, config or inputs "
+                             "changed); use a new output directory")
         return report
     if condition in AC_CONDITIONS and config.model.ac_state == "true_state" and bind is None:
         raise ValueError("ac_state: true_state needs the state-binding wrapper (09 §6.2) for AC conditions")
@@ -827,15 +868,11 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
         raise ValueError("the AC frame-rate axis needs the small-step forward ac_steps (10 §8.4)")
     if condition not in AC_CONDITIONS and ac_steps is not None:
         raise ValueError("only AC conditions take ac_steps")
-    if set(splits) != set(TEST_SPLITS):
-        raise ValueError(f"an evaluation job covers both test splits {TEST_SPLITS}")
     for stale in out.glob("*.partial"):
         stale.unlink()
-    head = dict(job, condition=condition, seed=seed, config_name=config.name, config_sha256=config.config_sha256)
-    job_path = out/"job.json"
     if job_path.exists():
-        if ix._loads(job_path.read_bytes(), "job.json") != ix._loads(cache._json_bytes(head), "job"):
-            raise ValueError(f"{job_path} differs from this command (condition, seed, checkpoint or config changed)")
+        if ix._loads(job_path.read_bytes(), "job.json") != want:
+            raise ValueError(f"{job_path} differs from this command (condition, seed, checkpoint, config or inputs changed)")
     else:
         cache._write_json(job_path, head)
     (out/"FAILED.json").unlink(missing_ok=True)

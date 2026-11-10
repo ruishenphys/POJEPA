@@ -4,7 +4,8 @@
       --job <任务编号> [--delete-raw] [--time-limit-minutes <上限>]
 
 - 任务编号必须在本配置的任务图里（`tools/droid_jobs.py`），阶段必须是编号的第一段。
-- 开始时完成标志已存在：什么都不做，退出 0。完成标志由各阶段自己最后写（先写临时文件再改名）；阶段返回后完成标志
+- 开始时完成标志已存在：什么都不做，退出 0；`eval/spectral-gap` 例外，照常调用阶段，由阶段核本次输入身份与已完成的
+  是否相同（相同直接返回，不同报错退出 1；S11b-fix1）。完成标志由各阶段自己最后写（先写临时文件再改名）；阶段返回后完成标志
   不存在算失败（退出 1）。训练片的编码任务（带 `--delete-raw`）的完成标志是 `features/<片>/_raw_deleted/<name>.json`，
   原始文件删完才写；特征已编完但没删完时重跑会进入编码阶段，跳过编码、把剩下的删掉（S14-fix1）。
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
@@ -86,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.time_limit_minutes is not None and stage not in ("train", "eval"):
         p.error("--time-limit-minutes is only for train and eval jobs")
     done = Path(job["complete"])
-    if done.exists():
+    if done.exists() and a.job not in JOB_MAINS:
         print(f"{a.job}: already complete ({done})")
         return 0
     if a.job in JOB_MAINS:
