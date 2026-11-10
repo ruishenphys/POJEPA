@@ -425,6 +425,15 @@ def execute(args):
             cache._write_json(output/'COMPLETE.json',dict(command=args.command,condition=args.condition,
                 manifest_sha256=bundle_sha,real_device=report['preflight']['hardware'],scientific_conclusions_verified=False))
             return 0
+        if checks.is_v7() and args.command=='equal-step':
+            from . import v7jobs
+            stage='equal-step'
+            report=v7jobs.equal_step_job(Path(args.features_root),output/'job',device,args.condition,
+                training_run=args.training_run,limit_run=args.limit_run)
+            if verify_bundle()!=bundle_sha:raise ValueError('source bundle changed during run')
+            cache._write_json(output/'COMPLETE.json',dict(command=args.command,condition=args.condition,
+                manifest_sha256=bundle_sha,real_device=report['preflight']['hardware'],scientific_conclusions_verified=False))
+            return 0
         if checks.is_v7() and args.command in ('train','run','resume','evaluate'):
             # v7：每个任务只跑一个条件，互不依赖，可在排队的算力上并行提交；完整 check 单独做一次
             from . import v7jobs

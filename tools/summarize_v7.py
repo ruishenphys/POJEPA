@@ -8,6 +8,9 @@
 核对项（不通过就在报告里标红，不静默合并）：
 - 同一 (数据集, 种子) 下所有条件的预登记（源码、配置、查询序列）SHA 必须一致；
 - po_jepa_full 与 po_jepa_no_consistency 的初始权重 SHA 必须一致（唯一差别是一致性项）。
+
+v7.1 起另外报：按网格（16/12/8）拆开的未来误差和配对差（主表的“未来误差”仍是全部单点的平均，与以前同口径）、
+16×16 上每步 1 周期的多步滚动误差（与同一批窗口的直接预测并列）、各条件实际训练步数和是否早停。
 """
 import argparse
 from collections import defaultdict
@@ -73,14 +76,21 @@ def condition_means(job):
         by_tau[float(r["query"]["duration_cycles"])].append(r["values"].get("delta_act"))
     out["delta_act_by_duration"] = {str(t): _mean(v) for t, v in sorted(by_tau.items())}
     out["windows"] = dict(point=len(points), pair=len(pairs))
+    by_grid = defaultdict(list)
+    for r in points:
+        by_grid[int(r["query"]["grid_size"])].append(r["values"]["future_jepa_distance"])
+    out["future_by_grid"] = {str(g): _mean(v) for g, v in sorted(by_grid.items(), reverse=True)}
+    rolled = [r for r in points if "rollout_future_jepa_distance" in r["values"]]
+    out["rollout"] = dict(windows=len(rolled), rollout_future=_mean([r["values"]["rollout_future_jepa_distance"] for r in rolled]),
+                          direct_future=_mean([r["values"]["future_jepa_distance"] for r in rolled])) if rolled else None
     return out
 
 
-def paired(full, other, metric="future_jepa_distance"):
-    """逐窗口配对差（full − 对照），先在每条轨迹内平均，再在轨迹间统计。"""
+def paired(full, other, metric="future_jepa_distance", grid=None):
+    """逐窗口配对差（full − 对照），先在每条轨迹内平均，再在轨迹间统计。grid：只取这个网格的单点。"""
     per_traj = defaultdict(list)
     for k, r in full["rows"].items():
-        if k[0] != "point" or k not in other["rows"]:
+        if k[0] != "point" or k not in other["rows"] or (grid is not None and k[4] != grid):
             continue
         a, b = r["values"].get(metric), other["rows"][k]["values"].get(metric)
         if a is not None and b is not None:
@@ -100,6 +110,8 @@ def main():
     jobs = [load_job(f) for f in find_jobs(a.results)]
     if not jobs:
         raise SystemExit(f"{a.results} 下没有完成的 v7 任务")
+    equal_jobs = [j for j in jobs if j["job"].get("kind") == "equal_step"]
+    jobs = [j for j in jobs if j["job"].get("kind") != "equal_step"]
     groups = defaultdict(dict)        # (测试数据集, 步数, 种子) -> condition -> job；分布外评测的测试数据集带调节项
     duplicates = []
     for j in jobs:
@@ -121,12 +133,16 @@ def main():
         for c, j in by_c.items():
             table.append(dict(dataset=dataset, updates=updates, seed=seed, condition=c, **condition_means(j),
                               best_step=(j["report"].get("best") or {}).get("step"),
+                              completed_updates=j["report"]["training"].get("completed_updates"),
+                              stopped_early=(j["report"]["training"].get("early_stopping") or {}).get("stopped_early"),
                               consistency_monitor=j["report"]["training"].get("consistency_monitor")))
         if f:
             for ref in REFERENCES:
                 if ref in by_c:
                     comparisons.append(dict(dataset=dataset, updates=updates, seed=seed, reference=ref,
-                                            future=paired(f, by_c[ref]), delta_act=paired(f, by_c[ref], "delta_act")))
+                                            future=paired(f, by_c[ref]), delta_act=paired(f, by_c[ref], "delta_act"),
+                                            future_by_grid={str(g): paired(f, by_c[ref], grid=g) for g in (16, 12, 8)},
+                                            rollout=paired(f, by_c[ref], "rollout_future_jepa_distance")))
     missing = [dict(dataset=d, updates=u, seed=s, condition=c) for (d, u, s), by_c in sorted(groups.items())
                for c in CONDITIONS if c not in by_c]
 
@@ -142,7 +158,12 @@ def main():
                                future_mean=_mean(vals), future_seed_std=statistics.stdev(vals) if len(vals) > 1 else None,
                                delta_act_mean=_mean([r["delta_act"] for r in rows]),
                                tcd_normalized_mean=_mean([r["tcd_normalized"] for r in rows]),
-                               scd_normalized_mean=_mean([r["scd_normalized"] for r in rows])))
+                               scd_normalized_mean=_mean([r["scd_normalized"] for r in rows]),
+                               future_by_grid={g: _mean([r["future_by_grid"].get(g) for r in rows]) for g in ("16", "12", "8")},
+                               rollout_future_mean=_mean([(r["rollout"] or {}).get("rollout_future") for r in rows]),
+                               rollout_direct_mean=_mean([(r["rollout"] or {}).get("direct_future") for r in rows]),
+                               completed_updates=[r["completed_updates"] for r in rows],
+                               stopped_early=sum(bool(r["stopped_early"]) for r in rows)))
         for ref in REFERENCES:
             rows = [x for x in comparisons if x["dataset"] == dataset and x["updates"] == updates and x["reference"] == ref and x["future"]]
             if rows:
@@ -151,7 +172,9 @@ def main():
                                    mean=_mean(ms), seed_std=statistics.stdev(ms) if len(ms) > 1 else None,
                                    seeds_full_better=sum(m < 0 for m in ms),
                                    trajectories_full_better=[x["future"]["full_better"] for x in rows],
-                                   trajectories=[x["future"]["trajectories"] for x in rows]))
+                                   trajectories=[x["future"]["trajectories"] for x in rows],
+                                   by_grid={g: _mean([(x["future_by_grid"].get(g) or {}).get("mean") for x in rows]) for g in ("16", "12", "8")},
+                                   rollout=_mean([(x["rollout"] or {}).get("mean") for x in rows])))
 
     a.output.mkdir(parents=True, exist_ok=True)
     figures = a.output/"figures"; figures.mkdir(exist_ok=True)
@@ -161,9 +184,10 @@ def main():
             curves = [g[c]["curves"] for (d, u, _), g in groups.items() if d == dataset and u == updates and c in g and g[c]["curves"]]
             if not curves:
                 continue
-            steps = sorted(set.intersection(*[{r["step"] for r in cv["validation"]} for cv in curves]))
+            # 早停后各种子的曲线长短不一：取并集，每个步数只平均到达这一步的种子
+            steps = sorted(set.union(*[{r["step"] for r in cv["validation"]} for cv in curves]))
             series_v.append((f"{c} ({len(curves)} 种子)", steps,
-                             [_mean([next(r["future_jepa_distance"] for r in cv["validation"] if r["step"] == s) for cv in curves]) for s in steps]))
+                             [_mean([r["future_jepa_distance"] for cv in curves for r in cv["validation"] if r["step"] == s]) for s in steps]))
             first = curves[0]
             if "jepa" in first["losses"]:
                 window = max(1, min(100, len(first["steps"])//20 or 1))
@@ -173,12 +197,34 @@ def main():
         (figures/f"{dataset}-u{updates}-train-jepa.svg").write_text(plots.line_chart(
             series_l, f"{dataset}（{updates} 步）训练 JEPA 损失（第一个种子，滑动平均）", "更新步数", "JEPA loss", log_y=True))
 
-    summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across,
+    equal = equal_step_rows(groups, equal_jobs, problems)
+    summary = dict(jobs=len(jobs), table=table, comparisons=comparisons, across_seeds=across, equal_step=equal,
                    transfer=transfer_drops(groups), planning=planning_reports(a.results),
                    problems=problems, missing=missing, duplicates=duplicates, scientific_conclusions_verified=False)
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
     print(f"{len(jobs)} 个任务；问题 {len(problems)} 个；缺失 {len(missing)} 个 → {a.output/'SUMMARY.md'}")
+
+
+def equal_step_rows(groups, equal_jobs, problems):
+    """同步数对照（补充）：po_jepa_full − 截到 full 步数的对照，按网格配对；与主表的 full − 对照并列。"""
+    rows = []
+    for j in equal_jobs:
+        key = (j["job"]["dataset"], j["job"]["updates"], j["job"]["seed"])
+        full = groups.get(key, {}).get("po_jepa_full")
+        c = j["job"]["condition"]
+        if full is None:
+            problems.append(dict(dataset=key[0], updates=key[1], seed=key[2], problem=f"同步数对照 {c} 找不到 po_jepa_full"))
+            continue
+        if j["report"]["registration_sha256"] != full["report"]["registration_sha256"]:
+            problems.append(dict(dataset=key[0], updates=key[1], seed=key[2], problem=f"同步数对照 {c} 预登记 SHA 不一致"))
+            continue
+        main = groups[key].get(c)
+        rows.append(dict(dataset=key[0], updates=key[1], seed=key[2], condition=c, **j["report"]["equal_step"],
+                         equal_step={str(g): paired(full, j, grid=g) for g in (16, 12, 8)},
+                         equal_step_rollout=paired(full, j, "rollout_future_jepa_distance"),
+                         main={str(g): paired(full, main, grid=g) for g in (16, 12, 8)} if main else None))
+    return rows
 
 
 def _label(job):
@@ -234,6 +280,21 @@ def _markdown(s):
         if "condition" in r:
             lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {r['seeds']} | {_f(r['future_mean'])} | "
                          f"{_f(r['future_seed_std'])} | {_f(r['delta_act_mean'])} | {_f(r['tcd_normalized_mean'])} | {_f(r['scd_normalized_mean'])} |")
+    lines += ["", "## 按网格拆开（跨种子平均；16×16 有 JEPA 监督，12×12、8×8 没有）", "",
+              "| 数据集 | 步数 | 条件 | 16×16 | 12×12 | 8×8 | 16×16 多步滚动 | 同窗口直接预测 | 实际训练步数 | 早停的种子 |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in s["across_seeds"]:
+        if "condition" in r:
+            g = r["future_by_grid"]
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {_f(g['16'])} | {_f(g['12'])} | {_f(g['8'])} | "
+                         f"{_f(r['rollout_future_mean'])} | {_f(r['rollout_direct_mean'])} | "
+                         f"{', '.join(str(u) for u in r['completed_updates'])} | {r['stopped_early']}/{r['seeds']} |")
+    lines += ["", "## 配对比较按网格（full − 对照，跨种子平均；负数 = full 更好）", "",
+              "| 数据集 | 步数 | 比较 | 16×16 | 12×12 | 8×8 | 16×16 多步滚动 |", "|---|---|---|---|---|---|---|"]
+    for r in s["across_seeds"]:
+        if "comparison" in r:
+            g = r["by_grid"]
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['comparison']} | {_f(g['16'])} | {_f(g['12'])} | {_f(g['8'])} | {_f(r['rollout'])} |")
     lines += ["", "## 配对比较（full − 对照，负数 = full 更好）", "",
               "| 数据集 | 步数 | 比较 | 种子 | 平均差 | 种子间 SD | full 更好的种子 | 每个种子里 full 更好的轨迹 |", "|---|---|---|---|---|---|---|---|"]
     for r in s["across_seeds"]:
@@ -241,6 +302,16 @@ def _markdown(s):
             traj = ", ".join(f"{w}/{n}" for w, n in zip(r["trajectories_full_better"], r["trajectories"]))
             lines.append(f"| {r['dataset']} | {r['updates']} | {r['comparison']} | {r['seeds']} | {_f(r['mean'])} | "
                          f"{_f(r['seed_std'])} | {r['seeds_full_better']}/{r['seeds']} | {traj} |")
+    if s.get("equal_step"):
+        lines += ["", "## 同步数对照（补充）：对照截到 po_jepa_full 实际训练的步数（full − 对照，负数 = full 更好）", "",
+                  "| 数据集 | 步数 | 种子 | 对照 | full 步数 | 对照选中步 | 对照各自早停的选中步 | 16×16 | 12×12 | 8×8 | 16×16 滚动 | 主表 16×16 |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for r in s["equal_step"]:
+            e = {g: (r["equal_step"][g] or {}).get("mean") for g in ("16", "12", "8")}
+            m = (r["main"] or {}).get("16") or {}
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['seed']} | {r['condition']} | {r['limit_updates']} | {r['selected_step']} | "
+                         f"{r['own_best_step']} | {_f(e['16'])} | {_f(e['12'])} | {_f(e['8'])} | "
+                         f"{_f((r['equal_step_rollout'] or {}).get('mean'))} | {_f(m.get('mean'))} |")
     if s["transfer"]:
         lines += ["", "## 分布外评测：换调节项后的变化（正数 = 变差；同编号窗口配对）", "",
                   "| 训练 → 测试 | 步数 | 种子 | 条件 | 未来误差变化 | SE | 轨迹数 |", "|---|---|---|---|---|---|---|"]

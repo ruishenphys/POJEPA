@@ -17,6 +17,10 @@ from po_jepa import variants  # noqa: E402
 BASE_SCENES = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape~shape=multi_well")
 CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
 SEEDS = (1703, 1704, 1705)
+# 2026-11-10 v7.1（早停、检查点精简、分网格验证、多步滚动评测）：正式运行的训练、评测、分布外评测、规划和汇总写进
+# <results>/full/v7.1/，不和暂停前用旧代码跑了一半的任务混在一起；编码、标定、检查（A–C2 段）的命令和输出位置不变，
+# 已完成的会被 run_jobs.py 直接跳过。试跑已跑完，路径不变。
+FULL_TRAIN_TAG = "v7.1"
 # 分布外评测用的测试调节项：每个场景 2 个物理参数 + 2 个控制 + 2 个外观（训练都在基础场景上）
 TEST_VARIANTS = {
     "double_well": ("coupling=0.5", "tilt=0.2", "gain=2", "delay=1", "background=checker,color=white", "distractors=2"),
@@ -58,6 +62,7 @@ def main():
     n, updates = (200, 2000) if a.stage == "pilot" else (2000, 10000)
     seeds = SEEDS[:1] if a.stage == "pilot" else SEEDS
     root = f"{a.results}/{'pilot' if a.stage == 'pilot' else 'full'}"
+    train_root = root if a.stage == "pilot" else f"{root}/{FULL_TRAIN_TAG}"
     enc = f"--upstream-root {a.upstream_root} --checkpoint {a.encoder}"
 
     def name(scene, extra=None):
@@ -89,20 +94,20 @@ def main():
         print(f"# ===== V3 分布外评测（GPU，{len(tests)*len(CONDITIONS)} 条，种子 1703；只评 16×16 网格单点，较快）=====")
         for s, t in tests:
             for c in CONDITIONS:
-                run = "" if c == "identity" else f" --training-run {root}/{name(s)}/seed1703/{c}"
+                run = "" if c == "identity" else f" --training-run {train_root}/{name(s)}/seed1703/{c}"
                 extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
                 print(f"python run.py transfer {ds(s)} --updates {updates} --seed 1703 --condition {c} --test-variant {t}{run} "
-                      f"--features-root {feats(s, t)} --device cuda:0 --output {root}/transfer/{name(s, t)}/{c}{extra}")
+                      f"--features-root {feats(s, t)} --device cuda:0 --output {train_root}/transfer/{name(s, t)}/{c}{extra}")
         print(f"# ===== V4 规划（GPU，{len(scenes)*len(CONDITIONS)} 条，种子 1703，每条 {a.plan_episodes} 个回合；"
               "不动/随机/真值规划三个参照只在 identity 那条里跑）=====")
         for s in scenes:
             for c in CONDITIONS:
                 extra = (f" --ac-checkpoint {a.ac_checkpoint} --samples 64" if c == "vjepa2_ac" else "") + \
                         ("" if c == "identity" else " --no-baselines")
-                print(f"python tools/plan_v7.py --job {root}/{name(s)}/seed1703/{c} {enc} --episodes {a.plan_episodes} "
-                      f"--output {root}/plan/{name(s)}/{c}.json --device cuda:0{extra}")
+                print(f"python tools/plan_v7.py --job {train_root}/{name(s)}/seed1703/{c} {enc} --episodes {a.plan_episodes} "
+                      f"--output {train_root}/plan/{name(s)}/{c}.json --device cuda:0{extra}")
         print("# ===== V5 汇总（CPU）=====")
-        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        print(f"python tools/summarize_v7.py --results {train_root} --output {train_root}/summary")
         return
 
     encode = [s for s in scenes if not (a.v6_features and s == "double_well" and n == 200)]
@@ -130,9 +135,19 @@ def main():
             for c in CONDITIONS:
                 extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
                 print(f"python run.py run {ds(s)} --updates {updates} --seed {seed} --condition {c} "
-                      f"--features-root {feats(s)} --device cuda:0 --output {root}/{name(s)}/seed{seed}/{c}{extra}")
+                      f"--features-root {feats(s)} --device cuda:0 --output {train_root}/{name(s)}/seed{seed}/{c}{extra}")
+    if a.stage == "full":
+        eq = ("matched_transformer", "po_jepa_no_consistency")
+        print(f"# ===== D2 同步数对照（GPU，D 段完成后；{len(scenes)*len(seeds)*len(eq)} 条，较快）："
+              "截到 po_jepa_full 实际训练的步数再评测，补充对照 =====")
+        for s in scenes:
+            for seed in seeds:
+                for c in eq:
+                    print(f"python run.py equal-step {ds(s)} --updates {updates} --seed {seed} --condition {c} "
+                          f"--training-run {train_root}/{name(s)}/seed{seed}/{c} --limit-run {train_root}/{name(s)}/seed{seed}/po_jepa_full "
+                          f"--features-root {feats(s)} --device cuda:0 --output {train_root}/equal-step/{name(s)}/seed{seed}/{c}")
     print("# ===== E 汇总（CPU，D 段完成后；缺的任务会列出来，可以先汇总已完成的）=====")
-    print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+    print(f"python tools/summarize_v7.py --results {train_root} --output {train_root}/summary")
 
 
 if __name__ == "__main__":

@@ -93,7 +93,7 @@ def prepare(cmd, workdir):
     """把一条命令改写成“可以接着跑”的形式；返回 (要执行的命令, 说明) 或 (None, 说明) 表示已经完成。"""
     argv = shlex.split(cmd)
     notes = []
-    for name in ("--training-run", "--job"):   # 后面段指向的训练目录：换成实际完成的那一次
+    for name in ("--training-run", "--job", "--limit-run"):   # 后面段指向的训练目录：换成实际完成的那一次
         target = option(argv, name)
         if target and not complete(workdir/target):
             done = finished_attempt(workdir/target)
@@ -119,7 +119,7 @@ def prepare(cmd, workdir):
                 notes.append(f"上次中断，从 {os.path.relpath(source, workdir)} 续训，输出到 {out}-resume{k}")
             else:
                 notes.append(f"上次中断在开始训练之前，旧目录改名为 {os.path.relpath(aside(out_path), workdir)}")
-        elif sub in ("calibrate", "check", "transfer", "evaluate"):
+        elif sub in ("calibrate", "check", "transfer", "evaluate", "equal-step"):
             if complete(out_path):
                 return None, "已完成"
             notes.append(f"上次没跑完，旧目录改名为 {os.path.relpath(aside(out_path), workdir)}")

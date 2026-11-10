@@ -191,6 +191,20 @@ def _scale(value):
     return dict(mean=float(x.mean()),rms=float(x.square().mean().sqrt()),std=float(x.std(unbiased=False)))
 
 @torch.no_grad()
+def unit_rollout(model, raw, controls, duration, grid):
+    """v7.1 多步自回归滚动：每步 1 个控制周期，第 k 步从第 k−1 步的预测出发、只看自己那 1 周期的动作，
+    走满 T 步（T 必须是正整数周期）。T=1 时就是直接预测。不读任何中间真值。"""
+    steps = float(duration[0])
+    if duration.shape != (1,) or steps != int(steps) or steps < 1:
+        raise ValueError("unit rollout needs one window with a positive integer duration")
+    state, rest = raw, controls
+    for k in range(int(steps)-1, 0, -1):
+        one = torch.ones_like(duration)
+        pair = comparison.split_action_segments(rest,tau=one,sigma=one*k)
+        state, rest = model(state,pair.first,one,grid), pair.second
+    return model(state,rest,torch.ones_like(duration),grid)
+
+@torch.no_grad()
 def point_metrics(model, window, donor, query, config):
     """式14/15与附录 Delta：单网格，第二段仅从预测 raw Z 重启完整 Phi。
 
@@ -217,7 +231,12 @@ def point_metrics(model, window, donor, query, config):
         actual = comparison.jepa_distance(model(raw,controls,duration,grid),target,config=config).per_sample
         alternative = comparison.jepa_distance(model(raw,donor.inputs.controls,duration,grid),target,config=config).per_sample
         delta = metrics.SampleMetric(alternative-actual,"delta_act","dimensionless")
-    values = _values((future,metrics.temporal_composition_defect(record),metrics.temporal_composition_rms_defect(record),delta))
+    items = [future,metrics.temporal_composition_defect(record),metrics.temporal_composition_rms_defect(record),delta]
+    if has_rollout(query.kind,query.grid_size):
+        rolled = unit_rollout(model,raw,controls,duration,grid)
+        items.append(metrics.SampleMetric(comparison.jepa_distance(rolled,target,config=config).per_sample,
+                                          "rollout_future_jepa_distance","dimensionless"))
+    values = _values(items)
     values.update(tcd_per_second2=values["tcd_frobenius"]*16,tcd_rms_per_second2=values["tcd_rms"]*16,
                   tcd_normalized=values["tcd_rms"]/math.sqrt(float(comparison.input_scale(raw)[0])))
     return values,dict(prediction_scale=_scale(direct),target_scale=_scale(target),
@@ -240,12 +259,19 @@ def pair_metrics(model, window, query):
     return values,dict(source_grid=[16,16],target_grid=[query.grid_size]*2,
                        fine_after_R_scale=_scale(fine),coarse_scale=_scale(coarse))
 
-def metric_units(kind):
-    """忠实Frobenius/RMS和周期/秒各自命名；不混用训练平方损失。"""
+def has_rollout(kind, grid=None):
+    """v7.1：多步滚动只在 16×16 单点上做（6 个时长，T 步共 30 次前向，约为原 16×16 评测成本的一倍）。"""
+    return kind == "point" and grid == 16 and comparison.check.is_v7()
+
+def metric_units(kind, grid=None):
+    """忠实Frobenius/RMS和周期/秒各自命名；不混用训练平方损失。grid：单点的网格边长（决定有没有滚动指标）。"""
     if kind == "point":
-        return dict(future_jepa_distance="dimensionless",tcd_frobenius="control_cycle^-2",tcd_rms="control_cycle^-2",
+        units = dict(future_jepa_distance="dimensionless",tcd_frobenius="control_cycle^-2",tcd_rms="control_cycle^-2",
                     delta_act="dimensionless",tcd_per_second2="second^-2",tcd_rms_per_second2="second^-2",
                     tcd_normalized="control_cycle^-2")
+        if has_rollout(kind, grid):
+            units["rollout_future_jepa_distance"] = "dimensionless"
+        return units
     if kind == "pair":
         return dict(scd_frobenius="control_cycle^-1",scd_rms="control_cycle^-1",scd_per_second="second^-1",scd_rms_per_second="second^-1",
                     scd_normalized="control_cycle^-1")
@@ -263,7 +289,7 @@ def _record_map(records, queries, conditions):
             raise ValueError("unexpected/duplicate result identity or status")
         if row["status"] == "ok":
             values = row["values"]
-            if set(values) != set(metric_units(query.kind)) or any(type(v) not in (int,float) or not math.isfinite(v) for v in values.values()):
+            if set(values) != set(metric_units(query.kind,query.grid_size)) or any(type(v) not in (int,float) or not math.isfinite(v) for v in values.values()):
                 raise ValueError("successful result requires all finite metrics")
         found[key] = row
     return found
@@ -292,7 +318,7 @@ def summarize_records(records, queries, conditions=CONDITIONS):
             grouped.setdefault(key,[]).append(found.get(q.key(condition)))
     groups = []
     for (condition,seed,kind,stratum,grid,duration),rows in grouped.items():
-        for name,unit in metric_units(kind).items():
+        for name,unit in metric_units(kind,grid).items():
             groups.append(dict(condition=condition,seed=seed,kind=kind,stratum=stratum,grid_size=grid,
                 duration_cycles=duration,source_grid_size=16 if kind=="pair" else grid,
                 **_group_summary(len(rows),rows,name,unit)))
@@ -318,7 +344,7 @@ def paired_comparisons(records, queries):
             missing = "full_not_run" if full is None else "reference_not_run" if other is None else "full_failed" if full["status"]!="ok" else "reference_failed" if other["status"]!="ok" else None
             if missing:
                 unmatched.append(dict(query=asdict(q),reason=missing)); continue
-            delta = {n:full["values"][n]-other["values"][n] for n in metric_units(q.kind)}
+            delta = {n:full["values"][n]-other["values"][n] for n in metric_units(q.kind,q.grid_size)}
             tag = "accuracy_not_measured_on_this_grid_time"
             if q.kind == "point":
                 tag = _tradeoff(delta["future_jepa_distance"],delta["tcd_normalized"])
@@ -407,7 +433,7 @@ def run_prepared_evaluation(model, condition, features, output, config, *, queri
     try:
         model.eval()
         for index,q in enumerate(queries):
-            row = dict(query=asdict(q),condition=condition,seed=comparison.check.model_seed(),checkpoint=checkpoint_identity,units=metric_units(q.kind))
+            row = dict(query=asdict(q),condition=condition,seed=comparison.check.model_seed(),checkpoint=checkpoint_identity,units=metric_units(q.kind,q.grid_size))
             try:
                 w = load_test_window(features,q,device)
                 if q.kind == "point":

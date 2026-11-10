@@ -156,6 +156,7 @@ def preregister():
         from po_jepa import ac_baseline, datasets
         counts = _ac_parameter_counts()
         extra = dict(protocol="v7", dataset=datasets.active().tag, updates=check.v7_updates(),
+                     early_stopping=early_stopping_config(), checkpoint_retention=checkpoint_retention_config(),
                      ac_parameters=counts, ac_baselines={c: ac_baseline.describe(c) for c in AC_CONDITIONS},
                      ac_small_parameter_match=parameter_match(matching["po_parameters"], counts["vjepa2_ac_small"]))
     return dict(**extra, schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
@@ -387,6 +388,20 @@ def load_transformer_checkpoint(path, expected_sha, model, optimizer, expected_p
     if device.type == "cuda": torch.cuda.set_rng_state(payload["rng_state"]["cuda"]["state"], device=device)
     return training.CheckpointProgress(payload["completed_steps"], sampling)
 
+GRID_METRICS = {12: "future_jepa_distance_grid12", 8: "future_jepa_distance_grid8"}
+
+
+@torch.no_grad()
+def coarse_future(model, raw, controls, duration, grid, target, config):
+    """v7.1：同一验证窗口在 12×12、8×8 上的直接预测误差（与 test 的 spatial_view 同一 R：起点和真实未来都用 R 粗化）。"""
+    out = {}
+    for size, name in GRID_METRICS.items():
+        transfer = build_spatial_transfer(grid, target_height=size, target_width=size)
+        prediction = model(apply_spatial_transfer(raw, transfer), controls, duration, transfer.target)
+        out[name] = jepa_distance(prediction, apply_spatial_transfer(target, transfer), config=config).per_sample.detach().cpu().double()
+    return out
+
+
 def validate_condition(model, features, output, device, config):
     """固定20×5×4 validation，三指标同窗；仅future均值用于选点，不读test。
 
@@ -399,6 +414,8 @@ def validate_condition(model, features, output, device, config):
     modes = {m:m.training for m in model.modules()}
     identity = check._parameter_identity(model)
     totals = dict(future_jepa_distance=0., tcd_frobenius=0., scd_frobenius=0.)
+    if check.is_v7():   # v7.1：粗网格上的直接预测误差只记录、按网格拆开报，不参与选点
+        totals.update({name: 0. for name in GRID_METRICS.values()})
     count = 0
     if device.type == "cuda": torch.cuda.synchronize(device)
     start_time = time.perf_counter()
@@ -416,6 +433,11 @@ def validate_condition(model, features, output, device, config):
                     torch.cat([w.inputs.duration for w in windows]), transfer,
                     torch.cat([w.target.raw_z for w in windows]), config)
                 values = {name:m.values.detach().cpu().double() for name,m in metrics.items()}
+                if check.is_v7():
+                    values.update(coarse_future(model, torch.cat([w.inputs.raw_z for w in windows]),
+                        data.stack_controls([w.inputs.controls for w in windows]),
+                        torch.cat([w.inputs.duration for w in windows]), grid,
+                        torch.cat([w.target.raw_z for w in windows]), config))
                 if any(v.shape != (4,) or not torch.isfinite(v).all() for v in values.values()):
                     raise ValueError("four finite values per validation metric required")
                 for name in totals: totals[name] += values[name].sum().item()
@@ -428,9 +450,94 @@ def validate_condition(model, features, output, device, config):
     if count != len(queries) or check._parameter_identity(model) != identity:
         raise ValueError("validation count or unchanged parameter/gradient contract failed")
     means = {name:value/count for name,value in totals.items()}
+    grid_means = {"16": means["future_jepa_distance"],
+                  **{str(size): means[name] for size, name in GRID_METRICS.items() if name in means}}
     return dict(metric="future_jepa_distance", mean=means["future_jepa_distance"], means=means,
+        grid_means=grid_means if len(grid_means) > 1 else None,
         windows=count, seconds=time.perf_counter()-start_time, modes_restored=True,
         selection_uses_only="future_jepa_distance mean", includes_loading_and_metric_logging=True)
+
+def early_stopping_config():
+    """v7 早停规则（configs/train/v7.yaml 的 early_stopping）；v6 协议没有这一项，返回 None（不早停）。"""
+    value = check.load_protocol().get("early_stopping")
+    if value is None:
+        return None
+    if (type(value) is not dict or set(value) != {"min_updates", "patience_validations"}
+        or any(type(v) is not int or v <= 0 for v in value.values())):
+        raise ValueError("early_stopping needs positive integer min_updates and patience_validations")
+    return dict(value)
+
+
+def checkpoint_retention_config():
+    """v7 检查点保留规则；v6 返回 None（每个验证点的检查点都保留）。"""
+    value = check.load_protocol().get("checkpoints")
+    if value is None:
+        return None
+    if (type(value) is not dict or set(value) != {"keep_neighbors", "prune_conditions"}
+        or type(value["keep_neighbors"]) is not int or value["keep_neighbors"] < 0
+        or type(value["prune_conditions"]) is not list or not set(value["prune_conditions"]) <= set(V7_CONDITIONS)):
+        raise ValueError("checkpoints needs a nonnegative integer keep_neighbors and registered prune_conditions")
+    return dict(keep_neighbors=value["keep_neighbors"], prune_conditions=list(value["prune_conditions"]))
+
+
+def best_validation(validations):
+    """与 _selection 同一规则：均值最小，平局取最早（严格更小才换）。"""
+    return min(validations, key=lambda r: (r["mean"], r["step"]))
+
+
+def early_stop_decision(validations, budget, rule):
+    """只看到目前为止的验证序列（纯函数，续训和汇总可复算）：最好点之后已有 patience 次验证没有刷新、
+    且当前步数 ≥ min_updates、且预算还没用完时，返回 stop=True。rule=None 时永不早停。"""
+    if not validations:
+        raise ValueError("early stop decision needs at least one validation")
+    last, best = validations[-1]["step"], best_validation(validations)
+    since = sum(r["step"] > best["step"] for r in validations)
+    stop = (rule is not None and last < budget and last >= rule["min_updates"]
+            and since >= rule["patience_validations"])
+    return dict(step=last, best_step=best["step"], validations_since_best=since, stop=stop)
+
+
+def verify_stopping(validations, completed, budget, rule):
+    """完成的训练只能是两种：跑满预算且之前没有任何验证点触发早停；或在恰好第一个触发早停的验证点停下。"""
+    if not validations or validations[-1]["step"] != completed:
+        raise ValueError("training must end on its last validation")
+    for k in range(1, len(validations)):
+        if early_stop_decision(validations[:k], budget, rule)["stop"]:
+            raise ValueError("training continued past an early-stop point")
+    final = early_stop_decision(validations, budget, rule)
+    if completed != budget and not final["stop"]:
+        raise ValueError("training ended before its budget without meeting the early-stop rule")
+    return dict(rule=rule, budget=budget, completed_updates=completed, stopped_early=completed != budget,
+                best_step=final["best_step"], validations_since_best=final["validations_since_best"])
+
+
+def kept_checkpoint_steps(validations, retention, condition):
+    """精简的条件：最好验证点前后各 keep_neighbors 个验证点，再加最近一个；retention=None 或不在 prune_conditions 里时全部保留。"""
+    steps = [r["step"] for r in validations]
+    if retention is None or condition not in retention["prune_conditions"]:
+        return set(steps)
+    k, b = retention["keep_neighbors"], steps.index(best_validation(validations)["step"])
+    return set(steps[max(0, b-k):b+k+1]) | {steps[-1]}
+
+
+def selection_neighbors(validations, retention, width=2):
+    """选中点前后各 keep_neighbors（默认 2）个验证点的数值，供核对选中点是不是孤立的单点低谷；不改选点。"""
+    k = width if retention is None else retention["keep_neighbors"]
+    steps = [r["step"] for r in validations]
+    b = steps.index(best_validation(validations)["step"])
+    return [dict(step=r["step"], mean=r["mean"], grid_means=r.get("grid_means"), selected=i == b)
+            for i, r in enumerate(validations) if b-k <= i <= b+k]
+
+
+def prune_checkpoints(output, validations, retention, condition):
+    """删掉不在保留集里的检查点文件（选点记录 selection-*.json 和验证明细都不删）。"""
+    keep = kept_checkpoint_steps(validations, retention, condition)
+    for row in validations:
+        path = Path(output)/row["checkpoint"]
+        if row["step"] not in keep and path.exists():
+            path.unlink()
+    return sorted(keep)
+
 
 def _validate_registration(condition, model, sequence, registration):
     """先核实际模型计数、封存查询/源码/配置；容量不匹配或身份过时则不创建运行目录。"""
@@ -520,8 +627,16 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
             from .resume import prepare_condition
             completed,validations,best,role=prepare_condition(resume_from,output,condition,model,optimizer,
                 sequence,generator_state,registration,features,device,loss_config,validation_interval)
+        rule, retention = early_stopping_config(), checkpoint_retention_config()
+        if check.is_v7() and (registration.get("early_stopping") != rule or registration.get("checkpoint_retention") != retention):
+            raise ValueError("early-stopping/checkpoint rules differ from preregistration")
+        stopped = bool(validations) and early_stop_decision(validations, len(sequence), rule)["stop"]
+        if validations:   # 续训：中断前可能还没来得及删的检查点在这里补删
+            prune_checkpoints(output, validations, retention, condition)
         model.train()
         for index in range(completed,len(sequence)):
+            if stopped:
+                break
             rows=sequence[index]
             attempted = index+1
             batch = learning._learning_batch(features, rows, device, output, registration["query_sequence_sha256"])
@@ -533,6 +648,7 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
                     preregistration=registration, provenance=provenance, actual_predictor_parameters=parameter_counts(model)))
                 row,best = _selection(condition,model,optimizer,features,output,device,loss_config,0,generator_state,provenance,best)
                 validations.append(row)
+                prune_checkpoints(output, validations, retention, condition)
             if device.type == "cuda": torch.cuda.synchronize(device); torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
             if is_ac(condition):
@@ -558,6 +674,12 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
                 row,best = _selection(condition,model,optimizer,features,output,device,loss_config,
                     completed,generator_state,provenance,best)
                 validations.append(row)
+                prune_checkpoints(output, validations, retention, condition)
+                decision = early_stop_decision(validations, len(sequence), rule)
+                if decision["stop"]:
+                    stopped = True
+                    print(f"早停：{condition} 在第 {completed} 步停止（最好验证点第 {decision['best_step']} 步，"
+                          f"之后连续 {decision['validations_since_best']} 次验证没有刷新）", flush=True)
         monitor = consistency_monitor_summary(output, condition, loss_config, target_rho)
         if monitor is not None and not monitor["active"]:
             detail = (f"中位数只有 {monitor['median_share']}，低于门槛 {monitor['threshold']}"
@@ -568,6 +690,9 @@ def run_prepared_condition(condition, model, optimizer, *, sequence, generator_s
             completed_updates=completed,query_sequence_sha256=registration["query_sequence_sha256"],
             preregistration_sha256=hashlib.sha256(data.cache._json_bytes(registration)).hexdigest(),
             best=best,validations=validations,future_error_decreased=best["step"]>0,
+            early_stopping=verify_stopping(validations, completed, len(sequence), rule),
+            checkpoint_retention=dict(rule=retention, kept_steps=sorted(kept_checkpoint_steps(validations, retention, condition))),
+            selection_neighbors=selection_neighbors(validations, retention),
             scientific_reproduction_completed=False)
         data.cache._write_json(output/"report.json",report)
         data.cache._write_json(output/"COMPLETE.json",dict(report_sha256=data.cache.file_sha(output/"report.json")))
