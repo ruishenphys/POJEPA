@@ -4,8 +4,10 @@
       --job <任务编号> [--delete-raw] [--time-limit-minutes <上限>] [--retry]
 
 - 任务编号必须在本配置的任务图里（`tools/droid_jobs.py`），阶段必须是编号的第一段。
-- 开始时完成标志已存在：什么都不做，退出 0；`eval/spectral-gap` 例外，照常调用阶段，由阶段核本次输入身份与已完成的
-  是否相同（相同直接返回，不同报错退出 1；S11b-fix1）。完成标志由各阶段自己最后写（先写临时文件再改名）；阶段返回后完成标志
+- 开始时完成标志已存在：index、download、prepare、encode、calibrate、check 什么都不做，退出 0（这些产物只写一次，
+  下游读的时候核身份）；train、eval、summary（`droid_jobs.RECHECKED_STAGES`）照常调用阶段，由阶段先核本次请求的身份
+  再决定复用：训练核 COMPLETE.json 绑定 report.json，评测核 source.json、job.json 与本次请求相同（不同报错退出 1；
+  S11b-fix1、S11-P1-1 修复），汇总按当前产物重算（内容和已有输出相同就不换）。只有完成标志、没有报告的目录不算完成。完成标志由各阶段自己最后写（先写临时文件再改名）；阶段返回后完成标志
   不存在算失败（退出 1）。训练片的编码任务（带 `--delete-raw`）的完成标志是 `features/<片>/_raw_deleted/<name>.json`，
   原始文件删完才写；特征已编完但没删完时重跑会进入编码阶段，跳过编码、把剩下的删掉（S14-fix1）。
 - 退出码：0 完成；75 已存档、要重排同一条命令；其他非 0 是失败（09 §4.7）。阶段抛出的异常退出 1。
@@ -79,8 +81,9 @@ MAINS = {"index": lambda argv: ix.main(argv), "download": lambda argv: dl.main(a
          "calibrate": lambda argv: cb.main(argv), "check": lambda argv: ck.main(argv),
          "train": lambda argv: tr.main(argv), "eval": lambda argv: ej.main(argv),
          "summary": lambda argv: droid_summary.main(argv)}
-# 阶段整体还没接上、但其中某个任务已经能跑的（S11b：截断间隙只读特征和 sigma_z.json）
+# 同一阶段里另有入口的任务（S11b：截断间隙只读特征和 sigma_z.json）
 JOB_MAINS = {f"eval/{droid_jobs.SPECTRAL_GAP}": lambda argv: sg.main(argv)}
+assert all(job.partition("/")[0] in droid_jobs.RECHECKED_STAGES for job in JOB_MAINS)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.retry and stage != "train":
         p.error("--retry is only for train jobs")
     done = Path(job["complete"])
-    if done.exists() and a.job not in JOB_MAINS:
+    if done.exists() and stage not in droid_jobs.RECHECKED_STAGES:
         print(f"{a.job}: already complete ({done})")
         return 0
     if a.job in JOB_MAINS:

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import re
+import shutil
 import statistics
 import sys
 import tempfile
@@ -84,6 +85,8 @@ class TrainView:
     - `data_sha256`：{DATA_FILES 里的键: SHA}（登记里的 `splits.json`、`windows/val.json`、`action_scale.json`）
     - `lambdas`：带一致性的三个条件登记的 {"time_weight", "space_weight"}，其余为 None；`sigma_z` 同理（PO-JEPA 类）
     - `log_ranges`：train-log.jsonl 每行的 (first_step, last_step)，按文件顺序
+    - `log_problem`：训练端同一条核对 `train.check_log_coverage`（行内的步号也要正好是 first…last、合起来 1…U）报的错，
+      通过时为 None（S13-P2-1：只看行首尾时，行内丢一步、重一步也能过）
     - `best_checkpoint_sha256`：selection.json 的当前最优；`step_seconds`：每步用时（日志里的单步用时）
     - `curves`：{"validation": [(步, 均值)], "train_jepa": [(步, JEPA 损失)]}（收敛曲线）"""
     condition: str
@@ -98,6 +101,7 @@ class TrainView:
     updates: int
     completed: int
     log_ranges: tuple[tuple[int, int], ...]
+    log_problem: str | None
     best_checkpoint_sha256: str
     step_seconds: tuple[float, ...]
     peak_memory_bytes: int | None
@@ -147,6 +151,11 @@ def read_train(path: Path) -> TrainView:
     if (reg["condition"], reg["seed"]) != (report["condition"], report["seed"]):
         raise ValueError(f"{path}: registration and report name different tasks")
     rows = tr._read_lines(path/tr.LOG_FILE)
+    try:
+        tr.check_log_coverage(rows, reg["schedule"]["updates"])
+        log_problem = None
+    except ValueError as error:
+        log_problem = str(error)
     steps = [st for r in rows for st in r["steps"]]
     peaks = [r["gpu"]["peak_memory_bytes"] for r in rows if r.get("gpu")]
     lam = reg.get("lambda_weights")
@@ -160,6 +169,7 @@ def read_train(path: Path) -> TrainView:
         lambdas=None if lam is None else {k: lam[k] for k in ("time_weight", "space_weight")},
         initial_model_sha256=reg["model"]["initial_model_sha256"], updates=reg["schedule"]["updates"],
         completed=report["completed_steps"], log_ranges=tuple((r["first_step"], r["last_step"]) for r in rows),
+        log_problem=log_problem,
         best_checkpoint_sha256=selection["best"]["checkpoint_sha256"],
         step_seconds=tuple(float(st["seconds"]) for st in steps),
         peak_memory_bytes=max(peaks) if peaks else None,
@@ -578,6 +588,8 @@ def run_checks(config: DroidConfig, got: Mapping) -> list[dict]:
             expect = last + 1
         if not ok or expect != t.updates + 1 or t.completed != t.updates:
             p.append(f"train/{c}/seed{s} log does not cover 1…{t.updates} exactly once (completed {t.completed})")
+        elif t.log_problem is not None:
+            p.append(f"train/{c}/seed{s} log steps: {t.log_problem}")
     out.append(_check("训练日志", p))
 
     p = []
@@ -1034,8 +1046,16 @@ def markdown(summary: Mapping) -> str:
 
 # ---------------------------------------------------------------- 输出
 
+def _same_tree(a: Path, b: Path) -> bool:
+    """两个目录的相对路径集合和每个文件的字节都相同。"""
+    files = lambda root: {p.relative_to(root).as_posix(): p for p in root.rglob("*") if p.is_file()}
+    fa, fb = files(a), files(b)
+    return set(fa) == set(fb) and all(fa[k].read_bytes() == fb[k].read_bytes() for k in fa)
+
+
 def write_output(output: Path, summary: Mapping, svgs: Mapping[str, str]) -> Path:
-    """13 §7：先写临时目录再整体换名；已有的输出改名为 <输出>.previousN。核对全部通过时 COMPLETE.json 记 summary.json 的 SHA。"""
+    """13 §7：先写临时目录再整体换名；已有的输出改名为 <输出>.previousN。核对全部通过时 COMPLETE.json 记 summary.json 的 SHA。
+    已有输出和这次的逐文件逐字节相同时不换（统一入口每次都重算汇总，S11-P1-1 修复）。"""
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -1048,6 +1068,9 @@ def write_output(output: Path, summary: Mapping, svgs: Mapping[str, str]) -> Pat
         for name, svg in sorted(svgs.items()):
             (temporary/"figures"/name).write_text(svg, encoding="utf-8")
         cache._write_json(temporary/"COMPLETE.json", dict(summary_sha256=cache.file_sha(temporary/"summary.json")))
+    if output.exists() and _same_tree(output, temporary):      # 重跑、产物没变：保留原输出，不再多一份 previousN
+        shutil.rmtree(temporary)
+        return output
     if output.exists():
         n = 1
         while output.with_name(f"{output.name}.previous{n}").exists():

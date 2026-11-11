@@ -401,6 +401,38 @@ def test_registration_mismatch_failed_and_retry(root, tmp_path):
     assert not (out/"FAILED.json").exists() and (out/"COMPLETE.json").exists()
 
 
+def test_leftover_partial_files_do_not_block_the_rerun(root, tmp_path, monkeypatch):
+    """S09a-P2-1：最后写 report.json / COMPLETE.json 时在 `cache._write_json` 改名前中断，留下 *.partial；同一条命令重跑
+    （带或不带 --retry）照常写完。先模拟“上次写 report 时中断、这次写失败记了 FAILED.json”的旧行为。另：只有完成标志、
+    没有 report.json 的目录不算完成。"""
+    config = small(updates=20)
+    out = tmp_path/"run"
+    assert go(root, out, "matched_transformer", config) == 0
+    report = json.loads((out/"report.json").read_text())
+    for names in (("report.json.partial",), ("COMPLETE.json.partial", "FAILED.json.partial", "registration.json.partial")):
+        (out/"COMPLETE.json").unlink()
+        if "COMPLETE.json.partial" not in names:
+            (out/"report.json").unlink()
+        for name in names:
+            (out/name).write_bytes(b'{"half": ')
+        assert go(root, out, "matched_transformer", config) == 0
+        assert not list(out.glob("*.partial")) and (out/"COMPLETE.json").exists()
+        again = json.loads((out/"report.json").read_text())
+        assert again["best"] == report["best"] and again["completed_steps"] == 20
+        assert json.loads((out/"COMPLETE.json").read_text())["report_sha256"] == cache.file_sha(out/"report.json")
+    (out/"COMPLETE.json").unlink()                          # 写 FAILED.json 时也被 .partial 挡住的话会直接抛出：先清
+    (out/"report.json").unlink()
+    (out/"FAILED.json.partial").write_bytes(b"{")
+    monkeypatch.setattr(tr, "selection", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert go(root, out, "matched_transformer", config) == 1
+    assert json.loads((out/"FAILED.json").read_text())["error"] == "boom"
+    monkeypatch.undo()
+    assert go(root, out, "matched_transformer", config, retry=True) == 0
+    (out/"report.json").unlink()                            # 只剩完成标志：不算完成
+    with pytest.raises(ValueError, match="does not match report.json"):
+        go(root, out, "matched_transformer", config)
+
+
 def test_errors_write_failed_json(root, tmp_path, monkeypatch):
     """其他错误写 FAILED.json、退出 1；数据加载器给错步号也算错误。"""
     config = small(updates=20)

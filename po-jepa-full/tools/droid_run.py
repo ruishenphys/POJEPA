@@ -3,6 +3,8 @@
   python tools/droid_run.py jobs-full.json --gpus 0,1 --cpus 32 --mem-gb 256
   python tools/droid_run.py jobs-full.json --gpus 0,1 --cpus 32 --mem-gb 256 --dry-run
 
+- 开始时完成标志已在的任务算完成、不再运行；train、eval、summary 例外（`RECHECKED_STAGES`，和 `droid_jobs` 的相同）：
+  每次启动运行器都照常运行一次，由阶段先核本次请求的身份再复用已有结果（身份不同就失败，S11-P1-1 修复）。
 - 依赖都完成（看完成标志）的任务进入可跑队列，按 priority、再按编号取；当前排在前面的放不下时，后面放得下的先跑。
   GPU 任务独占它要的卡数（设 CUDA_VISIBLE_DEVICES），CPU 任务的 CUDA_VISIBLE_DEVICES 为空；CPU 和内存按任务图里的
   资源数记账，不超过命令行给的总量。要的资源比总量还多的任务一开始就记为失败。
@@ -32,6 +34,7 @@ import sys
 import time
 
 SCHEMA = "droid_jobs_v1"
+RECHECKED_STAGES = ("train", "eval", "summary")    # = droid_jobs.RECHECKED_STAGES（本脚本不导入 po_jepa，测试核两者相同）
 LOCK = "RUNNER.pid"
 INTERRUPTED = 130
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]
@@ -59,6 +62,11 @@ def log_path(graph: dict, workdir: Path, job_id: str) -> Path:
 
 def flag(workdir: Path, job: dict) -> Path:
     return workdir/job["complete"]
+
+
+def already_done(workdir: Path, job: dict) -> bool:
+    """启动时算作已完成、不再运行的任务：完成标志在，且不是要由阶段复核身份的阶段。"""
+    return job["stage"] not in RECHECKED_STAGES and flag(workdir, job).exists()
 
 
 def order_key(job: dict) -> tuple:
@@ -100,11 +108,13 @@ class Pool:
 
 def dry_run(graph: dict, workdir: Path) -> int:
     jobs = {j["id"]: j for j in graph["jobs"]}
-    done = {i for i, j in jobs.items() if flag(workdir, j).exists()}
+    done = {i for i, j in jobs.items() if already_done(workdir, j)}
     todo = [i for i in jobs if i not in done]
     print(f"{graph['config']}: {len(jobs)} 个任务，已完成 {len(done)} 个，待跑 {len(todo)} 个（假定都成功、一次跑一个的顺序）")
     for i in sorted(done, key=lambda i: order_key(jobs[i])):
         print(f"  已完成  {i}")
+    for i in sorted((i for i in todo if flag(workdir, jobs[i]).exists()), key=lambda i: order_key(jobs[i])):
+        print(f"  已完成、要复核  {i}")
     simulated, n = set(done), 0
     while len(simulated) < len(jobs):
         ready = [jobs[i] for i in todo if i not in simulated and all(d in simulated for d in jobs[i]["deps"])]
@@ -124,26 +134,31 @@ def _acquire(lock: Path) -> int:
     lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        holder = os.pread(fd, 64, 0).decode(errors="replace").strip() or "?"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = os.pread(fd, 64, 0).decode(errors="replace").strip() or "?"
+            raise SystemExit(f"另一个 droid_run.py 正在用 {lock.parent}（进程 {holder}）") from None
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, str(os.getpid()).encode(), 0)
+    except BaseException:          # 任何失败（含写 PID 时磁盘满）都关掉描述符，锁随之释放（S14-P3-1）
         os.close(fd)
-        raise SystemExit(f"另一个 droid_run.py 正在用 {lock.parent}（进程 {holder}）") from None
-    os.ftruncate(fd, 0)
-    os.pwrite(fd, str(os.getpid()).encode(), 0)
+        raise
     return fd
 
 
 def _release(fd: int) -> None:
-    os.ftruncate(fd, 0)
-    os.close(fd)
+    try:
+        os.ftruncate(fd, 0)
+    finally:
+        os.close(fd)
 
 
 def run(graph: dict, workdir: Path, gpus: list[str], cpus: int, mem_gb: float, *, poll: float = 1.0,
         max_requeues: int = 100, grace: float = 60.0) -> int:
     jobs = {j["id"]: j for j in graph["jobs"]}
     pool = Pool(gpus, cpus, mem_gb)
-    done = {i for i, j in jobs.items() if flag(workdir, j).exists()}
+    done = {i for i, j in jobs.items() if already_done(workdir, j)}
     pending = {i for i in jobs if i not in done}
     failed: dict[str, str] = {}
     blocked: set[str] = set()

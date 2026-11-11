@@ -268,6 +268,23 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
                      ("summary", run)]
     assert droid.PENDING == {}
     calls.clear()
+    # S11-P1-1：完成标志在时，calibrate、check 什么都不做；train、eval、summary 照常调用阶段，由阶段核身份
+    flags = {"calibrate/lambda-po_jepa_full": tmp_path/"runs/pilot/calibration/lambda-po_jepa_full.json",
+             "check/env": tmp_path/"runs/pilot/check/env.json",
+             "train/koopman/seed1703": tmp_path/"runs/pilot/train/koopman/seed1703/COMPLETE.json",
+             "eval/koopman/seed1703": tmp_path/"runs/pilot/eval/koopman/seed1703/COMPLETE.json",
+             "eval/identity": tmp_path/"runs/pilot/eval/identity/COMPLETE.json",
+             "summary": tmp_path/"runs/pilot/summary/COMPLETE.json"}
+    for job, path in flags.items():
+        assert path == droid_jobs.complete_path(job, load_config(CONFIGS/"pilot.yaml"), tmp_path/"data", tmp_path/"runs")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+    monkeypatch.setitem(droid.MAINS, "train", fake("train", write=False))
+    for job in flags:
+        assert droid.main(_entry(tmp_path, job)) == 0
+    assert [c[0] for c in calls] == ["train", "eval", "eval", "summary"]
+    assert set(droid_jobs.RECHECKED_STAGES) == {"train", "eval", "summary"} == set(droid_run.RECHECKED_STAGES)
+    calls.clear()
     for bad in (_entry(tmp_path, "download/train-001"),                            # 试跑只有 train-000
                 _entry(tmp_path, "encode/val", "--delete-raw"),                     # 只有训练片带 --delete-raw
                 _entry(tmp_path, "download/val", "--time-limit-minutes", "5"),
@@ -361,6 +378,48 @@ def test_runner_skips_done_requeues_75_and_logs(tmp_path, capsys):
     capsys.readouterr()
     assert runner(tmp_path, path, "--cpus", "4", "--mem-gb", "8") == 0        # 全部完成：什么都不跑
     assert started(tmp_path) == ["b", "b", "b", "c"]
+
+
+def test_runner_rechecks_train_eval_and_summary(tmp_path, capsys):
+    """S11-P1-1：完成标志已在的 train、eval、summary 每次启动运行器都照常运行一次（由阶段核身份）；复核失败时下游不开始；
+    其他阶段完成标志在就跳过。dry-run 把它们列成“要复核”。"""
+    path = fake_graph(tmp_path, [("calibrate/x", [], 0, 1, 1, 0), ("train/x", ["calibrate/x"], 0, 1, 1, 1),
+                                 ("eval/x", ["train/x"], 0, 1, 1, 2), ("summary", ["eval/x"], 0, 1, 1, 3)])
+    for job in ("calibrate/x", "train/x", "eval/x", "summary"):
+        flag = tmp_path/f"runs/fake/flags/{job.replace('/', '__')}.done"
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("{}")
+    assert runner(tmp_path, path, "--dry-run", "--cpus", "1", "--mem-gb", "1") == 0
+    out = capsys.readouterr().out
+    assert "已完成  calibrate/x" in out and all(f"已完成、要复核  {j}" in out for j in ("train/x", "eval/x", "summary"))
+    assert [line.split()[1] for line in out.splitlines() if line.strip()[:1].isdigit()] == ["train/x", "eval/x", "summary"]
+    assert runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1") == 0
+    assert started(tmp_path) == ["train/x", "eval/x", "summary"]
+    plan(tmp_path, eval__x=[1])                                           # 复核发现身份不同：失败，汇总不开始
+    assert runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1") == 1
+    assert started(tmp_path)[3:] == ["train/x", "eval/x"]
+    assert "因上游失败没有开始的：summary" in capsys.readouterr().out
+
+
+def test_runner_lock_is_released_when_writing_the_pid_fails(tmp_path, monkeypatch):
+    """S14-P3-1：取得 flock 之后写 PID 出错（磁盘满）时描述符关掉、锁随之释放，同一进程再取能取到（描述符还开着的话 flock
+    仍被持有，再取会报“另一个 droid_run.py 正在用”）；释放时清空出错也关描述符。"""
+    lock = tmp_path/"logs"/droid_run.LOCK
+
+    def full(*a):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(droid_run.os, "pwrite", full)
+    with pytest.raises(OSError, match="No space"):
+        droid_run._acquire(lock)
+    monkeypatch.undo()
+    fd = droid_run._acquire(lock)
+    monkeypatch.setattr(droid_run.os, "ftruncate", full)
+    with pytest.raises(OSError, match="No space"):
+        droid_run._release(fd)
+    monkeypatch.undo()
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    droid_run._release(droid_run._acquire(lock))
 
 
 def test_runner_failure_blocks_downstream_only(tmp_path, capsys):
@@ -475,8 +534,25 @@ def test_entry_as_a_script(tmp_path):
     assert r.returncode == 1 and "Error" in r.stderr and not flag.exists()      # 空数据根：汇总读不到索引
     flag.parent.mkdir(parents=True)
     flag.write_text("{}")
-    r = run("summary", "summary")
+    r = run("summary", "summary")                         # S11-P1-1：只有完成标志不算完成，汇总照常重算（照样读不到）
+    assert r.returncode == 1 and "already complete" not in r.stdout and "Error" in r.stderr
+    done = tmp_path/"data/index/MANIFEST.json"            # 只写一次的阶段：完成标志在就退出 0
+    done.parent.mkdir(parents=True)
+    done.write_text("{}")
+    r = run("index", "index")
     assert r.returncode == 0 and "already complete" in r.stdout
+
+
+def test_entry_runs_the_real_stage_on_a_bare_completion_flag(tmp_path):
+    """S11-P1-1 的反例：训练、评测目录里只有一个空的 COMPLETE.json（没有报告、登记、job.json），统一入口进真实阶段代码，
+    不报完成。"""
+    config = load_config(CONFIGS/"pilot.yaml")
+    for job in ("train/koopman/seed1703", "eval/identity", "eval/koopman/seed1703"):
+        path = droid_jobs.complete_path(job, config, tmp_path/"data", tmp_path/"runs")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        with pytest.raises((ValueError, OSError)):
+            droid.main(_entry(tmp_path, job, "--device", "cpu"))
 
 
 # ---------------------------------------------------------------- 运行器锁（S14-fix1，Codex S14-P2-1）

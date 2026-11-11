@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import shutil
 import math
 import statistics
 import subprocess
@@ -212,11 +213,43 @@ def test_run_lambda_file_is_read_by_the_training_task(root, tmp_path, monkeypatc
     cal.mkdir(parents=True)
     cache._write_json(cal/"sigma_z.json", dict(sigma_z=SIGMA_Z, config_sha256=config.config_sha256))
     doc = cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
-    weights, sha = tr.read_lambda(cal/"lambda-po_jepa_full.json", config, cache.file_sha(cal/"sigma_z.json"))
-    assert weights == {k: doc[k] for k in ("time_weight", "space_weight")} and sha == cache.file_sha(cal/"lambda-po_jepa_full.json")
-    assert tr.load_calibration(tmp_path/"runs", config, "po_jepa_full").weights == weights
+    data = make_data(root, config)
+    fm, ts = data.feature_manifest_sha256, dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set))
+    sigma_sha = cache.file_sha(cal/"sigma_z.json")
+    path = cal/"lambda-po_jepa_full.json"
+    weights, sha = tr.read_lambda(path, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256=fm,
+                                  train_set=ts)
+    assert weights == {k: doc[k] for k in ("time_weight", "space_weight")} and sha == cache.file_sha(path)
+    assert tr.load_calibration(tmp_path/"runs", config, "po_jepa_full", feature_manifest_sha256=fm,
+                               train_set=ts).weights == weights
     with pytest.raises(FileExistsError):
         cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
+    # S09a-P2-2：被复制成另一个条件的文件名、换了特征或训练集、schema 不对、缺字段，一律拒绝
+    other = cal/"lambda-fixed_fourier.json"
+    shutil.copyfile(path, other)
+    with pytest.raises(ValueError, match="not of 'fixed_fourier'"):
+        tr.load_calibration(tmp_path/"runs", config, "fixed_fourier", feature_manifest_sha256=fm)
+    with pytest.raises(ValueError, match="other features"):
+        tr.read_lambda(path, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256="0"*64)
+    with pytest.raises(ValueError, match="another training set"):
+        tr.read_lambda(path, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256=fm,
+                       train_set=dict(ts, count=ts["count"] + 1))
+    with pytest.raises(ValueError, match="another sigma_z"):
+        tr.read_lambda(path, config, "0"*64, condition="po_jepa_full", feature_manifest_sha256=fm)
+    for change in (dict(schema="droid_lambda_v0"), dict(feature_manifest_sha256=None), dict(config_sha256=None),
+                   dict(condition=None)):
+        edited = json.loads(path.read_text())
+        for k, v in change.items():
+            if v is None:
+                del edited[k]
+            else:
+                edited[k] = v
+        bad = tmp_path/"bad.json"
+        bad.write_text(json.dumps(edited))
+        with pytest.raises(ValueError):
+            tr.read_lambda(bad, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256=fm)
+    bad.write_text(path.read_text())                       # 同样内容在别的文件名下照样读得出（只看内容，不看文件名）
+    assert tr.read_lambda(bad, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256=fm)[0] == weights
 
 
 # ---------------------------------------------------------------- §7 check/env
@@ -349,6 +382,17 @@ def test_read_train_on_a_real_training_directory(root, tmp_path):
     assert view.curves["validation"] == [(float(v["step"]), v["mean"]) for v in report["validations"]]
     assert view.curves["train_jepa"][0] == (float(rows[0]["last_step"]),
                                             math.fsum(s["losses"]["jepa"] for s in rows[0]["steps"])/len(rows[0]["steps"]))
+    assert view.log_problem is None and len(rows[0]["steps"]) >= 3
+    # S13-P2-1：行首尾不变、行内丢一步或重一步，读取器按训练端同一条核对报出来（只看 first/last 时会漏）
+    for name, edit in (("drop", lambda st: st.pop(1)), ("dup", lambda st: st.insert(1, dict(st[1])))):
+        bad = tmp_path/name
+        shutil.copytree(out, bad)
+        edited = [dict(r, steps=list(r["steps"])) for r in rows]
+        edit(edited[0]["steps"])
+        assert (edited[0]["first_step"], edited[0]["last_step"]) == (rows[0]["first_step"], rows[0]["last_step"])
+        tr._rewrite_lines(bad/tr.LOG_FILE, edited)
+        got = ds.read_train(bad)
+        assert got.log_ranges == view.log_ranges and "contiguously" in got.log_problem
     tampered = json.loads((out/"registration.json").read_text())
     tampered["seed"] = 1
     (out/"registration.json").write_text(json.dumps(tampered))

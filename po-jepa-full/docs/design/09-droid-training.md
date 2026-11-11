@@ -288,8 +288,12 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 - σ_z 的回合池直接取 `action_scale.json` 记的 `episodes[<source>]`（04 §6 的同一池），不重算。
 - `check/env` 跑 20 步时 λ 用占位值 1（真 λ 要等标定；只测时长和有限性，不影响参数量和初始哈希）；总时长 = U·单步中位数 + (U/V + 1)·一次验证用时（第 0 步也验证，§7 第 3 条写的“20 次”按 U/V 算）。
 - 数据加载器比最快条件的单步慢时按“不通过”处理（退出 1、写 FAILED.json），不只是提示。
-- 不训练的对照（identity、vjepa2_ac_zeroshot）的构造种子取配置的第一个种子；评测任务的 `--time-limit-minutes` 只记录（评测按批落盘，重排同一条命令接着做）。
+- 不训练的对照（identity、vjepa2_ac_zeroshot）的构造种子取配置的第一个种子；评测任务的 `--time-limit-minutes` 只记录（评测按批落盘，重排同一条命令接着做）；审核修复（a5f4edb）后记在评测目录的 `starts.jsonl`（没完成时每次启动一行），不进 job.json 的请求身份。
 - 离线规划在 `evaluate_job` 的每个测试集循环里、写 COMPLETE.json 之前做，报告的 `axes.planning` 记上。
 - 训练登记新加 `splits_sha256`（`index/splits.json` 的 SHA），汇总的 `data_sha256` 由它、验证窗口和动作尺度的 SHA 组成。
 - 补 S11-fix1 留下的两处输入身份：`job_inputs` 加准备数组本身的 SHA（`prepared_arrays_sha256`）和测试附加特征清单的 SHA（清单内容的规范 JSON 的 SHA，`ExtraFeatureReader.manifest_sha256`）。主特征读取器在合成数据下的身份仍只靠来源字典（假编码器时特征清单 SHA 记 None），留作已知缺口。
 - `load_selected` 拿到的模型不是这个条件的类时报 ValueError（原来是 AttributeError）。
+
+## 12. 审核修复补注（a5f4edb 第二轮审核，2026-11-11）
+
+见 `docs/segments/review-fix-a5f4edb.md`。和本文有关的：训练任务启动时（未完成）先删目录根上 `cache._write_json` 留下的 `*.partial`（S09a-P2-1）；只有 COMPLETE.json、没有 report.json 的目录不算完成；`read_lambda` 要求 schema、内容里的条件名、配置、σ_z 文件、特征总清单 SHA 都对，训练任务另核标定用的训练集（S09a-P2-2）；`load_selected` 核报告和登记的种子等于本次请求的、报告绑定的登记 SHA 对（S09b-P2-1）；评测任务启动时（未完成）先删目录根上的 `*.partial`（S09b-P2-2）。都不改任何数值口径。

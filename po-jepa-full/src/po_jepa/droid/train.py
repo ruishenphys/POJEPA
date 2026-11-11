@@ -103,30 +103,44 @@ class Calibration:
     lambda_sha256: str | None
 
 
-def read_lambda(path: Path, config: DroidConfig, sigma_z_sha256: str) -> tuple[dict, str]:
-    """`lambda-<条件>.json`（09 §3.2）的 time_weight、space_weight（有限正数）和文件 SHA；记了 config_sha256、
-    sigma_z_sha256 时必须等于本配置的和本次读到的 σ_z 文件的。"""
+def read_lambda(path: Path, config: DroidConfig, sigma_z_sha256: str, *, condition: str,
+                feature_manifest_sha256: str, train_set: Mapping | None = None) -> tuple[dict, str]:
+    """`lambda-<条件>.json`（09 §3.2，`calibrate.calibrate_lambda` 写）的 time_weight、space_weight（有限正数）和文件 SHA。
+    核（S09a-P2-2）：schema 是 `droid_lambda_v1`、内容里的 `condition` 是要读的条件（文件被复制、改名时不当成别的条件的 λ）、
+    `config_sha256` 是本配置的、`sigma_z_sha256` 是本次读到的 σ_z 文件的、`feature_manifest_sha256` 是本次特征总清单的；
+    给了 `train_set`（训练任务的 {count, sha256}）时，标定用的训练集也必须是它。这几项标定都会写，缺了也拒绝。"""
+    from po_jepa.droid.calibrate import LAMBDA_SCHEMA
     path = Path(path)
     doc = ix._loads(path.read_bytes(), str(path))
     if not isinstance(doc, dict):
         raise ValueError(f"{path} is not a JSON object")
+    if doc.get("schema") != LAMBDA_SCHEMA:
+        raise ValueError(f"{path}: schema {doc.get('schema')!r} is not {LAMBDA_SCHEMA!r}")
+    if doc.get("condition") != condition:
+        raise ValueError(f"{path} holds the lambda of {doc.get('condition')!r}, not of {condition!r}")
     weights = {k: doc.get(k) for k in ("time_weight", "space_weight")}
     for k, v in weights.items():
         if type(v) is not float or not math.isfinite(v) or v <= 0:
             raise ValueError(f"{path}: {k} must be a positive finite float, got {v!r}")
-    if "config_sha256" in doc and doc["config_sha256"] != config.config_sha256:
+    if doc.get("config_sha256") != config.config_sha256:
         raise ValueError(f"{path} was calibrated under another config")
-    if "sigma_z_sha256" in doc and doc["sigma_z_sha256"] != sigma_z_sha256:
+    if doc.get("sigma_z_sha256") != sigma_z_sha256:
         raise ValueError(f"{path} was calibrated with another sigma_z.json")
+    if doc.get("feature_manifest_sha256") != feature_manifest_sha256:
+        raise ValueError(f"{path} was calibrated on other features (feature_manifest_sha256 differs)")
+    if train_set is not None and doc.get("train_set") != _json(dict(train_set)):
+        raise ValueError(f"{path} was calibrated on another training set")
     return weights, cache.file_sha(path)
 
 
-def load_calibration(run_root: Path | str, config: DroidConfig, condition: str) -> Calibration:
+def load_calibration(run_root: Path | str, config: DroidConfig, condition: str, *, feature_manifest_sha256: str,
+                     train_set: Mapping | None = None) -> Calibration:
     directory = Path(run_root)/config.name/"calibration"
     sigma_z, sigma_sha = read_sigma_z(directory/"sigma_z.json", config)
     weights, lam_sha = None, None
     if condition in cd.LAMBDA_CONDITIONS:
-        weights, lam_sha = read_lambda(directory/f"lambda-{condition}.json", config, sigma_sha)
+        weights, lam_sha = read_lambda(directory/f"lambda-{condition}.json", config, sigma_sha, condition=condition,
+                                       feature_manifest_sha256=feature_manifest_sha256, train_set=train_set)
     return Calibration(sigma_z, sigma_sha, weights, lam_sha)
 
 
@@ -413,7 +427,8 @@ def run(output: Path | str, *, condition: str, seed: int, config: DroidConfig, d
     out = Path(output)
     if (out/"COMPLETE.json").exists():
         report = out/"report.json"
-        if _read_json(out/"COMPLETE.json").get("report_sha256") != cache.file_sha(report):
+        if (not report.is_file()
+                or _read_json(out/"COMPLETE.json").get("report_sha256") != cache.file_sha(report)):
             raise ValueError(f"{out}: COMPLETE.json does not match report.json")
         print(f"{condition}/seed{seed}: already complete")
         return EXIT_DONE
@@ -424,6 +439,9 @@ def run(output: Path | str, *, condition: str, seed: int, config: DroidConfig, d
             return EXIT_FAILED
         (out/"FAILED.json").unlink()
     out.mkdir(parents=True, exist_ok=True)
+    for stale in out.glob("*.partial"):      # 上次在 cache._write_json 改名前中断（report、COMPLETE、FAILED、登记；S09a-P2-1）
+        if stale.is_file():
+            stale.unlink()
     device = torch.device(device)
     try:
         with StopFlag() as stop:
@@ -651,8 +669,9 @@ def main(argv: list[str] | None = None) -> int:
     out = job_dir(a.run_root, config, condition, seed)
     if (out/"COMPLETE.json").exists():
         return run(out, condition=condition, seed=seed, config=config, data=None, calibration=None, device=a.device)
-    calibration = load_calibration(a.run_root, config, condition)
     data = load_data(config, a.data_root)
+    calibration = load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256,
+                                   train_set=dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set)))
     ac_checkpoint = Path(a.data_root)/"checkpoints"/OFFICIAL_AC_FILE if condition == "vjepa2_ac" else None
     return run(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration, device=a.device,
                time_limit_minutes=a.time_limit_minutes, retry=a.retry, ac_checkpoint=ac_checkpoint, workers=a.workers,

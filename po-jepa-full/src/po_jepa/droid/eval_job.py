@@ -15,8 +15,9 @@
    特征总清单 SHA、σ_z 和 λ 文件的 SHA、`source.json` 的 SHA，加 evaluate 的输入身份。
 5. AC：`ac_state: true_state` 时传 `droid.ac.bind`；原始帧率用 `droid.ac.ac_steps`。
 
-中断后重跑同一条命令接着做（rows 按批跳过、frame_rate/resolution/planning 已完成的直接读）。`--time-limit-minutes` 只记录：
-评测按批落盘，被排队系统停掉后重排同一条命令即可。
+中断后重跑同一条命令接着做（rows 按批跳过、frame_rate/resolution/planning 已完成的直接读；输出目录根上
+`cache._write_json` 留下的 `*.partial` 先删掉，S09b-P2-2）。`--time-limit-minutes` 只记录（09 §11）：没完成时每次启动往
+`starts.jsonl` 追加一行（时长上限、设备），不进 job.json 的请求身份；评测按批落盘，被排队系统停掉后重排同一条命令即可。
 
   python -m po_jepa.droid.eval_job --config … --data-root … --run-root … --job eval/<条件>/seed<种子> [--device cuda]
 """
@@ -48,6 +49,7 @@ from po_jepa.runtime import cache
 
 SOURCE_SCHEMA = "droid_eval_source_v1"
 JOB_KIND = "droid_eval_job_v1"
+STARTS_FILE = "starts.jsonl"            # 没完成时每次启动一行：时长上限和设备，只记录
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,12 @@ def run(out: Path | str, *, condition: str, seed: int | None, config: DroidConfi
     """一个评测任务（见模块说明），返回 evaluate 的报告。"""
     out = Path(out)
     device = torch.device(device)
+    if not (out/"COMPLETE.json").exists():
+        out.mkdir(parents=True, exist_ok=True)
+        for stale in out.glob("*.partial"):  # 上次在 cache._write_json 改名前中断（source.json 等；S09b-P2-2）
+            if stale.is_file():
+                stale.unlink()
+        tr._append_line(out/STARTS_FILE, dict(time_limit_minutes=time_limit_minutes, device=str(device)))
     trained = seed is not None
     if trained != (condition in CONDITIONS) or (not trained and condition not in cd.UNTRAINED):
         raise ValueError(f"{condition}/{seed}: trained conditions need a seed, the two untrained ones none")
@@ -146,8 +154,8 @@ def run(out: Path | str, *, condition: str, seed: int | None, config: DroidConfi
     if trained:
         if train_dir is None:
             raise ValueError("a trained condition needs its training directory")
-        loaded = ev.load_selected(train_dir, condition=condition, model=model, loss_config=loss, config=config,
-                                  provenance=data.provenance)
+        loaded = ev.load_selected(train_dir, condition=condition, seed=seed, model=model, loss_config=loss,
+                                  config=config, provenance=data.provenance)
         checkpoint = loaded["checkpoint"]
         source = dict(schema=SOURCE_SCHEMA, condition=condition, seed=seed, **loaded["source"])
     else:
@@ -195,8 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(a.config)
     condition, seed = parse_job(a.job, config)
     out = eval_dir(a.run_root, config, condition, seed)
-    calibration = tr.load_calibration(a.run_root, config, condition)
     data = load_data(config, a.data_root)
+    calibration = tr.load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256)
     train_dir = tr.job_dir(a.run_root, config, condition, seed) if seed is not None else None
     ac = Path(a.data_root)/"checkpoints"/tr.OFFICIAL_AC_FILE if condition in cd.OFFICIAL_AC else None
     report = run(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration,

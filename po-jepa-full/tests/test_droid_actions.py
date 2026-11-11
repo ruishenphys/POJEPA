@@ -53,16 +53,30 @@ def test_poses_to_diffs_body_is_verbatim_upstream():
     assert da.np is numpy and da.Rotation is scipy.spatial.transform.Rotation
 
 
-def test_poses_to_diffs_matches_golden_episodes_bit_for_bit():
+def _upstream_poses_to_diffs():
+    """从上游副本里取出 poses_to_diffs 原方法（AST 原样编译执行，不导入上游的其他依赖），绑定成只收 poses 的函数。"""
+    fn = _function(ast.parse(OFFICIAL.read_text(encoding="utf-8")), "poses_to_diffs")
+    namespace = dict(np=numpy, Rotation=scipy.spatial.transform.Rotation)
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(OFFICIAL), "exec"), namespace)
+    return lambda poses: namespace["poses_to_diffs"](None, poses)
+
+
+# 存档金标准（在生成它的平台上算出）的跨平台容差，和 test_droid_poses 的 GOLDEN_ATOL 同一取法（S06a-fix1）：scipy 的
+# 欧拉角↔矩阵在不同 CPU/数学库上末位可以不同；逐位相同只在同一环境里要求，由执行上游原函数来核（a5f4edb 审核建议）。
+GOLDEN_ATOL = 1e-12
+
+
+def test_poses_to_diffs_matches_upstream_and_golden_episodes():
     golden = json.loads((GOLDEN/"droid_samples_golden.json").read_text(encoding="utf-8"))
     assert len(golden["episodes"]) == 5
+    upstream = _upstream_poses_to_diffs()
     for ep in golden["episodes"]:
         states = numpy.array(ep["stride15_states"], dtype=numpy.float64)
         got = da.poses_to_diffs(states)
         ref = numpy.array(ep["official_actions"], dtype=numpy.float64)
         assert got.dtype == numpy.float64 and got.shape == (len(states) - 1, 7) == ref.shape
-        assert numpy.array_equal(got, ref), ep["uuid"]
-        assert got.tobytes() == ref.tobytes()
+        assert got.tobytes() == upstream(states.copy()).tobytes(), ep["uuid"]       # 同一环境：和上游原函数逐位相同
+        assert numpy.abs(got - ref).max() < GOLDEN_ATOL, ep["uuid"]               # 跨平台：和存档在容差内相同
 
 
 def test_poses_to_diffs_hand_values():

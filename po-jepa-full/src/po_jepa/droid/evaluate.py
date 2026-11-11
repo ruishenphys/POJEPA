@@ -825,11 +825,12 @@ def _snapshot(condition: str, payload: Mapping, model, loss_config: LossConfig) 
         raise ValueError(f"the model given is not a {condition} model: {e}") from e
 
 
-def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: LossConfig, config: DroidConfig,
-                  provenance: dict) -> dict:
+def load_selected(train_dir: Path | str, *, condition: str, seed: int, model, loss_config: LossConfig,
+                  config: DroidConfig, provenance: dict) -> dict:
     """10 §8.1 的放宽读法（同 §4.2）：读训练任务 `train/<条件>/seed<种子>/`（09 §4.1）`selection.json` 选出的检查点进
     `model`，`model.eval()`，不读优化器、不恢复随机状态。核：COMPLETE.json 绑定 report.json、没有 FAILED.json；报告的
-    条件、配置 SHA、完成步数 = U；`selection.json` 的最优 = 报告的最优 = 按 `validations/` 重算的选点（均值严格更小才换，
+    条件、种子（= 本次请求的 `seed`）、配置 SHA、完成步数 = U；report.json 记的 `registration_sha256` 等于
+    registration.json 的文件 SHA，登记的条件、种子也是本次请求的（S09b-P2-1：目录放错时不把别的种子的训练记成这个种子）；`selection.json` 的最优 = 报告的最优 = 按 `validations/` 重算的选点（均值严格更小才换，
     平局留早的）；检查点路径不越出 `checkpoints/`、在 `index.json` 里且是这一步的验证点、文件 SHA 对；`completed_steps`
     等于选中步数；配置快照（`_snapshot`）；`model_state`（`training._check_model_state`）；来源里的数据字段
     （`DATA_FIELDS`）等于本次评测按当前特征算出的 `provenance`。`source_files_sha256` 只记录（评测代码可能在训练之后才修好）。
@@ -850,6 +851,16 @@ def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: 
     if (report.get("schema") != tr.REPORT_SCHEMA or report.get("condition") != condition
             or report.get("config_sha256") != config.config_sha256 or report.get("completed_steps") != updates):
         raise ValueError(f"{report_path} is not a finished {condition} training under this config")
+    if type(report.get("seed")) is not int or report["seed"] != seed:
+        raise ValueError(f"{report_path} is the training of seed {report.get('seed')!r}, not of the requested seed {seed}")
+    reg_path = root/"registration.json"
+    if not reg_path.is_file() or report.get("registration_sha256") != cache.file_sha(reg_path):
+        raise ValueError(f"{root}: report.json was not written for this registration.json")
+    registration = _read(reg_path)
+    if (registration.get("schema") != tr.REGISTRATION_SCHEMA or registration.get("condition") != condition
+            or registration.get("seed") != seed):
+        raise ValueError(f"{reg_path} registers {registration.get('condition')!r}/seed{registration.get('seed')!r}, "
+                         f"not {condition}/seed{seed}")
     selection = _read(root/"selection.json")
     records = tr.validation_records(root, updates)
     best = tr.best_of(records)
@@ -885,7 +896,7 @@ def load_selected(train_dir: Path | str, *, condition: str, model, loss_config: 
     checkpoint = dict(path=path.relative_to(root).as_posix(), sha256=digest, step=chosen["step"], mean=chosen["mean"])
     source = dict(train_dir=str(root), report_sha256=cache.file_sha(report_path),
                   selection_sha256=cache.file_sha(root/"selection.json"),
-                  registration_sha256=report.get("registration_sha256"), checkpoint=checkpoint, snapshot=snapshot,
+                  registration_sha256=cache.file_sha(reg_path), checkpoint=checkpoint, snapshot=snapshot,
                   data_fields=found, source_files_sha256=payload["provenance"].get("source_files_sha256"),
                   note="10 §8.1: data fields are checked; source_files_sha256 is recorded only")
     return dict(checkpoint=checkpoint, source=source)

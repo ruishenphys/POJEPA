@@ -45,6 +45,10 @@ TRAIN_PRIORITY = {"vjepa2_ac": 1,
                   "po_jepa_full": 2, "po_jepa_no_consistency": 2, "fixed_fourier": 2, "vjepa2_ac_small": 2,
                   "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3}
 STAGES = ("index", "download", "prepare", "encode", "calibrate", "check", "train", "eval", "summary")
+# 完成标志在时仍要调用阶段、由阶段先核本次请求的身份再决定复用的阶段（S11-P1-1 修复）：训练（COMPLETE.json 绑定
+# report.json）、评测（job.json/source.json 的请求身份，10 §8.9）、汇总（每次按当前产物重算，内容不变就不换输出）。
+# 其余阶段的完成标志所在的文件只写一次，下游读它时核身份（特征清单 SHA、σ_z/λ 的 config、条件、SHA）。
+RECHECKED_STAGES = ("train", "eval", "summary")
 RESOURCE_KEYS = ("gpus", "cpus", "mem_gb", "time_limit_minutes")
 
 assert set(TRAIN_PRIORITY) == set(CONDITIONS) and set(LAMBDA_CONDITIONS) <= set(CONDITIONS)

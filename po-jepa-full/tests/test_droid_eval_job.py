@@ -82,9 +82,11 @@ def provenance(world, **changes):
     return dict(world["test"]["provenance"], **changes)
 
 
-def load(train_dir, world, *, condition=CONDITION, weights=tt.WEIGHTS, config=CONFIG, prov=None, seed=1703):
+def load(train_dir, world, *, condition=CONDITION, weights=tt.WEIGHTS, config=CONFIG, prov=None, seed=1703,
+         train_seed=1703):
+    """`seed` 是构造模型用的种子（读进来的权重和它无关），`train_seed` 是请求的训练种子（要等于训练目录的）。"""
     model, loss, _ = built(condition, weights, seed=seed)
-    got = ev.load_selected(train_dir, condition=condition, model=model, loss_config=loss, config=config,
+    got = ev.load_selected(train_dir, condition=condition, seed=train_seed, model=model, loss_config=loss, config=config,
                            provenance=prov or provenance(world))
     return model, got
 
@@ -209,8 +211,40 @@ def test_load_selected_rejects_another_lambda_or_model(world):
     load(world["train_dir"], world, weights={"time_weight": 0.25, "space_weight": 0.5})
     model, loss, _ = built("po_jepa_no_consistency")
     with pytest.raises(ValueError):
-        ev.load_selected(world["train_dir"], condition=CONDITION, model=model, loss_config=loss, config=CONFIG,
+        ev.load_selected(world["train_dir"], condition=CONDITION, seed=1703, model=model, loss_config=loss, config=CONFIG,
                          provenance=provenance(world))
+
+
+def test_load_selected_binds_the_requested_seed_and_registration(world, tmp_path):
+    """S09b-P2-1：训练目录是种子 1703 的，请求 1704 就拒绝（目录放错时不把别的种子的训练记成这个种子）；登记被换掉
+    （SHA 不等于 report.json 记的）、或登记的条件/种子与请求不同（报告重新绑定）也拒绝；source 记的是登记文件实际的 SHA。"""
+    with pytest.raises(ValueError, match="not of the requested seed 1704"):
+        load(world["train_dir"], world, train_seed=1704)
+    _, got = load(world["train_dir"], world)
+    assert got["source"]["registration_sha256"] == cache.file_sha(world["train_dir"]/"registration.json")
+
+    out = copy(world, tmp_path, "reg")
+    rewrite(out/"registration.json", note="edited")
+    with pytest.raises(ValueError, match="not written for this registration"):
+        load(out, world)
+    (out/"registration.json").unlink()
+    with pytest.raises(ValueError, match="not written for this registration"):
+        load(out, world)
+
+    for field, value in (("seed", 1704), ("condition", "koopman")):
+        out = copy(world, tmp_path, f"reg-{field}")
+        rewrite(out/"registration.json", **{field: value})
+        rewrite(out/"report.json", registration_sha256=cache.file_sha(out/"registration.json"))
+        rewrite(out/"COMPLETE.json", report_sha256=cache.file_sha(out/"report.json"))
+        with pytest.raises(ValueError, match="registers"):
+            load(out, world)
+
+    out = copy(world, tmp_path, "both")                 # 报告和登记都改成 1704（重新绑定）：请求 1703 拒绝
+    rewrite(out/"registration.json", seed=1704)
+    rewrite(out/"report.json", seed=1704, registration_sha256=cache.file_sha(out/"registration.json"))
+    rewrite(out/"COMPLETE.json", report_sha256=cache.file_sha(out/"report.json"))
+    with pytest.raises(ValueError, match="requested seed 1703"):
+        load(out, world)
 
 
 # ---------------------------------------------------------------- 评测任务
@@ -289,6 +323,29 @@ def test_eval_job_untrained_controls(world, tmp_path, condition):
     with pytest.raises(ValueError):
         ej.run(out, condition=condition, seed=1703, config=CONFIG, data=eval_data(world),
                calibration=tt.calib(condition), device="cpu")
+
+
+def test_eval_job_resumes_past_a_leftover_source_partial(world, tmp_path):
+    """S09b-P2-2：上次在写 source.json 改名前中断（只留 source.json.partial），同一条命令重跑照常做完；已有完整的
+    source.json 不同仍拒绝（端到端测试里核过）。`--time-limit-minutes` 只记进 starts.jsonl（没完成时每次启动一行），
+    不进 job.json；完成后重跑不再追加。另一个种子的训练目录拒绝（S09b-P2-1）。"""
+    out = tmp_path/"identity"
+    out.mkdir()
+    (out/"source.json.partial").write_bytes(b'{"half": ')
+    (out/"job.json.partial").write_bytes(b'{')
+    report = ej.run(out, condition="identity", seed=None, config=CONFIG, data=eval_data(world),
+                    calibration=tt.calib("identity"), device="cpu", time_limit_minutes=45)
+    assert (out/"COMPLETE.json").exists() and not list(out.glob("*.partial"))
+    starts = tr._read_lines(out/ej.STARTS_FILE)
+    assert starts == [dict(time_limit_minutes=45, device="cpu")]
+    assert "time_limit_minutes" not in json.dumps(json.loads((out/"job.json").read_text()))
+    assert ej.run(out, condition="identity", seed=None, config=CONFIG, data=eval_data(world),
+                  calibration=tt.calib("identity"), device="cpu", time_limit_minutes=10) == report
+    assert tr._read_lines(out/ej.STARTS_FILE) == starts
+    with pytest.raises(ValueError, match="requested seed 1704"):
+        ej.run(tmp_path/"wrong-seed", condition=CONDITION, seed=1704, config=CONFIG, data=eval_data(world),
+               calibration=tt.calib(CONDITION), device="cpu", train_dir=world["train_dir"])
+    assert not (tmp_path/"wrong-seed"/"source.json").exists()
 
 
 def test_eval_job_needs_its_training_directory(world, tmp_path):

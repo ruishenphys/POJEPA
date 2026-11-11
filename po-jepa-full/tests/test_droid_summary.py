@@ -196,7 +196,8 @@ def build(tmp_path, *, skip=()):
                 condition=c, seed=s, config_sha256=CFG.config_sha256, feature_manifest_sha256="f"*64, data_sha256=train_data,
                 train_set_sha256="t"*64, sigma_z=SIGMA if c in ds.PO_CLASS else None,
                 lambdas=LAMBDA.get(c), initial_model_sha256=f"init-{base}-{s}", updates=500, completed=500,
-                log_ranges=((1, 100), (101, 200), (201, 500)), best_checkpoint_sha256=f"ckpt-{c}-{s}",
+                log_ranges=((1, 100), (101, 200), (201, 500)), log_problem=None,
+                best_checkpoint_sha256=f"ckpt-{c}-{s}",
                 step_seconds=(.1 + OFFSET[c], .2 + OFFSET[c], .3 + OFFSET[c]), peak_memory_bytes=1000 + s,
                 gpu_hours=.5, resumes=1, spectral_backend="cpu_batched",
                 curves=dict(validation=[(0, 1.), (250, .8), (500, .7 + OFFSET[c])], train_jepa=[(1, 1.), (500, .5)]))
@@ -436,7 +437,8 @@ CASES = {
     "训练日志": [lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (102, 500))),
              lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (100, 500))),
              lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (101, 400)), completed=400),
-             lambda run, reg: _train(reg, "koopman", S0, completed=499)],
+             lambda run, reg: _train(reg, "koopman", S0, completed=499),
+             lambda run, reg: _train(reg, "koopman", S0, log_problem="train-log.jsonl does not cover the steps contiguously")],
     "评测": [lambda run, reg: _eval(reg, "vjepa2_ac_small", S1, checkpoint_sha256="c"*64),
            lambda run, reg: _rewrite_report(run, "po_jepa_no_consistency", S0,
                                             lambda r: r["splits"]["ood_test"]["triangle"].update(violations=1)),
@@ -542,15 +544,26 @@ def test_outcome_halves_recombine_by_episode_count(tmp_path):
 
 
 def test_repeated_runs_are_byte_identical(tmp_path):
-    """14 §3 S13：同样的输入运行两次，输出逐字节相同（第二次把第一次改名为 summary.previous1）。"""
+    """14 §3 S13：同样的输入运行两次，输出逐字节相同。统一入口每次都重算汇总（S11-P1-1 修复），所以内容不变时保留原输出、
+    不再多一份 summary.previousN；产物变了（这里少了一个评测任务）才把旧的改名为 summary.previous1 再换上新的。"""
     data, run_root, registry = build(tmp_path)
     run_summary(data, run_root, registry)
+    out = run_root/CFG.name/"summary"
+    first = tmp_path/"first"
+    shutil.copytree(out, first)
     run_summary(data, run_root, registry)
-    a, b = run_root/CFG.name/"summary.previous1", run_root/CFG.name/"summary"
-    files = sorted(p.relative_to(a) for p in a.rglob("*") if p.is_file())
-    assert files == sorted(p.relative_to(b) for p in b.rglob("*") if p.is_file()) and len(files) == 15
+    assert not (out.parent/"summary.previous1").exists()
+    files = sorted(p.relative_to(first) for p in first.rglob("*") if p.is_file())
+    assert files == sorted(p.relative_to(out) for p in out.rglob("*") if p.is_file()) and len(files) == 15
     for f in files:
-        assert (a/f).read_bytes() == (b/f).read_bytes(), f
+        assert (first/f).read_bytes() == (out/f).read_bytes(), f
+    registry["evals"].pop(("koopman", SEEDS[1]))
+    shutil.rmtree(ds.eval_dir(run_root/CFG.name, "koopman", SEEDS[1]))
+    summary, _ = run_summary(data, run_root, registry)
+    assert f"eval/koopman/seed{SEEDS[1]}" in summary["missing"]
+    previous = out.parent/"summary.previous1"
+    assert all((first/f).read_bytes() == (previous/f).read_bytes() for f in files)
+    assert (out/"summary.json").read_bytes() != (first/"summary.json").read_bytes()
 
 
 # ---------------------------------------------------------------- 真实评测产物（S11a、S11b、S12）
@@ -595,7 +608,7 @@ def test_reads_the_real_evaluation_and_planning_files(root, tmp_path):
         condition="po_jepa_full", seed=1703, config_sha256=cfg.config_sha256, feature_manifest_sha256="f"*64,
         data_sha256={k: ref[k] for k in ("splits.json", "action_scale.json")}, train_set_sha256="t"*64, sigma_z=SIGMA,
         lambdas=dict(time_weight=.1, space_weight=.2), initial_model_sha256="i", updates=10, completed=10,
-        log_ranges=((1, 10),), best_checkpoint_sha256="k", step_seconds=(.1,), peak_memory_bytes=None, gpu_hours=None,
+        log_ranges=((1, 10),), log_problem=None, best_checkpoint_sha256="k", step_seconds=(.1,), peak_memory_bytes=None, gpu_hours=None,
         resumes=0, spectral_backend=None, curves={})},
         evals={("po_jepa_full", 1703): ds.EvalView("po_jepa_full", 1703, "f"*64, eval_data, "k"),
                ("identity", None): ds.EvalView("identity", None, "f"*64, eval_data, None)})
