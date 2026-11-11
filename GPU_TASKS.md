@@ -61,8 +61,8 @@ python -c "import sys, torch; print(sys.version.split()[0], torch.__version__, t
 # This must print a path inside full-model/po-jepa-full/src (not the v7 copy):
 PYTHONPATH=src python -c "import po_jepa; print(po_jepa.__file__)"
 
-# 3. Delivery tests. On a CPU-only machine 4 of them fail on the version check; here all must pass.
-CUDA_VISIBLE_DEVICES=0 python -m pytest -q tests/test_delivery.py
+# 3. Delivery tests (8 tests). The 4 tests that fail in every CPU-only full regression are in this file; here all 8 must pass.
+CUDA_VISIBLE_DEVICES=0 python -m pytest -q -v tests/test_delivery.py
 
 # 4. GPU eigensolver (S08b): float64 eigh on CUDA must agree with the CPU solver. Expect "1 passed", not "skipped".
 CUDA_VISIBLE_DEVICES=0 python -m pytest -q -rs tests/test_droid_s08b.py -k cuda_float64_agrees
@@ -85,9 +85,18 @@ Pass criteria:
 
 | Step | Pass |
 |---|---|
-| 3 | all tests in `tests/test_delivery.py` pass |
+| 3 | `8 passed`, including the 4 tests below |
 | 4 | `1 passed` (a skip means CUDA was not visible) |
 | 5 | `exit=0`; the JSON shows `"preprocess_square_equals_v7": true`, `"encode_frames_equals_direct": true` and `"ok": true` for both extra resolutions (192 and 320) |
+
+The 4 tests that the CPU-only full regressions report as failed (e.g. 3,507 passed, 147 skipped, 4 failed on full-model e9016a8) are all in step 3:
+
+- `tests/test_delivery.py::test_workflow_failure_stops_and_preserves_stage[preflight]`
+- `tests/test_delivery.py::test_workflow_failure_stops_and_preserves_stage[training]`
+- `tests/test_delivery.py::test_workflow_failure_stops_and_preserves_stage[evaluation]`
+- `tests/test_delivery.py::test_workflow_calls_all_phases_once_without_old_stage_records`
+
+They fail on CPU machines because the production entry point checks the environment first (`environment.verify_versions`: Python 3.12.x, torch 2.11.0 built for CUDA 13.0, numpy 2.4.3, PyYAML 6.0.3) and a CPU-only torch has no CUDA version. In the v7 environment they must pass. If any of them fails with `dependency versions differ`, the environment is not the v7 one; stop and send the output.
 
 Send back: the terminal output of steps 2–5 (copy into a text file) and `$WORK/droid-check/check_mp4.json`.
 
