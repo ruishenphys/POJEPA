@@ -622,6 +622,15 @@ def _macros(rows, names, **kw) -> dict:
             for n in names}
 
 
+def _drop_partial(path: Path) -> None:
+    """删掉 `cache._write_json` 上次写 `path` 时在改名前中断留下的 `<名>.partial`（RF-P2-2：frame_rate.json、
+    resolution.json 在测试集目录里，评测任务根目录的清理碰不到）。只删本函数要写的这一个临时文件；同一评测目录同时只有
+    一个进程（`eval_job.run` 持目录锁，RF-P2-3）。"""
+    stale = path.with_name(path.name + ".partial")
+    if stale.is_file():
+        stale.unlink()
+
+
 def _reuse(path: Path, schema: str, split: str, ids: list[str]) -> dict | None:
     """已写好的 frame_rate.json / resolution.json：schema、测试集和起点（窗口）编号都等于这一次的就复用，否则报错。"""
     if not path.exists():
@@ -710,6 +719,7 @@ def evaluate_frame_rate(output: Path | str, *, model, split: str, doc: Mapping, 
             r["outcome"] = outcomes[r["uuid"]]
         body = dict(schema=SCHEMA_FRAME_RATE, split=split, entries=rows)
         Path(output).mkdir(parents=True, exist_ok=True)
+        _drop_partial(path)
         cache._write_json(path, body)
     rows = body["entries"]
     return dict(counts=dict(entries=len(rows), episodes=len({r["uuid"] for r in rows}),
@@ -790,6 +800,7 @@ def evaluate_resolution(output: Path | str, *, model, split: str, doc: Mapping, 
             r["outcome"] = outcomes[r["uuid"]]
         body = dict(schema=SCHEMA_RESOLUTION, split=split, entries=records)
         Path(output).mkdir(parents=True, exist_ok=True)
+        _drop_partial(path)
         cache._write_json(path, body)
     rows = body["entries"]
     return dict(counts=dict(windows=len(rows), episodes=len({r["uuid"] for r in rows})),
@@ -861,6 +872,8 @@ def load_selected(train_dir: Path | str, *, condition: str, seed: int, model, lo
             or registration.get("seed") != seed):
         raise ValueError(f"{reg_path} registers {registration.get('condition')!r}/seed{registration.get('seed')!r}, "
                          f"not {condition}/seed{seed}")
+    if registration.get("config_sha256") != config.config_sha256:
+        raise ValueError(f"{reg_path} was registered under another config")
     selection = _read(root/"selection.json")
     records = tr.validation_records(root, updates)
     best = tr.best_of(records)
@@ -884,6 +897,10 @@ def load_selected(train_dir: Path | str, *, condition: str, seed: int, model, lo
     payload = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
     if type(payload) is not dict or payload.get("completed_steps") != chosen["step"]:
         raise ValueError("checkpoint completed_steps differs from the selected step")
+    stored = (payload.get("provenance") or {}).get(tr.TRAINING_IDENTITY_KEY)
+    want = dict(condition=condition, seed=seed, registration_sha256=cache.file_sha(reg_path))
+    if stored != want:          # RF-P2-1：检查点自己记的训练身份（登记和报告一起被改写时只有它不变）
+        raise ValueError(f"{path.name} was saved by the training {stored!r}, not by {want!r}")
     snapshot = _snapshot(condition, payload, model, loss_config)
     training._check_model_state(payload["model_state"], model)
     found = {k: payload["provenance"].get(k) for k in DATA_FIELDS}

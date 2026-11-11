@@ -268,7 +268,7 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
                      ("summary", run)]
     assert droid.PENDING == {}
     calls.clear()
-    # S11-P1-1：完成标志在时，calibrate、check 什么都不做；train、eval、summary 照常调用阶段，由阶段核身份
+    # S11-P1-1、RF-P2-4：完成标志在时，calibrate 什么都不做；check、train、eval、summary 照常调用阶段，由阶段核身份
     flags = {"calibrate/lambda-po_jepa_full": tmp_path/"runs/pilot/calibration/lambda-po_jepa_full.json",
              "check/env": tmp_path/"runs/pilot/check/env.json",
              "train/koopman/seed1703": tmp_path/"runs/pilot/train/koopman/seed1703/COMPLETE.json",
@@ -282,8 +282,8 @@ def test_entry_dispatch(tmp_path, monkeypatch, capsys):
     monkeypatch.setitem(droid.MAINS, "train", fake("train", write=False))
     for job in flags:
         assert droid.main(_entry(tmp_path, job)) == 0
-    assert [c[0] for c in calls] == ["train", "eval", "eval", "summary"]
-    assert set(droid_jobs.RECHECKED_STAGES) == {"train", "eval", "summary"} == set(droid_run.RECHECKED_STAGES)
+    assert [c[0] for c in calls] == ["check", "train", "eval", "eval", "summary"]
+    assert set(droid_jobs.RECHECKED_STAGES) == {"check", "train", "eval", "summary"} == set(droid_run.RECHECKED_STAGES)
     calls.clear()
     for bad in (_entry(tmp_path, "download/train-001"),                            # 试跑只有 train-000
                 _entry(tmp_path, "encode/val", "--delete-raw"),                     # 只有训练片带 --delete-raw
@@ -381,24 +381,31 @@ def test_runner_skips_done_requeues_75_and_logs(tmp_path, capsys):
 
 
 def test_runner_rechecks_train_eval_and_summary(tmp_path, capsys):
-    """S11-P1-1：完成标志已在的 train、eval、summary 每次启动运行器都照常运行一次（由阶段核身份）；复核失败时下游不开始；
-    其他阶段完成标志在就跳过。dry-run 把它们列成“要复核”。"""
-    path = fake_graph(tmp_path, [("calibrate/x", [], 0, 1, 1, 0), ("train/x", ["calibrate/x"], 0, 1, 1, 1),
+    """S11-P1-1、RF-P2-4：完成标志已在的 check、train、eval、summary 每次启动运行器都照常运行一次（由阶段核身份）；复核
+    失败时下游不开始；其他阶段完成标志在就跳过。dry-run 把它们列成“要复核”。"""
+    path = fake_graph(tmp_path, [("calibrate/x", [], 0, 1, 1, 0), ("check/x", ["calibrate/x"], 0, 1, 1, 1),
+                                 ("train/x", ["check/x"], 0, 1, 1, 1),
                                  ("eval/x", ["train/x"], 0, 1, 1, 2), ("summary", ["eval/x"], 0, 1, 1, 3)])
-    for job in ("calibrate/x", "train/x", "eval/x", "summary"):
+    for job in ("calibrate/x", "check/x", "train/x", "eval/x", "summary"):
         flag = tmp_path/f"runs/fake/flags/{job.replace('/', '__')}.done"
         flag.parent.mkdir(parents=True, exist_ok=True)
         flag.write_text("{}")
     assert runner(tmp_path, path, "--dry-run", "--cpus", "1", "--mem-gb", "1") == 0
     out = capsys.readouterr().out
-    assert "已完成  calibrate/x" in out and all(f"已完成、要复核  {j}" in out for j in ("train/x", "eval/x", "summary"))
-    assert [line.split()[1] for line in out.splitlines() if line.strip()[:1].isdigit()] == ["train/x", "eval/x", "summary"]
+    assert "已完成  calibrate/x" in out and all(f"已完成、要复核  {j}" in out
+                                             for j in ("check/x", "train/x", "eval/x", "summary"))
+    assert [line.split()[1] for line in out.splitlines() if line.strip()[:1].isdigit()] == [
+        "check/x", "train/x", "eval/x", "summary"]
     assert runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1") == 0
-    assert started(tmp_path) == ["train/x", "eval/x", "summary"]
+    assert started(tmp_path) == ["check/x", "train/x", "eval/x", "summary"]
     plan(tmp_path, eval__x=[1])                                           # 复核发现身份不同：失败，汇总不开始
     assert runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1") == 1
-    assert started(tmp_path)[3:] == ["train/x", "eval/x"]
+    assert started(tmp_path)[4:] == ["check/x", "train/x", "eval/x"]
     assert "因上游失败没有开始的：summary" in capsys.readouterr().out
+    plan(tmp_path, check__x=[1])                                          # RF-P2-4：环境记录不是当前的，训练不开始
+    assert runner(tmp_path, path, "--cpus", "1", "--mem-gb", "1") == 1
+    assert started(tmp_path)[7:] == ["check/x"]
+    assert "因上游失败没有开始的：eval/x, summary, train/x" in capsys.readouterr().out
 
 
 def test_runner_lock_is_released_when_writing_the_pid_fails(tmp_path, monkeypatch):

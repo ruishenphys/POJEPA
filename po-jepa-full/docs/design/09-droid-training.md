@@ -297,3 +297,7 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 ## 12. 审核修复补注（a5f4edb 第二轮审核，2026-11-11）
 
 见 `docs/segments/review-fix-a5f4edb.md`。和本文有关的：训练任务启动时（未完成）先删目录根上 `cache._write_json` 留下的 `*.partial`（S09a-P2-1）；只有 COMPLETE.json、没有 report.json 的目录不算完成；`read_lambda` 要求 schema、内容里的条件名、配置、σ_z 文件、特征总清单 SHA 都对，训练任务另核标定用的训练集（S09a-P2-2）；`load_selected` 核报告和登记的种子等于本次请求的、报告绑定的登记 SHA 对（S09b-P2-1）；评测任务启动时（未完成）先删目录根上的 `*.partial`（S09b-P2-2）。都不改任何数值口径。
+
+## 13. 审核修复补注（e9016a8 第三轮审核，2026-11-11）
+
+见 `docs/segments/review-fix-e9016a8.md`。和本文有关的：读 `sigma_z.json` 一律核 schema、配置、标定时的特征总清单（全部片）和 `action_scale.json` 的 SHA 等于当前数据根的（§3.1 写的字段，RF-P1-2；训练、λ 标定、评测、check/env、截断间隙都经同一个 `spectral_gap.read_sigma_z`）；评测读 λ 时核所选训练登记的训练集，读到的 σ_z、λ 文件 SHA 必须等于训练登记的；检查点存的来源字典多一项 `droid_training` = {condition, seed, registration_sha256}，续训整份比较，`load_selected` 核它等于本次请求（RF-P2-1），另核登记的配置 SHA；训练、评测、截断间隙任务持输出目录的 `job.lock` 排他锁（RF-P2-3）；评测的原始帧率、原始分辨率轴写之前删自己的 `*.partial`（RF-P2-2）；`check/env` 已有记录时核通过状态、配置、特征总清单、σ_z 文件 SHA（§7，RF-P2-4）。都不改任何数值口径。

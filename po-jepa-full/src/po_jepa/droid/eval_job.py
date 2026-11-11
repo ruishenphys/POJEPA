@@ -16,7 +16,8 @@
 5. AC：`ac_state: true_state` 时传 `droid.ac.bind`；原始帧率用 `droid.ac.ac_steps`。
 
 中断后重跑同一条命令接着做（rows 按批跳过、frame_rate/resolution/planning 已完成的直接读；输出目录根上
-`cache._write_json` 留下的 `*.partial` 先删掉，S09b-P2-2）。`--time-limit-minutes` 只记录（09 §11）：没完成时每次启动往
+`cache._write_json` 留下的 `*.partial` 先删掉，S09b-P2-2；frame_rate.json、resolution.json 的临时文件由各自的轴在重算前
+删，RF-P2-2）。整个任务持 `job.lock` 的排他锁（`droid.joblock`，RF-P2-3），同一目录的第二个进程直接报错。`--time-limit-minutes` 只记录（09 §11）：没完成时每次启动往
 `starts.jsonl` 追加一行（时长上限、设备），不进 job.json 的请求身份；评测按批落盘，被排队系统停掉后重排同一条命令即可。
 
   python -m po_jepa.droid.eval_job --config … --data-root … --run-root … --job eval/<条件>/seed<种子> [--device cuda]
@@ -39,6 +40,7 @@ from po_jepa.droid import conditions as cd
 from po_jepa.droid import evaluate as ev
 from po_jepa.droid import features as ft
 from po_jepa.droid import index as ix
+from po_jepa.droid import joblock
 from po_jepa.droid import planning as pl
 from po_jepa.droid import prepare as pr
 from po_jepa.droid import splits as sp
@@ -130,11 +132,45 @@ def _write_or_same(path: Path, value: dict) -> None:
     cache._write_json(path, value)
 
 
+def registered_train_set(train_dir: Path | str) -> dict | None:
+    """所选训练任务登记里的训练集 {count, sha256}（RF-P1-2：评测读 λ 时核它是在这个训练集上标定的）；没有登记时返回
+    None，由 `evaluate.load_selected` 报训练没完成。"""
+    path = Path(train_dir)/"registration.json"
+    if not path.is_file():
+        return None
+    value = ix._loads(path.read_bytes(), str(path)).get("train_set")
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} records no train_set")
+    return value
+
+
+def check_training_calibration(train_dir: Path | str, calibration: tr.Calibration) -> None:
+    """评测用的 σ_z、λ 文件就是所选训练登记的那两份（文件 SHA 和值相同；登记的 SHA 已由 `load_selected` 绑到报告）。
+    标定文件只写一次、不覆盖，正常情况下必然相同；运行根被拼接过时在这里拒绝（RF-P1-2）。"""
+    path = Path(train_dir)/"registration.json"
+    reg = ix._loads(path.read_bytes(), str(path))
+    sigma = reg.get("sigma_z") or {}
+    if sigma.get("sha256") != calibration.sigma_z_sha256 or sigma.get("value") != calibration.sigma_z:
+        raise ValueError(f"{path} was trained with another sigma_z.json than the one this evaluation reads")
+    lam = reg.get("lambda_weights")
+    want = None if calibration.weights is None else dict(calibration.weights, sha256=calibration.lambda_sha256)
+    if lam != want:
+        raise ValueError(f"{path} was trained with other lambda weights than the ones this evaluation reads")
+
+
 def run(out: Path | str, *, condition: str, seed: int | None, config: DroidConfig, data: EvalData,
         calibration: tr.Calibration, device, train_dir: Path | str | None = None,
         ac_checkpoint: Path | str | None = None, time_limit_minutes: float | None = None) -> dict:
-    """一个评测任务（见模块说明），返回 evaluate 的报告。"""
+    """一个评测任务（见模块说明），返回 evaluate 的报告。整个过程持评测目录的排他锁（RF-P2-3）。"""
     out = Path(out)
+    with joblock.hold(out):
+        return _run_locked(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration,
+                           device=device, train_dir=train_dir, ac_checkpoint=ac_checkpoint,
+                           time_limit_minutes=time_limit_minutes)
+
+
+def _run_locked(out: Path, *, condition, seed, config, data, calibration, device, train_dir, ac_checkpoint,
+                time_limit_minutes) -> dict:
     device = torch.device(device)
     if not (out/"COMPLETE.json").exists():
         out.mkdir(parents=True, exist_ok=True)
@@ -156,6 +192,7 @@ def run(out: Path | str, *, condition: str, seed: int | None, config: DroidConfi
             raise ValueError("a trained condition needs its training directory")
         loaded = ev.load_selected(train_dir, condition=condition, seed=seed, model=model, loss_config=loss,
                                   config=config, provenance=data.provenance)
+        check_training_calibration(train_dir, calibration)
         checkpoint = loaded["checkpoint"]
         source = dict(schema=SOURCE_SCHEMA, condition=condition, seed=seed, **loaded["source"])
     else:
@@ -204,8 +241,10 @@ def main(argv: list[str] | None = None) -> int:
     condition, seed = parse_job(a.job, config)
     out = eval_dir(a.run_root, config, condition, seed)
     data = load_data(config, a.data_root)
-    calibration = tr.load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256)
     train_dir = tr.job_dir(a.run_root, config, condition, seed) if seed is not None else None
+    calibration = tr.load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256,
+                                      action_scale_sha256=data.data_sha256["action_scale.json"],
+                                      train_set=None if train_dir is None else registered_train_set(train_dir))
     ac = Path(a.data_root)/"checkpoints"/tr.OFFICIAL_AC_FILE if condition in cd.OFFICIAL_AC else None
     report = run(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration,
                  device=a.device, train_dir=train_dir, ac_checkpoint=ac, time_limit_minutes=a.time_limit_minutes)

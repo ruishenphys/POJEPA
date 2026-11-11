@@ -247,6 +247,44 @@ def test_load_selected_binds_the_requested_seed_and_registration(world, tmp_path
         load(out, world)
 
 
+def test_load_selected_checks_the_training_identity_inside_the_checkpoint(world, tmp_path):
+    """RF-P2-1：检查点来源里记着训练身份 {condition, seed, registration_sha256}。登记和报告一起被改成 1704（登记 SHA、
+    完成标志都重新绑定）后请求 1704，原检查点字节里的种子和登记 SHA 对不上，拒绝；登记的配置 SHA 被改（重新绑定）也拒绝。"""
+    root = world["train_dir"]
+    selection = json.loads((root/"selection.json").read_text())
+    stored = tt.payload(root/selection["best"]["checkpoint"])["provenance"][tr.TRAINING_IDENTITY_KEY]
+    assert stored == dict(condition=CONDITION, seed=1703, registration_sha256=cache.file_sha(root/"registration.json"))
+
+    out = copy(world, tmp_path, "relabel")
+    rewrite(out/"registration.json", seed=1704)
+    rewrite(out/"report.json", seed=1704, registration_sha256=cache.file_sha(out/"registration.json"))
+    rewrite(out/"COMPLETE.json", report_sha256=cache.file_sha(out/"report.json"))
+    with pytest.raises(ValueError, match="was saved by the training"):
+        load(out, world, seed=1704, train_seed=1704)
+
+    out = copy(world, tmp_path, "config")
+    rewrite(out/"registration.json", config_sha256="0"*64)
+    rewrite(out/"report.json", registration_sha256=cache.file_sha(out/"registration.json"))
+    rewrite(out/"COMPLETE.json", report_sha256=cache.file_sha(out/"report.json"))
+    with pytest.raises(ValueError, match="registered under another config"):
+        load(out, world)
+
+
+def test_eval_reads_the_calibration_of_its_training(world, tmp_path):
+    """RF-P1-2：评测读 λ 时核所选训练登记的训练集（`registered_train_set`），读到的 σ_z、λ 文件也必须是训练登记的那两份；
+    运行根里的标定文件被换过（SHA 不同）就在写 source.json 之前拒绝。"""
+    reg = json.loads((world["train_dir"]/"registration.json").read_text())
+    assert ej.registered_train_set(world["train_dir"]) == reg["train_set"]
+    assert ej.registered_train_set(tmp_path/"none") is None
+    for cal in (tr.Calibration(tt.SIGMA_Z, "t"*64, None, None), tr.Calibration(tt.SIGMA_Z*2, "s"*64, None, None)):
+        with pytest.raises(ValueError, match="another sigma_z.json"):
+            ej.run(tmp_path/f"x{cal.sigma_z_sha256}{cal.sigma_z}", condition=CONDITION, seed=1703, config=CONFIG,
+                   data=eval_data(world), calibration=cal, device="cpu", train_dir=world["train_dir"])
+    with pytest.raises(ValueError, match="other lambda weights"):
+        ej.check_training_calibration(world["full_dir"], tr.Calibration(tt.SIGMA_Z, "s"*64, dict(tt.WEIGHTS), "m"*64))
+    ej.check_training_calibration(world["full_dir"], tt.calib("po_jepa_full"))
+
+
 # ---------------------------------------------------------------- 评测任务
 
 def eval_data(world) -> ej.EvalData:
@@ -333,9 +371,15 @@ def test_eval_job_resumes_past_a_leftover_source_partial(world, tmp_path):
     out.mkdir()
     (out/"source.json.partial").write_bytes(b'{"half": ')
     (out/"job.json.partial").write_bytes(b'{')
+    for split, name in (("id_test", ev.FRAME_RATE_FILE), ("ood_test", ev.RESOLUTION_FILE),   # RF-P2-2：两个轴在测试集
+                        ("id_test", ev.RESOLUTION_FILE), ("ood_test", ev.FRAME_RATE_FILE)):    # 目录里各自的临时文件
+        (out/split).mkdir(exist_ok=True)
+        (out/split/f"{name}.partial").write_bytes(b'{"entries": [')
     report = ej.run(out, condition="identity", seed=None, config=CONFIG, data=eval_data(world),
                     calibration=tt.calib("identity"), device="cpu", time_limit_minutes=45)
-    assert (out/"COMPLETE.json").exists() and not list(out.glob("*.partial"))
+    assert (out/"COMPLETE.json").exists() and not list(out.rglob("*.partial"))
+    for split in ev.TEST_SPLITS:
+        assert json.loads((out/split/ev.FRAME_RATE_FILE).read_text())["split"] == split
     starts = tr._read_lines(out/ej.STARTS_FILE)
     assert starts == [dict(time_limit_minutes=45, device="cpu")]
     assert "time_limit_minutes" not in json.dumps(json.loads((out/"job.json").read_text()))
@@ -346,6 +390,19 @@ def test_eval_job_resumes_past_a_leftover_source_partial(world, tmp_path):
         ej.run(tmp_path/"wrong-seed", condition=CONDITION, seed=1704, config=CONFIG, data=eval_data(world),
                calibration=tt.calib(CONDITION), device="cpu", train_dir=world["train_dir"])
     assert not (tmp_path/"wrong-seed"/"source.json").exists()
+
+
+def test_eval_job_holds_its_directory_lock(world, tmp_path):
+    """RF-P2-3：另一个进程持有评测目录的锁时，第二次启动立即报错，不删对方的临时文件、不写任何东西。"""
+    from po_jepa.droid import joblock
+    out = tmp_path/"identity"
+    out.mkdir()
+    (out/"source.json.partial").write_bytes(b'{"half": ')       # 对方正在写的文件
+    with joblock.hold(out):
+        with pytest.raises(joblock.JobBusy, match="another process"):
+            ej.run(out, condition="identity", seed=None, config=CONFIG, data=eval_data(world),
+                   calibration=tt.calib("identity"), device="cpu")
+    assert sorted(p.name for p in out.iterdir()) == [joblock.LOCK_FILE, "source.json.partial"]
 
 
 def test_eval_job_needs_its_training_directory(world, tmp_path):

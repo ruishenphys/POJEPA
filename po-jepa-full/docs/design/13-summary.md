@@ -117,6 +117,8 @@ T5 的 ε̂ 和有效斜率：ε̂ 是每个 (场景, 种子, 条件) 上 D4 窗
 | 训练日志 | 每个训练任务的日志覆盖 1…U 不重不漏，完成步数等于 U |
 | 评测 | 每个评测任务读的检查点 SHA 等于对应训练任务 `selection.json` 的最优；三角不等式违反数为 0 |
 
+第三轮审核修复（e9016a8，见 `docs/segments/review-fix-e9016a8.md`）：读每个评测和训练目录时先核报告、`job.json`、`source.json`（或训练登记）里的 (条件, 种子) 都等于目录槽位、`job.json` 等于报告的 job，不等就报错退出（RF-P1-1：目录槽位不是身份）；“评测”另核 source.json 记的训练登记 SHA 等于该训练目录的；“σ_z”另核 `sigma_z.json` 的动作尺度 SHA 等于数据根的、截断间隙、PO-JEPA 类训练和 check/env 读的是同一份 `sigma_z.json`（RF-P1-2）；“特征”把 `sigma_z.json` 和 `check/env.json` 记的特征总清单也算进去；“配置”包括 `check/env.json`（RF-P2-4）。
+
 ### 8.4 表
 
 | 表 | 内容 |

@@ -256,8 +256,10 @@ def run_lambda(condition: str, config: DroidConfig, data_root: Path | str, run_r
     out = lambda_path(run_root, config, condition)
     if out.exists():
         raise FileExistsError(f"{out} exists; lambda is calibrated once per config and never overwritten")
-    sigma_z, sigma_sha = read_sigma_z(calibration_dir(run_root, config)/SIGMA_FILE, config)
     data = tr.load_data(config, data_root)
+    sigma_z, sigma_sha = read_sigma_z(calibration_dir(run_root, config)/SIGMA_FILE, config,
+                                      feature_manifest_sha256=data.feature_manifest_sha256,
+                                      action_scale_sha256=data.action_scale_sha256)
     doc = calibrate_lambda(condition, config=config, data=data, sigma_z=sigma_z, sigma_z_sha256=sigma_sha,
                            device=device, workers=workers)
     cache._write_json(out, doc)

@@ -3,8 +3,9 @@
   python tools/droid_run.py jobs-full.json --gpus 0,1 --cpus 32 --mem-gb 256
   python tools/droid_run.py jobs-full.json --gpus 0,1 --cpus 32 --mem-gb 256 --dry-run
 
-- 开始时完成标志已在的任务算完成、不再运行；train、eval、summary 例外（`RECHECKED_STAGES`，和 `droid_jobs` 的相同）：
-  每次启动运行器都照常运行一次，由阶段先核本次请求的身份再复用已有结果（身份不同就失败，S11-P1-1 修复）。
+- 开始时完成标志已在的任务算完成、不再运行；check、train、eval、summary 例外（`RECHECKED_STAGES`，和 `droid_jobs` 的
+  相同）：每次启动运行器都照常运行一次，由阶段先核本次请求的身份再复用已有结果（身份不同就失败，S11-P1-1、RF-P2-4
+  修复；check 只核已有 env.json 的配置、特征和 σ_z，不重跑检查）。
 - 依赖都完成（看完成标志）的任务进入可跑队列，按 priority、再按编号取；当前排在前面的放不下时，后面放得下的先跑。
   GPU 任务独占它要的卡数（设 CUDA_VISIBLE_DEVICES），CPU 任务的 CUDA_VISIBLE_DEVICES 为空；CPU 和内存按任务图里的
   资源数记账，不超过命令行给的总量。要的资源比总量还多的任务一开始就记为失败。
@@ -34,7 +35,7 @@ import sys
 import time
 
 SCHEMA = "droid_jobs_v1"
-RECHECKED_STAGES = ("train", "eval", "summary")    # = droid_jobs.RECHECKED_STAGES（本脚本不导入 po_jepa，测试核两者相同）
+RECHECKED_STAGES = ("check", "train", "eval", "summary")    # = droid_jobs.RECHECKED_STAGES（本脚本不导入 po_jepa，测试核两者相同）
 LOCK = "RUNNER.pid"
 INTERRUPTED = 130
 DEFAULT_WORKDIR = Path(__file__).resolve().parents[1]

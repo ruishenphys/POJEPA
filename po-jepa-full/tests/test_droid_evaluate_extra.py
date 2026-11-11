@@ -535,11 +535,18 @@ def test_spectral_gap_inputs(root, tmp_path):
     for bad in (0., -1., float("nan"), 3):
         with pytest.raises(ValueError):
             sg.graph_block(bad)
-    (tmp_path/"s.json").write_text(json.dumps({"sigma_z": 7.25, "config_sha256": CFG.config_sha256}))
-    assert sg.read_sigma_z(tmp_path/"s.json", CFG)[0] == 7.25
-    (tmp_path/"t.json").write_text(json.dumps({"sigma_z": 7.25, "config_sha256": "0"*64}))
+    from po_jepa.droid.calibrate import SIGMA_SCHEMA
+    doc = {"schema": SIGMA_SCHEMA, "sigma_z": 7.25, "config_sha256": CFG.config_sha256,
+           "feature_manifest_sha256": "f"*64, "action_scale_sha256": "a"*64}
+    current = dict(feature_manifest_sha256="f"*64, action_scale_sha256="a"*64)
+    (tmp_path/"s.json").write_text(json.dumps(doc))
+    assert sg.read_sigma_z(tmp_path/"s.json", CFG, **current)[0] == 7.25
+    (tmp_path/"t.json").write_text(json.dumps(dict(doc, config_sha256="0"*64)))
     with pytest.raises(ValueError):
-        sg.read_sigma_z(tmp_path/"t.json", CFG)
+        sg.read_sigma_z(tmp_path/"t.json", CFG, **current)
+    for k in current:                       # RF-P1-2：截断间隙读 σ_z 时用全量特征清单和动作尺度核来源
+        with pytest.raises(ValueError, match="was calibrated"):
+            sg.read_sigma_z(tmp_path/"s.json", CFG, **dict(current, **{k: "0"*64}))
     wrong = dataclasses.replace(CFG, model=dataclasses.replace(CFG.model, sigma_x=0.25))
     with pytest.raises(ValueError):
         sg.build_spectrum(wrong, 7.25)
@@ -574,7 +581,20 @@ def test_spectral_gap_cli_through_the_entry_point(root, tmp_path, monkeypatch):
     run = tmp_path/"runs"
     cal = run/BASE.name/"calibration"
     cal.mkdir(parents=True)
-    (cal/"sigma_z.json").write_text(json.dumps({"sigma_z": 11.0, "config_sha256": BASE.config_sha256}))
+    # 这个数据根只有两个测试片、没有划分：让“全部片”的清单就是这两片（RF-P1-2：σ_z 按全量清单和动作尺度核来源）
+    real_manifests = ft.feature_manifests
+    monkeypatch.setattr(ft, "feature_manifests",
+                        lambda d, c, shards=None: real_manifests(d, c, shards=list(ev.TEST_SPLITS) if shards is None else shards))
+    _, full_sha = ft.feature_manifests(data, BASE)
+    scale = pr.prepared_dir(data)/pr.ACTION_SCALE_FILE
+    if not scale.exists():
+        cache._write_json(scale, {"fake": "scale"})
+    from po_jepa.droid.calibrate import SIGMA_SCHEMA
+
+    def sigma(value):
+        return json.dumps({"schema": SIGMA_SCHEMA, "sigma_z": value, "config_sha256": BASE.config_sha256,
+                           "feature_manifest_sha256": full_sha, "action_scale_sha256": cache.file_sha(scale)})
+    (cal/"sigma_z.json").write_text(sigma(11.0))
     argv = ["eval", "--config", str(CONFIGS/"pilot.yaml"), "--data-root", str(data), "--run-root", str(run)]
     assert droid.main(argv + ["--job", "eval/spectral-gap"]) == 0
     out = sg.job_dir(run, BASE)
@@ -583,7 +603,7 @@ def test_spectral_gap_cli_through_the_entry_point(root, tmp_path, monkeypatch):
     assert set(report["job"]["inputs"]) == {"windows_sha256", "feature_manifest_sha256", "sigma_z_sha256"}
     assert droid.main(argv + ["--job", "eval/spectral-gap"]) == 0          # 已完成、输入相同：返回 0，报告不变
     assert json.loads((out/"report.json").read_text()) == report
-    (cal/"sigma_z.json").write_text(json.dumps({"sigma_z": 12.0, "config_sha256": BASE.config_sha256}))
+    (cal/"sigma_z.json").write_text(sigma(12.0))
     with pytest.raises(ValueError, match="complete for another request"):  # S11b-fix1：入口不再凭完成标志跳过
         droid.main(argv + ["--job", "eval/spectral-gap"])
     calls = []

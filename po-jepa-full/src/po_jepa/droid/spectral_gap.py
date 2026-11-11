@@ -29,6 +29,7 @@ import yaml
 from po_jepa.droid import evaluate as ev
 from po_jepa.droid import features as ft
 from po_jepa.droid import index as ix
+from po_jepa.droid import joblock
 from po_jepa.droid import prepare as pr
 from po_jepa.droid.config import DroidConfig, load_config
 from po_jepa.geometry import regular_grid
@@ -64,16 +65,41 @@ def build_spectrum(config: DroidConfig, sigma_z: float) -> tuple[GraphSpectrum, 
     return GraphSpectrum(GraphConfig(**graph)).eval(), graph
 
 
-def read_sigma_z(path: Path | str, config: DroidConfig) -> tuple[float, str]:
-    """`sigma_z.json`（09 §3.1）的 `sigma_z` 和文件 SHA；记了 `config_sha256` 时必须等于本配置的。"""
+def sigma_z_doc(path: Path | str, config: DroidConfig) -> dict:
+    """`sigma_z.json`（09 §3.1，`calibrate.run_sigma_z` 写）的内容：schema 是 `droid_sigma_z_v1`、`config_sha256` 是本配置的、
+    `sigma_z` 是有限正数，`feature_manifest_sha256`、`action_scale_sha256` 是 SHA-256（RF-P1-2：标定都会写，缺了也拒绝）。
+    来源是不是当前的由 `read_sigma_z` 或调用者核。"""
+    from po_jepa.droid.calibrate import SIGMA_SCHEMA
     path = Path(path)
     doc = ix._loads(path.read_bytes(), str(path))
-    value = doc.get("sigma_z") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    if doc.get("schema") != SIGMA_SCHEMA:
+        raise ValueError(f"{path}: schema {doc.get('schema')!r} is not {SIGMA_SCHEMA!r}")
+    value = doc.get("sigma_z")
     if type(value) is not float or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{path}: sigma_z must be a positive finite float, got {value!r}")
-    if "config_sha256" in doc and doc["config_sha256"] != config.config_sha256:
+    if doc.get("config_sha256") != config.config_sha256:
         raise ValueError(f"{path} was calibrated under another config")
-    return value, cache.file_sha(path)
+    for k in ("feature_manifest_sha256", "action_scale_sha256"):
+        v = doc.get(k)
+        if type(v) is not str or len(v) != 64:
+            raise ValueError(f"{path} records no {k}")
+    return doc
+
+
+def read_sigma_z(path: Path | str, config: DroidConfig, *, feature_manifest_sha256: str,
+                 action_scale_sha256: str) -> tuple[float, str]:
+    """`sigma_z.json`（09 §3.1）的 `sigma_z` 和文件 SHA。除 `sigma_z_doc` 的核对外，标定时的特征总清单（全部片，
+    `features.feature_manifests(data_root, config)` 的 SHA）和 `action_scale.json` 的 SHA 必须等于调用者按当前数据根算出的
+    （RF-P1-2：换数据根或重做特征后不再接受旧的 σ_z）。"""
+    path = Path(path)
+    doc = sigma_z_doc(path, config)
+    if doc["feature_manifest_sha256"] != feature_manifest_sha256:
+        raise ValueError(f"{path} was calibrated on other features (feature_manifest_sha256 differs)")
+    if doc["action_scale_sha256"] != action_scale_sha256:
+        raise ValueError(f"{path} was calibrated with another action_scale.json")
+    return doc["sigma_z"], cache.file_sha(path)
 
 
 def gap_windows(docs: Mapping[str, Mapping]) -> list[dict]:
@@ -101,6 +127,12 @@ def run_spectral_gap(output: Path | str, *, docs: Mapping[str, Mapping], reader:
                duration=DURATION, k=k, sigma_z=sigma_z, inputs=dict(provenance))
     want = ix._loads(cache._json_bytes(job), "job")
     selected = gap_windows(docs)
+    with joblock.hold(out):           # RF-P2-3：从看完成标志到写完，同一目录只有一个进程
+        return _locked(out, job=job, want=want, selected=selected, spectrum=spectrum, graph=graph, k=k, reader=reader,
+                       sigma_z=sigma_z)
+
+
+def _locked(out: Path, *, job, want, selected, spectrum, graph, k, reader, sigma_z) -> dict:
     job_path = out/"job.json"
     if (out/"COMPLETE.json").exists():                 # 完成缓存只在配置、sigma_z、来源和窗口都相同时复用
         report = ix._loads((out/"report.json").read_bytes(), "report.json")
@@ -112,7 +144,6 @@ def run_spectral_gap(output: Path | str, *, docs: Mapping[str, Mapping], reader:
             raise ValueError(f"{out} is complete for another request (config, sigma_z, inputs or test windows "
                              "changed); use a new output directory")
         return report
-    out.mkdir(parents=True, exist_ok=True)
     for stale in out.glob("*.partial"):
         stale.unlink()
     if job_path.exists() and ix._loads(job_path.read_bytes(), "job.json") != want:
@@ -155,8 +186,10 @@ def main(argv: list[str] | None = None) -> int:
         path = windows_dir/f"{split}.json"
         docs[split], shas[split] = ix._loads(path.read_bytes(), str(path)), cache.file_sha(path)
     manifests, manifest_sha = ft.feature_manifests(a.data_root, config, shards=list(ev.TEST_SPLITS))
+    _, full_manifest_sha = ft.feature_manifests(a.data_root, config)     # σ_z 标定用的全量清单（RF-P1-2）
     sigma_path = Path(a.run_root)/config.name/"calibration"/"sigma_z.json"
-    sigma_z, sigma_sha = read_sigma_z(sigma_path, config)
+    sigma_z, sigma_sha = read_sigma_z(sigma_path, config, feature_manifest_sha256=full_manifest_sha,
+                                      action_scale_sha256=cache.file_sha(pr.prepared_dir(a.data_root)/pr.ACTION_SCALE_FILE))
     provenance = dict(windows_sha256=shas, feature_manifest_sha256=manifest_sha, sigma_z_sha256=sigma_sha)
     run_spectral_gap(job_dir(a.run_root, config), docs=docs, reader=ft.FeatureReader(a.data_root, manifests),
                      config=config, sigma_z=sigma_z, provenance=provenance)

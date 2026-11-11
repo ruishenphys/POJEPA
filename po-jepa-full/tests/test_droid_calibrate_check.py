@@ -115,7 +115,20 @@ def test_run_sigma_z_writes_once(root, tmp_path, monkeypatch):
     config = with_calibration(small(), sigma_z_episodes=3)
     doc = cb.run_sigma_z(config, data, tmp_path/"runs")
     path = tmp_path/"runs"/config.name/"calibration"/"sigma_z.json"
-    assert read_sigma_z(path, config) == (doc["sigma_z"], cache.file_sha(path))
+    current = dict(feature_manifest_sha256="f"*64, action_scale_sha256=cache.file_sha(scale))
+    assert read_sigma_z(path, config, **current) == (doc["sigma_z"], cache.file_sha(path))
+    # RF-P1-2：换了特征（清单 A 标定、清单 C 读）或动作尺度就不再接受；缺来源字段、schema 不对也拒绝
+    with pytest.raises(ValueError, match="other features"):
+        read_sigma_z(path, config, **dict(current, feature_manifest_sha256="c"*64))
+    with pytest.raises(ValueError, match="another action_scale"):
+        read_sigma_z(path, config, **dict(current, action_scale_sha256="0"*64))
+    for change in (dict(schema="droid_sigma_z_v0"), dict(feature_manifest_sha256=None), dict(action_scale_sha256=None),
+                   dict(config_sha256=None)):
+        edited = {k: v for k, v in json.loads(path.read_text()).items() if change.get(k, 0) is not None}
+        edited.update({k: v for k, v in change.items() if v is not None})
+        (tmp_path/"bad.json").write_text(json.dumps(edited))
+        with pytest.raises(ValueError):
+            read_sigma_z(tmp_path/"bad.json", config, **current)
     assert doc["config_sha256"] == config.config_sha256 and doc["feature_manifest_sha256"] == "f"*64
     assert doc["action_scale_sha256"] == cache.file_sha(scale) and doc["pool_size"] == 6
     assert doc["sigma_z"] == cb.calibrate_sigma_z(ft.FeatureReader(data, manifests), pool, config)["sigma_z"]
@@ -211,24 +224,37 @@ def test_run_lambda_file_is_read_by_the_training_task(root, tmp_path, monkeypatc
     monkeypatch.setattr(tr, "load_data", lambda c, d: make_data(root, c))
     cal = tmp_path/"runs"/config.name/"calibration"
     cal.mkdir(parents=True)
-    cache._write_json(cal/"sigma_z.json", dict(sigma_z=SIGMA_Z, config_sha256=config.config_sha256))
-    doc = cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
     data = make_data(root, config)
     fm, ts = data.feature_manifest_sha256, dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set))
+    scale = data.action_scale_sha256
+    # RF-P1-2：在另一份特征上标定的 σ_z 不能拿来标定 λ
+    cache._write_json(cal/"sigma_z.json", dict(schema=cb.SIGMA_SCHEMA, sigma_z=SIGMA_Z, config_sha256=config.config_sha256,
+                                               feature_manifest_sha256="0"*64, action_scale_sha256=scale))
+    with pytest.raises(ValueError, match="other features"):
+        cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
+    assert not (cal/"lambda-po_jepa_full.json").exists()
+    (cal/"sigma_z.json").unlink()
+    cache._write_json(cal/"sigma_z.json", dict(schema=cb.SIGMA_SCHEMA, sigma_z=SIGMA_Z, config_sha256=config.config_sha256,
+                                               feature_manifest_sha256=fm, action_scale_sha256=scale))
+    doc = cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
     sigma_sha = cache.file_sha(cal/"sigma_z.json")
     path = cal/"lambda-po_jepa_full.json"
     weights, sha = tr.read_lambda(path, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256=fm,
                                   train_set=ts)
     assert weights == {k: doc[k] for k in ("time_weight", "space_weight")} and sha == cache.file_sha(path)
     assert tr.load_calibration(tmp_path/"runs", config, "po_jepa_full", feature_manifest_sha256=fm,
-                               train_set=ts).weights == weights
+                               action_scale_sha256=scale, train_set=ts).weights == weights
+    for bad in (dict(feature_manifest_sha256="c"*64), dict(action_scale_sha256="0"*64)):   # RF-P1-2：σ_z 先被拒
+        with pytest.raises(ValueError, match="sigma_z.json was calibrated"):
+            tr.load_calibration(tmp_path/"runs", config, "po_jepa_no_consistency",
+                                **{**dict(feature_manifest_sha256=fm, action_scale_sha256=scale), **bad})
     with pytest.raises(FileExistsError):
         cb.run_lambda("po_jepa_full", config, "unused", tmp_path/"runs", "cpu", workers=0)
     # S09a-P2-2：被复制成另一个条件的文件名、换了特征或训练集、schema 不对、缺字段，一律拒绝
     other = cal/"lambda-fixed_fourier.json"
     shutil.copyfile(path, other)
     with pytest.raises(ValueError, match="not of 'fixed_fourier'"):
-        tr.load_calibration(tmp_path/"runs", config, "fixed_fourier", feature_manifest_sha256=fm)
+        tr.load_calibration(tmp_path/"runs", config, "fixed_fourier", feature_manifest_sha256=fm, action_scale_sha256=scale)
     with pytest.raises(ValueError, match="other features"):
         tr.read_lambda(path, config, sigma_sha, condition="po_jepa_full", feature_manifest_sha256="0"*64)
     with pytest.raises(ValueError, match="another training set"):
@@ -299,6 +325,48 @@ def test_check_env_passes_on_every_condition(root, tmp_path):
     assert ds.read_env(path) == json.loads(path.read_text())
     with pytest.raises(ValueError):
         ds.read_env(_failed_copy(path))
+    # RF-P2-4：已有的记录只在配置、特征总清单、σ_z 文件都是当前的时才算完成
+    ok = dict(feature_manifest_sha256="f"*64, sigma_z_sha256="s"*64)
+    assert chk.verify_env(path, config, **ok) == json.loads(path.read_text())
+    for bad, match in ((dict(feature_manifest_sha256="e"*64), "other features"),
+                       (dict(sigma_z_sha256="e"*64), "another sigma_z"), ({}, "another config")):
+        with pytest.raises(ValueError, match=match):
+            chk.verify_env(path, config if bad else dataclasses.replace(config, config_sha256="0"*64), **{**ok, **bad})
+    empty = path.with_name("empty.json")
+    empty.write_text("{}")
+    with pytest.raises(ValueError, match="not a passed"):
+        chk.verify_env(empty, config, **ok)
+    with pytest.raises(ValueError, match="not a passed"):
+        chk.verify_env(_failed_copy(path), config, **ok)
+
+
+def test_check_main_rechecks_an_existing_record(tmp_path, monkeypatch):
+    """RF-P2-4：命令行在 env.json 已有时不重跑检查，但先按当前数据根算特征总清单、读 σ_z（要与当前特征、动作尺度
+    对得上），再核记录；空记录 `{}` 或别的特征下的记录报错，不打印“已完成”。"""
+    config = PILOT
+    data, run = tmp_path/"data", tmp_path/"runs"
+    scale = pr.prepared_dir(data)/pr.ACTION_SCALE_FILE
+    scale.parent.mkdir(parents=True)
+    scale.write_text("{}")
+    monkeypatch.setattr(ft, "feature_manifests", lambda d, c: ({}, "f"*64))
+    monkeypatch.setattr(tr, "load_data", lambda *a: pytest.fail("an existing record must not rerun the check"))
+    sigma = run/config.name/"calibration"/cb.SIGMA_FILE
+    sigma.parent.mkdir(parents=True)
+    cache._write_json(sigma, dict(schema=cb.SIGMA_SCHEMA, sigma_z=SIGMA_Z, config_sha256=config.config_sha256,
+                                  feature_manifest_sha256="f"*64, action_scale_sha256=cache.file_sha(scale)))
+    env = chk.check_dir(run, config)/"env.json"
+    env.parent.mkdir(parents=True)
+    argv = ["--config", str(CONFIGS/"pilot.yaml"), "--data-root", str(data), "--run-root", str(run), "--device", "cpu"]
+    env.write_text("{}")
+    with pytest.raises(ValueError, match="not a passed"):
+        chk.main(argv)
+    record = dict(schema=chk.SCHEMA, status="passed", config_sha256=config.config_sha256, feature_manifest_sha256="f"*64,
+                  sigma_z=dict(value=SIGMA_Z, sha256=cache.file_sha(sigma)))
+    env.write_text(json.dumps(record))
+    assert chk.main(argv) == 0
+    env.write_text(json.dumps(dict(record, feature_manifest_sha256="e"*64)))
+    with pytest.raises(ValueError, match="other features"):
+        chk.main(argv)
 
 
 def _failed_copy(path: Path) -> Path:

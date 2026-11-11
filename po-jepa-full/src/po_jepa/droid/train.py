@@ -42,6 +42,7 @@ from po_jepa.droid import conditions as cd
 from po_jepa.droid import evaluate as ev
 from po_jepa.droid import features as ft
 from po_jepa.droid import index as ix
+from po_jepa.droid import joblock
 from po_jepa.droid import prepare as pr
 from po_jepa.droid import splits as sp
 from po_jepa.droid import windows as wn
@@ -134,9 +135,12 @@ def read_lambda(path: Path, config: DroidConfig, sigma_z_sha256: str, *, conditi
 
 
 def load_calibration(run_root: Path | str, config: DroidConfig, condition: str, *, feature_manifest_sha256: str,
-                     train_set: Mapping | None = None) -> Calibration:
+                     action_scale_sha256: str, train_set: Mapping | None = None) -> Calibration:
+    """σ_z 和（带一致性的条件的）λ。σ_z 要等于当前特征总清单和 `action_scale.json` 下标定的（RF-P1-2），λ 见
+    `read_lambda`。训练任务给 `train_set`；评测任务给所选训练登记里的训练集（RF-P1-2）。"""
     directory = Path(run_root)/config.name/"calibration"
-    sigma_z, sigma_sha = read_sigma_z(directory/"sigma_z.json", config)
+    sigma_z, sigma_sha = read_sigma_z(directory/"sigma_z.json", config, feature_manifest_sha256=feature_manifest_sha256,
+                                      action_scale_sha256=action_scale_sha256)
     weights, lam_sha = None, None
     if condition in cd.LAMBDA_CONDITIONS:
         weights, lam_sha = read_lambda(directory/f"lambda-{condition}.json", config, sigma_sha, condition=condition,
@@ -400,6 +404,17 @@ class Log:
         self.steps, self.consistency = [], []
 
 
+TRAINING_IDENTITY_KEY = "droid_training"
+
+
+def checkpoint_provenance(provenance: Mapping, *, condition: str, seed: int, registration_sha256: str) -> dict:
+    """存进检查点的来源：批的来源字典（06 §5）加一项 `droid_training` = {condition, seed, registration_sha256}（RF-P2-1）。
+    v7 的保存函数原样存来源字典（`training._provenance` 只要求固定字段在），续训读回时整份比较；评测的
+    `evaluate.load_selected` 核这一项等于本次请求的条件、种子和 registration.json 的文件 SHA。"""
+    return {**dict(provenance), TRAINING_IDENTITY_KEY: dict(condition=condition, seed=seed,
+                                                            registration_sha256=registration_sha256)}
+
+
 def check_log_coverage(rows: list[dict], updates: int) -> None:
     """日志各行按 first_step 排起来正好覆盖 1…U，不重不漏（§5）。"""
     expected = 1
@@ -425,6 +440,15 @@ def run(output: Path | str, *, condition: str, seed: int, config: DroidConfig, d
         raise ValueError(f"seed {seed} is not one of this config's seeds {list(config.training.seeds)}")
     started = clock() if started is None else started
     out = Path(output)
+    with joblock.hold(out):      # RF-P2-3：同一个训练目录同时只有一个进程（从看完成标志到写完都持锁）
+        return _run_locked(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration,
+                           device=device, time_limit_minutes=time_limit_minutes, retry=retry,
+                           ac_checkpoint=ac_checkpoint, workers=workers, started=started, clock=clock,
+                           after_step=after_step)
+
+
+def _run_locked(out: Path, *, condition, seed, config, data, calibration, device, time_limit_minutes, retry,
+                ac_checkpoint, workers, started, clock, after_step) -> int:
     if (out/"COMPLETE.json").exists():
         report = out/"report.json"
         if (not report.is_file()
@@ -484,6 +508,9 @@ def _run(out: Path, *, condition, seed, config, data, calibration, device, time_
                            reference=reference, loss_config=loss_config, optimizer=optimizer)
     check_registration(out/"registration.json", current)
     registration_sha = cache.file_sha(out/"registration.json")
+    # 检查点里的来源另记训练身份（RF-P2-1）：登记和报告被一起改写成别的种子时，检查点字节里的种子和登记 SHA 对不上
+    ck_provenance = checkpoint_provenance(data.provenance, condition=condition, seed=seed,
+                                          registration_sha256=registration_sha)
 
     # 从最新检查点接着跑（§4.3、§4.5）
     ckdir = out/"checkpoints"
@@ -495,7 +522,7 @@ def _run(out: Path, *, condition, seed, config, data, calibration, device, time_
     completed = 0
     if head is not None:
         completed = ck.load(condition, ckdir/head["path"], head["sha256"], model=model, optimizer=optimizer,
-                            loss_config=loss_config, provenance=data.provenance, updates=updates)
+                            loss_config=loss_config, provenance=ck_provenance, updates=updates)
         if completed != head["step"]:
             raise ValueError(f"checkpoint {head['path']} holds step {completed}, the index says {head['step']}")
     log_path = out/LOG_FILE
@@ -516,7 +543,7 @@ def _run(out: Path, *, condition, seed, config, data, calibration, device, time_
         log.flush()
         name = ck.file_name(kind, step)
         sha = ck.save(condition, ckdir/name, model=model, optimizer=optimizer, loss_config=loss_config,
-                      completed=step, provenance=data.provenance)
+                      completed=step, provenance=ck_provenance)
         entry = dict(path=name, step=step, kind=kind, sha256=sha)
         old = list(entries)
         entries = [e for e in entries if not (e["kind"] == "resume" and e["step"] < step)] + [entry]
@@ -671,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         return run(out, condition=condition, seed=seed, config=config, data=None, calibration=None, device=a.device)
     data = load_data(config, a.data_root)
     calibration = load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256,
-                                   train_set=dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set)))
+                                   action_scale_sha256=data.action_scale_sha256, train_set=dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set)))
     ac_checkpoint = Path(a.data_root)/"checkpoints"/OFFICIAL_AC_FILE if condition == "vjepa2_ac" else None
     return run(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration, device=a.device,
                time_limit_minutes=a.time_limit_minutes, retry=a.retry, ac_checkpoint=ac_checkpoint, workers=a.workers,

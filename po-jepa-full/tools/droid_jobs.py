@@ -46,9 +46,10 @@ TRAIN_PRIORITY = {"vjepa2_ac": 1,
                   "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3}
 STAGES = ("index", "download", "prepare", "encode", "calibrate", "check", "train", "eval", "summary")
 # 完成标志在时仍要调用阶段、由阶段先核本次请求的身份再决定复用的阶段（S11-P1-1 修复）：训练（COMPLETE.json 绑定
-# report.json）、评测（job.json/source.json 的请求身份，10 §8.9）、汇总（每次按当前产物重算，内容不变就不换输出）。
+# report.json）、评测（job.json/source.json 的请求身份，10 §8.9）、汇总（每次按当前产物重算，内容不变就不换输出）、
+# 环境检查（已有 env.json 的配置、特征总清单、σ_z 文件 SHA 等于当前的才算完成，RF-P2-4；只读几个清单，不重跑检查）。
 # 其余阶段的完成标志所在的文件只写一次，下游读它时核身份（特征清单 SHA、σ_z/λ 的 config、条件、SHA）。
-RECHECKED_STAGES = ("train", "eval", "summary")
+RECHECKED_STAGES = ("check", "train", "eval", "summary")
 RESOURCE_KEYS = ("gpus", "cpus", "mem_gb", "time_limit_minutes")
 
 assert set(TRAIN_PRIORITY) == set(CONDITIONS) and set(LAMBDA_CONDITIONS) <= set(CONDITIONS)

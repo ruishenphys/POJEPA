@@ -40,6 +40,8 @@ from po_jepa.droid import batches as bt
 from po_jepa.droid import calibrate as cb
 from po_jepa.droid import conditions as cd
 from po_jepa.droid import features as ft
+from po_jepa.droid import index as ix
+from po_jepa.droid import prepare as pr
 from po_jepa.droid import train as tr
 from po_jepa.droid.config import CONDITIONS, DroidConfig, load_config
 from po_jepa.droid.spectral_gap import read_sigma_z
@@ -381,6 +383,22 @@ def write_result(run_root: Path | str, config: DroidConfig, doc: dict) -> int:
     return 1
 
 
+def verify_env(path: Path | str, config: DroidConfig, *, feature_manifest_sha256: str, sigma_z_sha256: str) -> dict:
+    """已有的 `check/env.json` 是本次请求的通过记录（RF-P2-4）：schema、`status: passed`、配置 SHA、特征总清单 SHA、
+    σ_z 文件 SHA 都等于按当前配置、数据根、运行根算出的；不是就报错（不删，换运行根或由人删掉后重跑）。返回内容。"""
+    path = Path(path)
+    doc = ix._loads(path.read_bytes(), str(path))
+    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA or doc.get("status") != "passed":
+        raise ValueError(f"{path} is not a passed check/env record")
+    if doc.get("config_sha256") != config.config_sha256:
+        raise ValueError(f"{path} was checked under another config")
+    if doc.get("feature_manifest_sha256") != feature_manifest_sha256:
+        raise ValueError(f"{path} was checked on other features (feature_manifest_sha256 differs)")
+    if (doc.get("sigma_z") or {}).get("sha256") != sigma_z_sha256:
+        raise ValueError(f"{path} was checked with another sigma_z.json")
+    return doc
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True, type=Path)
@@ -390,10 +408,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=bt.WORKERS)
     a = p.parse_args(argv)
     config = load_config(a.config)
-    if (check_dir(a.run_root, config)/"env.json").exists():
-        print("check/env: already complete")
+    _, manifest_sha = ft.feature_manifests(a.data_root, config)
+    scale_sha = cache.file_sha(pr.prepared_dir(a.data_root)/pr.ACTION_SCALE_FILE)
+    sigma_z, sigma_sha = read_sigma_z(cb.calibration_dir(a.run_root, config)/cb.SIGMA_FILE, config,
+                                      feature_manifest_sha256=manifest_sha, action_scale_sha256=scale_sha)
+    path = check_dir(a.run_root, config)/"env.json"
+    if path.exists():                  # 已有的通过记录只在是本次输入的时才算完成（RF-P2-4）
+        verify_env(path, config, feature_manifest_sha256=manifest_sha, sigma_z_sha256=sigma_sha)
+        print("check/env: already complete (record matches the current config, features and sigma_z)")
         return 0
-    sigma_z, sigma_sha = read_sigma_z(cb.calibration_dir(a.run_root, config)/cb.SIGMA_FILE, config)
     data = tr.load_data(config, a.data_root)
     doc = run_check(config, data=data, sigma_z=sigma_z, sigma_z_sha256=sigma_sha, device=a.device,
                     ac_checkpoint=Path(a.data_root)/"checkpoints"/tr.OFFICIAL_AC_FILE,

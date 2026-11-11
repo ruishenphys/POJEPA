@@ -174,12 +174,13 @@ def build(tmp_path, *, skip=()):
         for s in seeds_of(c):
             if (c, s) not in skip:
                 write_eval(run, c, s, ref)
-    write(run/"calibration"/"sigma_z.json", dict(sigma_z=SIGMA, config_sha256=CFG.config_sha256))
+    sigma_sha = write_sigma(run, ref)
     for c, lam in LAMBDA.items():
         write(run/"calibration"/f"lambda-{c}.json", dict(lam, rho=1.))
     write(run/"check"/"env.json", dict(fake="env"))
     gap = dict(job=dict(config_sha256=CFG.config_sha256, sigma_z=SIGMA,
-                        inputs=dict(windows_sha256={s: ref[f"windows/{s}.json"] for s in ev.TEST_SPLITS})),
+                        inputs=dict(windows_sha256={s: ref[f"windows/{s}.json"] for s in ev.TEST_SPLITS},
+                                    sigma_z_sha256=sigma_sha)),
                summary=sim_gap.summarize([gap_window(i) for i in range(4)]),
                by_split={s: sim_gap.summarize([gap_window(i) for i in range(2)]) for s in ev.TEST_SPLITS},
                fixed_fourier=dict(cutoff_gap=0.))
@@ -209,7 +210,19 @@ def build(tmp_path, *, skip=()):
                                        checkpoint_sha256=None,
                                        initial_model_sha256=f"init-vjepa2_ac-{SEEDS[0]}" if c == "vjepa2_ac_zeroshot" else None,
                                        construction_seed=SEEDS[0] if c == "vjepa2_ac_zeroshot" else None)
-    return data, run_root, dict(trains=trains, evals=evals)
+    env = dict(source="env.json", config_sha256=CFG.config_sha256, feature_manifest_sha256="f"*64,
+               sigma_z=dict(value=SIGMA, sha256=sigma_sha))
+    return data, run_root, dict(trains=trains, evals=evals, env=env)
+
+
+def write_sigma(run: Path, ref, **change) -> str:
+    """calibration/sigma_z.json（`calibrate.run_sigma_z` 的格式，特征总清单 "f"*64、动作尺度 = 数据根的）；返回文件 SHA。"""
+    from po_jepa.droid.calibrate import SIGMA_SCHEMA
+    path = run/"calibration"/"sigma_z.json"
+    path.unlink(missing_ok=True)
+    write(path, {**dict(schema=SIGMA_SCHEMA, sigma_z=SIGMA, config_sha256=CFG.config_sha256,
+                        feature_manifest_sha256="f"*64, action_scale_sha256=ref["action_scale.json"]), **change})
+    return cache.file_sha(path)
 
 
 def readers(registry):
@@ -219,7 +232,7 @@ def readers(registry):
             return parts[-2], int(parts[-1][4:])
         return parts[-1], None
     return ds.Readers(train=lambda p: registry["trains"][key(p)], evaluation=lambda p: registry["evals"][key(p)],
-                      env=lambda p: dict(source=Path(p).name))
+                      env=lambda p: registry["env"])
 
 
 def run_summary(data, run_root, registry):
@@ -332,7 +345,7 @@ def test_full_fake_run_outputs_every_table_and_figure(tmp_path):
     cost = summary["cost"]["koopman"]
     assert cost == dict(jobs=2, median_step_seconds=pytest.approx(.2 + OFFSET["koopman"]), peak_memory_bytes=1000 + SEEDS[1],
                         gpu_hours=1., resumes=2, spectral_backend=["cpu_batched"])
-    assert summary["check_env"] == {"source": "env.json"}
+    assert summary["check_env"] == registry["env"]
 
 
 def test_missing_tasks_are_listed_and_marked(tmp_path):
@@ -376,6 +389,8 @@ def _rewrite_report(run, c, s, change):
     report = json.loads((folder/"report.json").read_text())
     change(report)
     (folder/"report.json").unlink()
+    (folder/"job.json").unlink()
+    write(folder/"job.json", report["job"])                # job.json 始终等于报告的 job（RF-P1-1 核这一点）
     write_report(folder, report)
 
 
@@ -411,13 +426,27 @@ def _eval(reg, c, s, **kw):
     reg["evals"][(c, s)] = dataclasses.replace(reg["evals"][(c, s)], **kw)
 
 
+def _env(reg, **kw):
+    reg["env"] = {**reg["env"], **kw}
+
+
+def _sigma(run, reg, **change):
+    """改写 sigma_z.json，再让截断间隙和 check/env 记新文件的 SHA：只留下改的那一项不一致。"""
+    sha = write_sigma(run, ds.data_reference(run.parent.parent/"data"), **change)
+    _gap(run, lambda r: r["job"]["inputs"].update(sigma_z_sha256=sha))
+    _env(reg, sigma_z=dict(value=SIGMA, sha256=sha))
+
+
 S0, S1 = 1703, 1704
 CASES = {
     "配置": [lambda run, reg: _rewrite_report(run, "koopman", S0, lambda r: r["job"].update(config_sha256="x"*64)),
            lambda run, reg: _train(reg, "vjepa2_ac", S1, config_sha256="x"*64),
-           lambda run, reg: _gap(run, lambda r: r["job"].update(config_sha256="x"*64))],
+           lambda run, reg: _gap(run, lambda r: r["job"].update(config_sha256="x"*64)),
+           lambda run, reg: _env(reg, config_sha256="x"*64)],                                  # RF-P2-4
     "特征": [lambda run, reg: _eval(reg, "identity", None, feature_manifest_sha256="e"*64),
-           lambda run, reg: _train(reg, "koopman", S1, feature_manifest_sha256="e"*64)],
+           lambda run, reg: _train(reg, "koopman", S1, feature_manifest_sha256="e"*64),
+           lambda run, reg: _env(reg, feature_manifest_sha256="e"*64),                         # RF-P2-4
+           lambda run, reg: _sigma(run, reg, feature_manifest_sha256="e"*64)],                 # RF-P1-2
     "划分和窗口": [lambda run, reg: _train(reg, "koopman", S0, data_sha256={**reg["trains"][("koopman", S0)].data_sha256,
                                                                        "windows/val.json": "v"*64}),
                lambda run, reg: _eval(reg, "vjepa2_ac", S1, data_sha256={**reg["evals"][("vjepa2_ac", S1)].data_sha256,
@@ -428,7 +457,12 @@ CASES = {
     "训练集": [lambda run, reg: _train(reg, "matched_transformer", S1, train_set_sha256="u"*64)],
     "σ_z": [lambda run, reg: _train(reg, "fixed_fourier", S1, sigma_z=SIGMA*(1 + 1e-12)),
             lambda run, reg: _gap(run, lambda r: r["job"].update(sigma_z=.25)),
-            lambda run, reg: (run/"calibration"/"sigma_z.json").unlink()],
+            lambda run, reg: (run/"calibration"/"sigma_z.json").unlink(),
+            # RF-P1-2：σ_z 的来源（动作尺度、文件本身）和数值一起核
+            lambda run, reg: _sigma(run, reg, action_scale_sha256="a"*64),
+            lambda run, reg: _gap(run, lambda r: r["job"]["inputs"].update(sigma_z_sha256="s"*64)),
+            lambda run, reg: _train(reg, "po_jepa_full", S1, sigma_z_sha256="s"*64),
+            lambda run, reg: _env(reg, sigma_z=dict(value=SIGMA, sha256="s"*64))],
     "λ": [lambda run, reg: _train(reg, "transformer_consistency", S0, lambdas=dict(time_weight=.03, space_weight=.07)),
           lambda run, reg: _train(reg, "po_jepa_full", S1, lambdas=None)],
     "初始权重": [lambda run, reg: _train(reg, "fixed_fourier", S1, initial_model_sha256="i"*64),
@@ -440,6 +474,8 @@ CASES = {
              lambda run, reg: _train(reg, "koopman", S0, completed=499),
              lambda run, reg: _train(reg, "koopman", S0, log_problem="train-log.jsonl does not cover the steps contiguously")],
     "评测": [lambda run, reg: _eval(reg, "vjepa2_ac_small", S1, checkpoint_sha256="c"*64),
+           lambda run, reg: (_train(reg, "koopman", S0, registration_sha256="r"*64),           # RF-P1-1
+                             _eval(reg, "koopman", S0, train_registration_sha256="q"*64)),
            lambda run, reg: _rewrite_report(run, "po_jepa_no_consistency", S0,
                                             lambda r: r["splits"]["ood_test"]["triangle"].update(violations=1)),
            lambda run, reg: _rewrite_report(run, "identity", None, lambda r: r.update(status="failed"))],
@@ -471,6 +507,63 @@ def test_each_consistency_check_fails_on_its_own(tmp_path):
     body = json.loads((path/"summary.json").read_text())
     assert body["status"] == "blocked" and body["failed"] == ["训练集"] and "splits" not in body
     assert json.loads((path/"checks.json").read_text())["checks"] == body["checks"]
+
+
+def test_misplaced_task_directories_are_rejected(tmp_path):
+    """RF-P1-1：目录槽位不是身份。把 seed1703 的评测或训练目录原样复制到 seed1704 的槽位（内部记录、完成绑定都不改）、
+    或只让读取器给出的来源是另一个种子，汇总都拒绝，不把同一次运行算成两个种子；job.json 和报告的 job 不同也拒绝。"""
+    def collect(rr, reg):
+        return ds.collect(CFG, rr.parent/"data", rr, readers(reg))
+
+    # 1. 整个评测目录复制过去，读取器读到的也是复制来的来源
+    d, rr, reg = build(tmp_path/"copy")
+    run = rr/CFG.name
+    shutil.rmtree(ds.eval_dir(run, "koopman", S1))
+    shutil.copytree(ds.eval_dir(run, "koopman", S0), ds.eval_dir(run, "koopman", S1))
+    reg["evals"][("koopman", S1)] = reg["evals"][("koopman", S0)]
+    with pytest.raises(ValueError, match=r"eval/koopman/seed1704 holds the records of another task.*report.json names"):
+        collect(rr, reg)
+    # 2. 只有读取器给的来源（source.json / job.json 经 read_eval_view）是另一个种子
+    d, rr, reg = build(tmp_path/"view")
+    reg["evals"][("koopman", S1)] = dataclasses.replace(reg["evals"][("koopman", S1)], seed=S0)
+    with pytest.raises(ValueError, match=r"eval/koopman/seed1704 .*source names 'koopman'/seed1703"):
+        collect(rr, reg)
+    # 3. 训练目录：登记是 seed1703 的
+    d, rr, reg = build(tmp_path/"train")
+    reg["trains"][("koopman", S1)] = reg["trains"][("koopman", S0)]
+    with pytest.raises(ValueError, match=r"train/koopman/seed1704 holds the records of another task"):
+        collect(rr, reg)
+    # 4. job.json 被换成另一个任务的，报告没动
+    d, rr, reg = build(tmp_path/"job")
+    run = rr/CFG.name
+    target = ds.eval_dir(run, "koopman", S1)/"job.json"
+    target.unlink()
+    shutil.copy(ds.eval_dir(run, "koopman", S0)/"job.json", target)
+    with pytest.raises(ValueError, match="job.json differs from the job recorded in report.json"):
+        collect(rr, reg)
+    # 5. 种子的类型也要相同（1704.0、True 不算 1704、1）
+    assert ds._same_seed(1704, 1704) and ds._same_seed(None, None)
+    assert not ds._same_seed(1704.0, 1704) and not ds._same_seed(True, 1)
+
+
+def test_read_eval_view_binds_source_to_job(tmp_path):
+    """RF-P1-1：真实读取器 `read_eval_view` 要求 source.json 的 schema、条件、种子等于 job.json 的，并带出它记的训练
+    registration.json SHA（“评测”核对拿它和训练目录的登记比）。"""
+    from po_jepa.droid import eval_job as ej
+    def make(folder, source):
+        folder.mkdir(parents=True)
+        write(folder/"source.json", source)
+        write(folder/"job.json", dict(kind=ej.JOB_KIND, condition="koopman", seed=S0, feature_manifest_sha256="f"*64,
+                                      data_sha256={}, checkpoint=dict(sha256="c"*64),
+                                      source_sha256=hashlib.sha256(cache._json_bytes(source)).hexdigest()))
+    good = dict(schema=ej.SOURCE_SCHEMA, condition="koopman", seed=S0, registration_sha256="r"*64)
+    make(tmp_path/"good", good)
+    view = ds.read_eval_view(tmp_path/"good")
+    assert (view.condition, view.seed, view.train_registration_sha256) == ("koopman", S0, "r"*64)
+    for k, change in enumerate((dict(seed=S1), dict(condition="matched_transformer"), dict(schema="other"))):
+        make(tmp_path/f"bad{k}", {**good, **change})
+        with pytest.raises(ValueError, match="source.json names"):
+            ds.read_eval_view(tmp_path/f"bad{k}")
 
 
 # ---------------------------------------------------------------- 自助法（13 §3、§8.2）
@@ -601,7 +694,7 @@ def test_reads_the_real_evaluation_and_planning_files(root, tmp_path):
             inputs = pl.PlanningInputs(docs[split], root["reader"], bt.episode_arrays(root["prepared"], kept, "realized"),
                                        control(), cfg, LOSS)
             reports[(c, split)] = pl.run(model, inputs, folder/split/"planning", "cpu")
-    write(run/"calibration"/"sigma_z.json", dict(sigma_z=SIGMA))
+    write_sigma(run, ref)
     write(run/"calibration"/"lambda-po_jepa_full.json", dict(time_weight=.1, space_weight=.2))
     eval_data = {k: ref[k] for k in ("splits.json", "windows/id_test.json", "windows/ood_test.json", "action_scale.json")}
     reg = dict(trains={("po_jepa_full", 1703): ds.TrainView(

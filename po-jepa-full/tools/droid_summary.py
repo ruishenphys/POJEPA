@@ -109,6 +109,8 @@ class TrainView:
     resumes: int
     spectral_backend: str | None
     curves: Mapping[str, Sequence[tuple[float, float]]]
+    registration_sha256: str | None = None      # registration.json 的文件 SHA（评测 source.json 记的要等于它，RF-P1-1）
+    sigma_z_sha256: str | None = None           # 登记的 sigma_z.json 文件 SHA（要等于当前 sigma_z.json 的，RF-P1-2）
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,8 @@ class EvalView:
 
     - `checkpoint_sha256`：读的检查点 SHA（不训练的对照为 None）
     - `data_sha256`：{DATA_FILES 里的键: SHA}（`splits.json`、`windows/id_test.json`、`windows/ood_test.json`、`action_scale.json`）
-    - `initial_model_sha256`、`construction_seed`：只有 vjepa2_ac_zeroshot 用（09 §2.4：等于该种子的 vjepa2_ac 初始哈希）"""
+    - `initial_model_sha256`、`construction_seed`：只有 vjepa2_ac_zeroshot 用（09 §2.4：等于该种子的 vjepa2_ac 初始哈希）
+    - `train_registration_sha256`：训练过的条件，source.json 记的所读训练任务 registration.json 的 SHA（RF-P1-1）"""
     condition: str
     seed: int | None
     feature_manifest_sha256: str
@@ -126,6 +129,7 @@ class EvalView:
     checkpoint_sha256: str | None
     initial_model_sha256: str | None = None
     construction_seed: int | None = None
+    train_registration_sha256: str | None = None
 
 
 def _view_json(path: Path) -> dict:
@@ -175,6 +179,7 @@ def read_train(path: Path) -> TrainView:
         peak_memory_bytes=max(peaks) if peaks else None,
         gpu_hours=report["total_seconds"]/3600 if peaks else None, resumes=report["resumes"],
         spectral_backend=None if backend is None else backend["eig_backend"],
+        registration_sha256=cache.file_sha(path/"registration.json"), sigma_z_sha256=reg["sigma_z"]["sha256"],
         curves={"validation": [(float(v["step"]), float(v["mean"])) for v in report["validations"]],
                 "train_jepa": [(float(r["last_step"]), math.fsum(st["losses"]["jepa"] for st in r["steps"])/len(r["steps"]))
                                for r in rows if r["steps"]]})
@@ -188,13 +193,19 @@ def read_eval_view(path: Path) -> EvalView:
     job = _view_json(path/"job.json")
     if job.get("kind") != ej.JOB_KIND:
         raise ValueError(f"{path}/job.json was not written by a DROID evaluation task")
-    if job.get("source_sha256") != hashlib.sha256(cache._json_bytes(_view_json(path/"source.json"))).hexdigest():
+    source = _view_json(path/"source.json")
+    if job.get("source_sha256") != hashlib.sha256(cache._json_bytes(source)).hexdigest():
         raise ValueError(f"{path}: source.json differs from the one job.json recorded")
+    if (source.get("schema") != ej.SOURCE_SCHEMA or source.get("condition") != job.get("condition")
+            or source.get("seed") != job.get("seed")):
+        raise ValueError(f"{path}: source.json names {source.get('condition')!r}/seed{source.get('seed')!r}, "
+                         f"job.json {job.get('condition')!r}/seed{job.get('seed')!r}")
     checkpoint = job.get("checkpoint")
     return EvalView(condition=job["condition"], seed=job["seed"], feature_manifest_sha256=job["feature_manifest_sha256"],
                     data_sha256=dict(job["data_sha256"]),
                     checkpoint_sha256=None if checkpoint is None else checkpoint["sha256"],
-                    initial_model_sha256=job.get("initial_model_sha256"), construction_seed=job.get("construction_seed"))
+                    initial_model_sha256=job.get("initial_model_sha256"), construction_seed=job.get("construction_seed"),
+                    train_registration_sha256=source.get("registration_sha256"))
 
 
 def read_env(path: Path) -> dict:
@@ -448,8 +459,22 @@ def load_eval(folder: Path, report: Mapping, info: Mapping[str, dict], missing: 
     return cells
 
 
+def _same_seed(a, b) -> bool:
+    return type(a) is type(b) and a == b          # True 不当成 1，1703.0 不当成 1703
+
+
+def _check_slot(label: str, condition: str, seed: int | None, records: Mapping[str, tuple]) -> None:
+    """RF-P1-1：目录槽位 `<条件>/seed<种子>` 不是身份，记录里写的 (条件, 种子) 才是；每份记录都必须等于槽位，否则把整个
+    目录复制或放错位置时，同一次训练和评测会被算成另一个种子的独立运行。"""
+    bad = {k: v for k, v in records.items() if v[0] != condition or not _same_seed(v[1], seed)}
+    if bad:
+        raise ValueError(f"{label} holds the records of another task: "
+                         + ", ".join(f"{k} names {c!r}/seed{s!r}" for k, (c, s) in bad.items()))
+
+
 def collect(config: DroidConfig, data_root: Path, run_root: Path, readers: Readers) -> dict:
-    """读运行根下本配置的全部结果（13 §8.1）。缺的进 `missing`；训练和评测来源经 `readers`。"""
+    """读运行根下本配置的全部结果（13 §8.1）。缺的进 `missing`；训练和评测来源经 `readers`。每个评测和训练目录先核
+    报告、job.json、读取器给的来源里的 (条件, 种子) 都等于目录槽位，job.json 等于报告的 job，再读行文件（RF-P1-1）。"""
     run = Path(run_root)/config.name
     info = episode_info(Path(data_root))
     missing: list[str] = []
@@ -460,24 +485,37 @@ def collect(config: DroidConfig, data_root: Path, run_root: Path, readers: Reade
         if report is None:
             missing.append(name)
             continue
+        job = _json(folder/"job.json")
+        if report.get("job") != job:
+            raise ValueError(f"{name}: job.json differs from the job recorded in report.json")
+        view = readers.evaluation(folder)
+        _check_slot(name, c, s, {"report.json": (report["job"].get("condition"), report["job"].get("seed")),
+                                 "job.json": (job.get("condition"), job.get("seed")),
+                                 "source": (view.condition, view.seed)})
         loaded = load_eval(folder, report, info, missing, name)
         for split, cell in loaded.items():
             cells[(split, c, s)] = cell
-        evals[(c, s)] = dict(report=report, view=readers.evaluation(folder), job=_json(folder/"job.json"))
+        evals[(c, s)] = dict(report=report, view=view, job=job)
     for c in config.training.conditions:
         for s in config.training.seeds:
             folder = run/"train"/c/f"seed{s}"
             if not (folder/"COMPLETE.json").exists():
                 missing.append(f"train/{c}/seed{s}")
                 continue
-            trains[(c, s)] = readers.train(folder)
+            view = readers.train(folder)
+            _check_slot(f"train/{c}/seed{s}", c, s, {"registration": (view.condition, view.seed)})
+            trains[(c, s)] = view
     gap = _complete(run/"eval"/"spectral-gap")
     if gap is None:
         missing.append(f"eval/{sg.JOB_DIR[1]}")
     calibration = {}
     path = run/"calibration"/"sigma_z.json"
     if path.exists():
-        calibration["sigma_z"] = sg.read_sigma_z(path, config)[0]
+        doc = sg.sigma_z_doc(path, config)     # 来源（特征总清单、动作尺度）在“σ_z”核对里比（RF-P1-2）
+        calibration["sigma_z"] = doc["sigma_z"]
+        calibration["sigma_z_source"] = dict(sha256=cache.file_sha(path),
+                                             feature_manifest_sha256=doc["feature_manifest_sha256"],
+                                             action_scale_sha256=doc["action_scale_sha256"])
     else:
         missing.append("calibrate/sigma-z")
     for c in LAMBDA_CONDITIONS:
@@ -521,10 +559,17 @@ def run_checks(config: DroidConfig, got: Mapping) -> list[dict]:
     p += [f"train/{c}/seed{s} config_sha256 differs" for (c, s), t in sorted(trains.items()) if t.config_sha256 != config.config_sha256]
     if gap is not None and gap["job"].get("config_sha256") != config.config_sha256:
         p.append("eval/spectral-gap config_sha256 differs")
+    env = got.get("env")
+    if env is not None and env.get("config_sha256") != config.config_sha256:
+        p.append("check/env config_sha256 differs")
     out.append(_check("配置", p))
 
     features = {f"train/{c}/seed{s}": t.feature_manifest_sha256 for (c, s), t in trains.items()}
     features |= {_job_name(c, s): e["view"].feature_manifest_sha256 for (c, s), e in evals.items()}
+    if env is not None:                                          # RF-P2-4：环境检查用的特征也要是同一份
+        features["check/env"] = env.get("feature_manifest_sha256")
+    if cal.get("sigma_z_source") is not None:                    # RF-P1-2：σ_z 是在这份特征上标定的
+        features["calibration/sigma_z.json"] = cal["sigma_z_source"]["feature_manifest_sha256"]
     out.append(_check("特征", [] if len(set(features.values())) <= 1 else
                       [f"feature_manifest_sha256 differs: {_groups(features)}"]))
 
@@ -555,6 +600,17 @@ def run_checks(config: DroidConfig, got: Mapping) -> list[dict]:
             p.append(f"train/{c}/seed{s} sigma_z {t.sigma_z!r} != sigma_z.json {sigma!r}")
     if gap is not None and gap["job"].get("sigma_z") != sigma:
         p.append(f"eval/spectral-gap sigma_z {gap['job'].get('sigma_z')!r} != sigma_z.json {sigma!r}")
+    source = cal.get("sigma_z_source")
+    if source is not None:                                       # RF-P1-2：σ_z 的来源是当前数据根和这一份文件
+        if source["action_scale_sha256"] != got["reference"]["action_scale.json"]:
+            p.append("sigma_z.json was calibrated with another action_scale.json than the data root's")
+        if gap is not None and gap["job"].get("inputs", {}).get("sigma_z_sha256") != source["sha256"]:
+            p.append("eval/spectral-gap read another sigma_z.json")
+        for (c, s), t in sorted(trains.items()):
+            if c in PO_CLASS and t.sigma_z_sha256 is not None and t.sigma_z_sha256 != source["sha256"]:
+                p.append(f"train/{c}/seed{s} was trained with another sigma_z.json")
+        if env is not None and (env.get("sigma_z") or {}).get("sha256") != source["sha256"]:
+            p.append("check/env ran with another sigma_z.json")
     out.append(_check("σ_z", p))
 
     p = []
@@ -608,6 +664,9 @@ def run_checks(config: DroidConfig, got: Mapping) -> list[dict]:
             p.append(f"{name} has no completed training task")
         elif e["view"].checkpoint_sha256 != t.best_checkpoint_sha256:
             p.append(f"{name} read checkpoint {e['view'].checkpoint_sha256} != selection best {t.best_checkpoint_sha256}")
+        elif (e["view"].train_registration_sha256 is not None and t.registration_sha256 is not None
+              and e["view"].train_registration_sha256 != t.registration_sha256):
+            p.append(f"{name} read the training of another registration.json than train/{c}/seed{s}")   # RF-P1-1
     out.append(_check("评测", p))
 
     p = []

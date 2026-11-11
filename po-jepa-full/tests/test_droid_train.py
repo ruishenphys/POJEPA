@@ -433,6 +433,32 @@ def test_leftover_partial_files_do_not_block_the_rerun(root, tmp_path, monkeypat
         go(root, out, "matched_transformer", config)
 
 
+def test_second_process_on_the_same_directory_is_refused(root, tmp_path, monkeypatch):
+    """RF-P2-3：第一个训练在写 registration.json.partial、改名之前停住时，同一目录再启动一次：第二次立即报 JobBusy，
+    不删对方的临时文件、不写 FAILED.json；第一个恢复后照常做完。检查点来源记着训练身份（RF-P2-1）。"""
+    from po_jepa.droid import joblock
+    config = small(updates=20)
+    out = tmp_path/"run"
+    real = cache._write_json
+    seen = []
+
+    def paused(path, value):
+        if Path(path).name == "registration.json" and not seen:
+            seen.append(path)
+            Path(str(path) + ".partial").write_bytes(b'{"half": ')       # 写到一半
+            with pytest.raises(joblock.JobBusy, match="another process"):
+                go(root, out, "matched_transformer", config)
+            assert (out/"registration.json.partial").exists() and not (out/"FAILED.json").exists()
+            Path(str(path) + ".partial").unlink()
+        return real(path, value)
+    monkeypatch.setattr(cache, "_write_json", paused)
+    assert go(root, out, "matched_transformer", config) == 0
+    assert seen and (out/"COMPLETE.json").exists() and not list(out.glob("*.partial"))
+    best = json.loads((out/"selection.json").read_text())["best"]["checkpoint"]
+    assert payload(out/best)["provenance"][tr.TRAINING_IDENTITY_KEY] == dict(
+        condition="matched_transformer", seed=1703, registration_sha256=cache.file_sha(out/"registration.json"))
+
+
 def test_errors_write_failed_json(root, tmp_path, monkeypatch):
     """其他错误写 FAILED.json、退出 1；数据加载器给错步号也算错误。"""
     config = small(updates=20)
