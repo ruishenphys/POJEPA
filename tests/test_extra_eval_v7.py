@@ -1,8 +1,11 @@
-"""tools/extra_eval_v7.py: partitions, metrics, checkpoint loading, one job end to end, summary (CPU, fictional data)."""
+"""tools/extra_eval_v7.py: partitions, metrics against the registered point_metrics, identity of the registered
+evaluation (checkpoint, cache, output), one job end to end, batch guards and summary (CPU, fictional data).
+Self-contained: the v7 calibration file is written to tmp_path, nothing outside the repository is needed."""
 import hashlib
 import importlib.util
 import io
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -14,11 +17,13 @@ xe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(xe)
 
 from po_jepa import datasets  # noqa: E402
-from po_jepa.runtime import cache, checks, comparison, training  # noqa: E402
+from po_jepa.runtime import cache, checks, comparison, data, evaluation, training  # noqa: E402
 from test_training import e06_config  # noqa: E402
 
 META = dict(trajectory_id=180, controls=dict(starts_ticks=[0, 8, 16, 24], ends_ticks=[8, 16, 24, 32],
             values=[[.1, 0.], [.2, 0.], [.3, 0.], [.4, 0.]], units="simulation_position_per_second"))
+PROV = dict(evidence_role="fictional", split="train", feature_manifest_sha256="f"*64)
+RECEIPT = dict(encode_report_sha256="enc-A", manifest_sha256_by_id={180: "m180", 181: "m181"})
 
 
 class Scale(torch.nn.Module):
@@ -99,7 +104,7 @@ def test_window_metrics_values():
     raw, target = torch.randn(1, 256, 8), torch.randn(1, 256, 8)
     model = ScaleShift(8)
     controls = cache._window_controls(META, 2, 6., "cpu")
-    got = xe.window_metrics(model, raw, target, controls, 6., cache.regular_grid(16, 16), dist, comparison.split_action_segments)
+    got = xe.window_metrics(model, raw, target, controls, 6., cache.regular_grid(16, 16), dist)
     assert set(got) == {"id", "direct", "half", "dc_half", "unit", "p2_4", "p4_2"}
     c = model.c
     assert got["id"] == pytest.approx(dist(raw, target))
@@ -110,112 +115,325 @@ def test_window_metrics_values():
     assert got["p4_2"] == pytest.approx(dist(apply(raw, (4., 2.), c), target))
     assert got["dc_half"] == pytest.approx(dist(apply(raw, (6.,), c), apply(raw, (3., 3.), c)))
     assert got["dc_half"] > 1e-3 and got["unit"] != pytest.approx(got["direct"])
-    odd = xe.window_metrics(model, raw, target, cache._window_controls(META, 0, 3., "cpu"), 3., cache.regular_grid(16, 16),
-                            dist, comparison.split_action_segments)
+    odd = xe.window_metrics(model, raw, target, cache._window_controls(META, 0, 3., "cpu"), 3., cache.regular_grid(16, 16), dist)
     assert odd["half"] == pytest.approx(dist(apply(raw, (1.5, 1.5), c), target)) and "p2_4" not in odd
     assert odd["unit"] == pytest.approx(dist(apply(raw, (1., 1., 1.), c), target))
 
 
+def _window(raw, target, tid, start, T, action=None):
+    """CacheWindow as the registered reader returns it (fictional source)."""
+    meta = dict(META, trajectory_id=tid)
+    if action is not None:
+        meta = dict(meta, controls=dict(META["controls"], values=[[action, 0.]]*4))
+    x = cache.WindowInput(raw, cache._window_controls(meta, start, T, "cpu"), torch.tensor([T], dtype=torch.float64),
+                          cache.regular_grid(16, 16), torch.tensor([start*.25], dtype=torch.float64), "input", tid, "test")
+    y = cache.WindowTarget(target, torch.tensor([(start+T)*.25], dtype=torch.float64), "target")
+    return cache.CacheWindow(x, y, dict(actual_manifest_sha256=f"m{tid}", generation=dict(evidence_role="real_frozen_encoder"),
+                                        observation_variant="canonical", fictional=True))
+
+
+def _perturb(model, seed=3, scale=.1):
+    torch.manual_seed(seed)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(torch.randn_like(p)*scale)
+    return model.eval()
+
+
+def _registered(model, raw, target, T, config, start=5):
+    """future_jepa_distance and rollout_future_jepa_distance of the registered evaluation for one 16x16 point."""
+    w, donor = _window(raw, target, 180, start, T), _window(raw, target, 181, start, T, action=-.2)
+    values, _ = evaluation.point_metrics(model, w, donor, evaluation.EvaluationQuery(180, start, T, 16, "point"), config)
+    return values, w
+
+
+@pytest.mark.parametrize("kind", ["transformer", "po"])
+def test_window_metrics_match_registered_point_metrics(monkeypatch, kind):
+    """V7-P1-1: direct and unit equal the registered evaluation's numbers, including a T/2 cut inside an action segment
+    (start 5: segment 0-8 is cut at 5.5, 6.5 and 9), where the uncut controls give the Transformer another output."""
+    from po_jepa.baselines import TokenTransformer, TransformerSpec
+    from test_training import e06_case
+    monkeypatch.setenv(checks.PROTOCOL_ENV, "v7")
+    model = _perturb(TokenTransformer(TransformerSpec(encoder_dim=3, residual=True)) if kind == "transformer" else e06_case()[0])
+    torch.manual_seed(1)
+    raw, target = torch.randn(1, 256, 3), torch.randn(1, 256, 3)
+    config = e06_config()
+    for T in (1., 3., 8.):
+        values, w = _registered(model, raw, target, T, config)
+        with torch.no_grad():
+            got = xe.window_metrics(model, raw, target, w.inputs.controls, T, cache.regular_grid(16, 16), dist)
+        assert got["direct"] == pytest.approx(values["future_jepa_distance"], rel=1e-6, abs=0)
+        assert got["unit"] == pytest.approx(values["rollout_future_jepa_distance"], rel=1e-6, abs=0)
+        if kind == "transformer":
+            with torch.no_grad():
+                uncut = dist(model(raw, w.inputs.controls, w.inputs.duration, cache.regular_grid(16, 16)), target)
+            assert uncut != pytest.approx(got["direct"], rel=1e-6, abs=0)   # the a305bfe input differs here
+
+
+# ---------------------------------------------------------------- formal chain fixtures
+
 @pytest.fixture
-def v7_double_well(monkeypatch):
-    if not (ROOT/"configs/calibration/double_well-200-u2000.yaml").exists():
-        pytest.skip("needs configs/calibration/double_well-200-u2000.yaml (written by run.py calibrate)")
+def v7_double_well(monkeypatch, tmp_path):
+    """v7 protocol on double_well-200 with a calibration file written here (no file outside the repository)."""
+    calibration = tmp_path/"calibration.yaml"
+    calibration.write_text("sigma_z: 1.0\ntime_weight: 0.25\nspace_weight: 0.5\n")
+    monkeypatch.setattr(checks, "v7_calibration_path", lambda: calibration)
     monkeypatch.setenv(checks.PROTOCOL_ENV, "v7")
     monkeypatch.setenv(checks.UPDATES_ENV, "2000")
+    monkeypatch.delenv(checks.SEED_ENV, raising=False)
     old = datasets._set_for_tests(datasets.DatasetSpec("double_well", 200))
     yield
     datasets._set_for_tests(old)
 
 
-def fake_job(tmp_path, condition, payload, step=10):
-    job = tmp_path/"run"/"job"
-    root = job/"training"/condition
-    (root/"checkpoints").mkdir(parents=True)
-    (job/"job.json").write_text(json.dumps(dict(condition=condition, dataset="double_well-200", seed=1703, updates=2000,
-                                                 training_run=None, resume_from=None)))
-    (job/"COMPLETE.json").write_text("{}"); (root/"COMPLETE.json").write_text("{}")
+def _json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+
+
+def _bind(folder):
+    """COMPLETE.json bound to report.json, as run_job / run_prepared_condition write it."""
+    _json(folder/"COMPLETE.json", dict(report_sha256=hashlib.sha256((folder/"report.json").read_bytes()).hexdigest()))
+
+
+def _checkpoint(root, payload, step):
     buffer = io.BytesIO(); torch.save(payload, buffer); raw = buffer.getvalue()
-    (root/"checkpoints"/f"step-{step}.pt").write_bytes(raw)
-    best = dict(checkpoint=f"checkpoints/step-{step}.pt", checkpoint_sha256=hashlib.sha256(raw).hexdigest(), step=step, mean=.5)
-    (root/"report.json").write_text(json.dumps(dict(best=best)))
-    return job, root
+    path = root/"checkpoints"/f"step-{step:04d}.pt"
+    path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(raw)
+    return dict(step=step, mean=.5+step/1000, windows=400, metric="future_jepa_distance",
+                checkpoint=f"checkpoints/step-{step:04d}.pt", checkpoint_sha256=hashlib.sha256(raw).hexdigest(),
+                checkpoint_provenance=PROV)
+
+
+def fake_job(base, condition, payloads=None, selected=10, layout="local", seed=1703):
+    """A finished v7 job with the whole registered chain: job.json, report.json (+COMPLETE), evaluation registration,
+    and the training run (local, or an older job referenced by training_run / resume_from)."""
+    job_dir = base/"run"/"job"
+    job = dict(condition=condition, dataset="double_well-200", seed=seed, updates=2000, resume_from=None, training_run=None)
+    best, root = None, None
+    if condition != "identity":
+        train_job = job_dir
+        if layout != "local":
+            train_job = base/"old"/"run"/"job"
+            _json(train_job/"job.json", dict(job))
+            job[layout] = str(base/"old")
+        root = train_job/"training"/condition
+        rows = {step: _checkpoint(root, payload, step) for step, payload in (payloads or {10: {"x": 1}}).items()}
+        best = rows[selected]
+        _json(root/"report.json", dict(best=best, validations=list(rows.values()))); _bind(root)
+    _json(job_dir/"job.json", job)
+    _json(job_dir/"report.json", dict(job=job, preflight=dict(cache_identity=RECEIPT), best=best)); _bind(job_dir)
+    evaluation_dir = job_dir/"evaluation"/condition
+    _json(evaluation_dir/"registration.json", dict(condition=condition, checkpoint=best))
+    _json(evaluation_dir/"COMPLETE.json", dict(status="completed_real_evaluation"))
+    return job_dir, root
+
+
+def _edit(path, change, bind=False):
+    value = json.loads(path.read_text()); change(value); path.write_text(json.dumps(value))
+    if bind:
+        _bind(path.parent)
+
+
+def test_formal_selection_follows_the_registered_chain(tmp_path):
+    """V7-P1-2 / V7-P2-1: the checkpoint is the one completion flag, report and evaluation registration name."""
+    job, root = fake_job(tmp_path/"a", "po_jepa_full", {10: {"x": 1}, 20: {"x": 2}})
+    got = xe.formal_selection(job, "po_jepa_full")
+    assert got["best"]["step"] == 10 and got["root"] == root and got["cache_identity"]["encode_report_sha256"] == "enc-A"
+    with pytest.raises(ValueError, match="job.json is for"):
+        xe.formal_selection(job, "po_jepa_no_consistency")
+    # reviewer's case: training report re-pointed to another valid step-20 checkpoint (even with its flag rebound)
+    _edit(root/"report.json", lambda r: r.update(best=r["validations"][1]), bind=True)
+    with pytest.raises(ValueError, match="training report selects another checkpoint"):
+        xe.formal_selection(job, "po_jepa_full")
+    # training report no longer the one its COMPLETE.json names
+    job, root = fake_job(tmp_path/"b", "po_jepa_full")
+    _edit(root/"report.json", lambda r: r.update(note=1))
+    with pytest.raises(ValueError, match="training report.json is not the one"):
+        xe.formal_selection(job, "po_jepa_full")
+    # top-level report edited without its flag; then rebound but the evaluation registration still names step 10
+    job, root = fake_job(tmp_path/"c", "po_jepa_full", {10: {"x": 1}, 20: {"x": 2}})
+    _edit(job/"report.json", lambda r: r.update(best=json.loads((root/"report.json").read_text())["validations"][1]))
+    with pytest.raises(ValueError, match="not the one COMPLETE.json"):
+        xe.formal_selection(job, "po_jepa_full")
+    _bind(job)
+    with pytest.raises(ValueError, match="evaluation registration and report"):
+        xe.formal_selection(job, "po_jepa_full")
+    # evaluation failed / missing
+    job, _ = fake_job(tmp_path/"d", "po_jepa_full")
+    _json(job/"evaluation"/"po_jepa_full"/"FAILED.json", {})
+    with pytest.raises(ValueError, match="registered evaluation not complete"):
+        xe.formal_selection(job, "po_jepa_full")
+    # job.json relabelled to another seed: report.json still describes seed 1703
+    job, _ = fake_job(tmp_path/"e", "po_jepa_full")
+    _edit(job/"job.json", lambda j: j.update(seed=1704))
+    with pytest.raises(ValueError, match="another job"):
+        xe.formal_selection(job, "po_jepa_full")
+    # identity has no checkpoint
+    job, _ = fake_job(tmp_path/"f", "identity")
+    assert xe.formal_selection(job, "identity")["best"] is None
+
+
+@pytest.mark.parametrize("layout", ["resume_from", "training_run"])
+def test_formal_selection_reused_training(tmp_path, layout):
+    """V7-P2-1: a job that only evaluated an already finished training (no local training/ directory)."""
+    job, root = fake_job(tmp_path, "matched_transformer", layout=layout)
+    assert not (job/"training").exists()
+    got = xe.formal_selection(job, "matched_transformer")
+    assert got["root"] == root and root.is_relative_to(tmp_path/"old") and got["best"]["step"] == 10
+
+
+def _po_payload(model, step=10, condition="full"):
+    state = {k: v+.01 if v.is_floating_point() else v for k, v in model.state_dict().items()}
+    return dict(completed_steps=step, condition=condition, model_config=training._model_config(model), model_state=state,
+                provenance=PROV), state
 
 
 def test_load_selected_po_checkpoint(tmp_path, v7_double_well):
     model, _ = comparison.build_condition("po_jepa_full", "cpu")
-    state = {k: v+.01 if v.is_floating_point() else v for k, v in model.state_dict().items()}
-    payload = dict(completed_steps=10, condition="full", model_config=training._model_config(model), model_state=state)
-    job, root = fake_job(tmp_path, "po_jepa_full", payload)
+    payload, state = _po_payload(model)
+    job, root = fake_job(tmp_path/"ok", "po_jepa_full", {10: payload})
     loaded, _, info = xe.load_selected("po_jepa_full", job, torch.device("cpu"))
-    assert info["step"] == 10 and not loaded.training
+    assert info["step"] == 10 and info["training_root"] == str(root) and not loaded.training
     for k, v in loaded.state_dict().items():
         assert torch.equal(v, state[k]), k
-    # tampering is refused: other condition, wrong step, changed bytes
-    with pytest.raises(ValueError):
-        xe.load_selected("po_jepa_no_consistency", *_relabel(tmp_path/"b", payload, "po_jepa_no_consistency"))
-    report = json.loads((root/"report.json").read_text()); report["best"]["step"] = 11
-    (root/"report.json").write_text(json.dumps(report))
-    with pytest.raises(ValueError):
-        xe.load_selected("po_jepa_full", job, torch.device("cpu"))
-    report["best"]["step"] = 10; (root/"report.json").write_text(json.dumps(report))
-    with open(root/"checkpoints"/"step-10.pt", "ab") as f:
+    refused = dict(condition=dict(payload, condition="no_consistency"), step=dict(payload, completed_steps=11),
+                   provenance=dict(payload, provenance=dict(PROV, feature_manifest_sha256="e"*64)))
+    for name, bad in refused.items():
+        job, _ = fake_job(tmp_path/name, "po_jepa_full", {10: bad})
+        with pytest.raises(ValueError):
+            xe.load_selected("po_jepa_full", job, torch.device("cpu"))
+    job, root = fake_job(tmp_path/"bytes", "po_jepa_full", {10: payload})
+    with open(root/"checkpoints"/"step-0010.pt", "ab") as f:
         f.write(b"x")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="SHA"):
         xe.load_selected("po_jepa_full", job, torch.device("cpu"))
 
 
-def _relabel(path, payload, condition):
-    path.mkdir()
-    job, _ = fake_job(path, condition, payload)       # payload still says condition="full"
-    return job, torch.device("cpu")
+def test_load_selected_transformer_checkpoint(tmp_path, v7_double_well):
+    model, _ = comparison.build_condition("matched_transformer", "cpu")
+    payload = dict(schema="F05_transformer_checkpoint_v1", config=asdict(model.spec), provenance=PROV, completed_steps=10,
+                   model_state=_perturb(model).state_dict())
+    job, _ = fake_job(tmp_path/"ok", "matched_transformer", {10: payload}, layout="resume_from")
+    loaded, _, info = xe.load_selected("matched_transformer", job, torch.device("cpu"))
+    assert info["step"] == 10 and all(torch.equal(v, payload["model_state"][k]) for k, v in loaded.state_dict().items())
+    job, _ = fake_job(tmp_path/"arch", "matched_transformer", {10: dict(payload, config=dict(payload["config"], width=32))})
+    with pytest.raises(ValueError, match="architecture"):
+        xe.load_selected("matched_transformer", job, torch.device("cpu"))
 
 
-def test_run_one_end_to_end(tmp_path, v7_double_well, monkeypatch):
-    model, _ = comparison.build_condition("po_jepa_full", "cpu")
-    payload = dict(completed_steps=10, condition="full", model_config=training._model_config(model), model_state=model.state_dict())
-    job, _ = fake_job(tmp_path, "po_jepa_full", payload)
+def test_features_identity(monkeypatch):
+    """V7-P1-3: another cache with the same dataset tag is refused; the digest goes into the output identity."""
+    monkeypatch.setattr(data, "approved_cache_metadata", lambda root, splits: dict(RECEIPT))
+    receipt = json.loads(json.dumps(RECEIPT))                      # as read back from report.json (string keys)
+    digest = xe.features_identity(Path("A"), receipt)
+    assert digest["encode_report_sha256"] == "enc-A" and len(digest["manifests_sha256"]) == 64
+    monkeypatch.setattr(data, "approved_cache_metadata",
+                        lambda root, splits: dict(RECEIPT, encode_report_sha256="enc-B"))
+    with pytest.raises(ValueError, match="differs from the one"):
+        xe.features_identity(Path("B"), receipt)
+    monkeypatch.setattr(data, "approved_cache_metadata",
+                        lambda root, splits: dict(RECEIPT, manifest_sha256_by_id={180: "m180", 181: "other"}))
+    with pytest.raises(ValueError):
+        xe.features_identity(Path("B"), receipt)
+
+
+def test_run_one_end_to_end(tmp_path, v7_double_well, monkeypatch, capsys):
+    """Real matched Transformer with a non-zero readout: rows equal the registered point_metrics; output identity,
+    reuse only on an equal identity, refusal otherwise, atomic write, environment/job consistency."""
+    model, loss = comparison.build_condition("matched_transformer", "cpu")
+    weights = _perturb(model).state_dict()
+    payload = dict(schema="F05_transformer_checkpoint_v1", config=asdict(model.spec), provenance=PROV, completed_steps=10,
+                   model_state=weights)
+    job, _ = fake_job(tmp_path, "matched_transformer", {10: payload})
     torch.manual_seed(1)
-    frames = torch.randn(18, 1, 256, 1408)
-    reads = []
+    frames = torch.randn(20, 1, 256, 1408)
 
     def reader(features, approved, tid, start, T, device):
-        reads.append((tid, start, T))
         end = start+int(T)
         if end >= frames.shape[0]:
             return None
-        meta = dict(META, trajectory_id=tid)
-        return frames[start], frames[end], cache._window_controls(meta, start, float(T), str(device))
+        return frames[start], frames[end], cache._window_controls(dict(META, trajectory_id=tid), start, float(T), str(device))
 
     monkeypatch.setattr(xe, "read_test_window", reader)
-    monkeypatch.setattr(xe, "DURATIONS", (1., 6., 16.))
-    monkeypatch.setattr(datasets, "test_start_ticks", lambda tid, spec=None: (0, 5))
-    from po_jepa.runtime import data
-    monkeypatch.setattr(data, "approved_cache_metadata", lambda root, splits: {})
-    out = tmp_path/"out"/"r.json"
+    monkeypatch.setattr(xe, "DURATIONS", (1., 3., 6., 16.))
+    monkeypatch.setattr(datasets, "test_start_ticks", lambda tid, spec=None: (5,))
+    monkeypatch.setattr(data, "approved_cache_metadata", lambda root, splits: dict(RECEIPT))
+    out = tmp_path/"out"/"double_well-200"/"seed1703"/"matched_transformer.json"
     xe.run_one(job, tmp_path, out, "cpu", max_test=1)
     result = json.loads(out.read_text())
-    rows = result["rows"]
-    assert result["checkpoint"]["step"] == 10 and result["max_test_trajectories"] == 1
-    assert {(r["start_tick"], r["duration_cycles"]) for r in rows} == {(0, 1.), (0, 6.), (0, 16.), (5, 1.), (5, 6.)}
-    assert all(r["trajectory_id"] == 180 for r in rows)
-    six = next(r for r in rows if r["duration_cycles"] == 6. and r["start_tick"] == 0)
-    loaded, loss, _ = xe.load_selected("po_jepa_full", job, torch.device("cpu"))
-    with torch.no_grad():
-        direct = loaded(frames[0], cache._window_controls(META, 0, 6., "cpu"), torch.tensor([6.], dtype=torch.float64),
-                        cache.regular_grid(16, 16))
-    assert six["direct"] == pytest.approx(float(comparison.jepa_distance(direct, frames[6], config=loss).per_sample[0]), rel=1e-5)
-    assert six["half"] != pytest.approx(six["direct"])        # a real model is not an exact semigroup
+    rows = {r["duration_cycles"]: r for r in result["rows"]}
+    assert set(rows) == {1., 3., 6.} and all(r["trajectory_id"] == 180 and r["start_tick"] == 5 for r in rows.values())
+    identity = result["identity"]
+    assert identity["metric_version"] == xe.METRIC_VERSION and identity["checkpoint"]["step"] == 10
+    assert identity["features"]["encode_report_sha256"] == "enc-A" and identity["max_test_trajectories"] == 1
+    reference, _ = comparison.build_condition("matched_transformer", "cpu")
+    reference.load_state_dict(weights); reference.eval()
+    for T in (1., 3.):
+        values, _ = _registered(reference, frames[5], frames[5+int(T)], T, loss)
+        assert rows[T]["direct"] == pytest.approx(values["future_jepa_distance"], rel=1e-6, abs=0)
+        assert rows[T]["unit"] == pytest.approx(values["rollout_future_jepa_distance"], rel=1e-6, abs=0)
+    assert [p.name for p in out.parent.iterdir()] == [out.name]              # no partial file left behind
+    # same identity: reused, file untouched
+    before = out.read_bytes(); capsys.readouterr()
+    xe.run_one(job, tmp_path, out, "cpu", max_test=1)
+    assert out.read_bytes() == before and "skip (same identity)" in capsys.readouterr().out
+    # another budget / subset / cache: refused, not reused and not overwritten
+    with pytest.raises(ValueError, match="another run"):
+        xe.run_one(job, tmp_path, out, "cpu", max_test=2)
+    monkeypatch.setattr(data, "approved_cache_metadata", lambda root, splits: dict(RECEIPT, encode_report_sha256="enc-B"))
+    with pytest.raises(ValueError, match="feature cache differs"):
+        xe.run_one(job, tmp_path, out, "cpu", max_test=1)
+    monkeypatch.setattr(data, "approved_cache_metadata", lambda root, splits: dict(RECEIPT))
+    assert out.read_bytes() == before
+    # a truncated leftover (from a305bfe's non-atomic write) is recomputed
+    out.write_text(before.decode()[:100])
+    xe.run_one(job, tmp_path, out, "cpu", max_test=1)
+    assert json.loads(out.read_text())["identity"] == identity
+    with pytest.raises(ValueError):
+        xe.run_one(job, tmp_path, out, "cpu", max_test=0)
+    # environment and job.json must agree (run sets the dataset/seed/updates from job.json)
+    _edit(job/"job.json", lambda j: j.update(seed=1704))
+    with pytest.raises(ValueError, match="environment differ"):
+        xe.run_one(job, tmp_path, out, "cpu", max_test=1)
+
+
+def _finished(results, scene, condition, seed=1703):
+    job = results/scene/f"seed{seed}"/condition/"run"/"job"; job.mkdir(parents=True)
+    _json(job/"job.json", dict(condition=condition, dataset=f"{scene}-200", seed=seed, updates=2000))
+    _json(job/"COMPLETE.json", {})
+    return job
+
+
+def test_run_all_refuses_duplicates_and_bad_limits(tmp_path):
+    results = tmp_path/"results"
+    _finished(results, "van_der_pol", "po_jepa_full")
+    _finished(results/"again", "van_der_pol", "po_jepa_full")
+    with pytest.raises(SystemExit, match="several finished jobs"):
+        xe.main(["run", "--results-root", str(results), "--output", str(tmp_path/"out"), "--features-base", "x"])
+    for bad in ("0", "-1"):
+        with pytest.raises(SystemExit):
+            xe.main(["run", "--results-root", str(results), "--output", str(tmp_path/"out"), "--max-test-trajectories", bad])
+
+
+def _result(out, condition, rows, dataset="van_der_pol-200", seed=1703, features="enc-A", identity=True, slot=None):
+    path = out/(slot or dataset)/f"seed{seed}"/f"{condition}.json"
+    value = dict(condition=condition, dataset=dataset, seed=seed, rows=rows)
+    if identity:
+        value["identity"] = dict(metric_version=xe.METRIC_VERSION, dataset=dataset, seed=seed, condition=condition,
+                                 updates=2000, features=dict(encode_report_sha256=features), max_test_trajectories=None,
+                                 durations=list(xe.DURATIONS))
+    _json(path, value)
+
+
+def _rows(values, T=2.):
+    return [dict(trajectory_id=t, start_tick=0, duration_cycles=T, id=1., direct=v, half=v+.1, unit=v+.2, dc_half=.1)
+            for t, v in values.items()]
 
 
 def test_summarize(tmp_path):
-    def write(condition, values):
-        rows = [dict(trajectory_id=t, start_tick=0, duration_cycles=2., id=1., direct=v, half=v+.1, unit=v+.2, dc_half=.1)
-                for t, v in values.items()]
-        path = tmp_path/"van_der_pol-200"/"seed1703"/f"{condition}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dict(condition=condition, dataset="van_der_pol-200", seed=1703, rows=rows)))
-    write("po_jepa_full", {180: .5, 181: .55})
-    write("po_jepa_no_consistency", {180: .6, 181: .6})
+    _result(tmp_path, "po_jepa_full", _rows({180: .5, 181: .55}))
+    _result(tmp_path, "po_jepa_no_consistency", _rows({180: .6, 181: .6}))
     xe.summarize(type("A", (), dict(output=str(tmp_path)))())
     entry = json.loads((tmp_path/"summary.json").read_text())[0]
     assert entry["means"]["po_jepa_full"]["direct"] == pytest.approx(.525)
@@ -223,6 +441,36 @@ def test_summarize(tmp_path):
     assert entry["full_vs_nocons"]["unit"]["relative"] == pytest.approx((.725-.8)/.8)
     assert entry["full_vs_nocons"]["unit"]["full_better_trajectories"] == 2
     assert "id" not in entry["full_vs_nocons"] and entry["means"]["po_jepa_full"]["windows"] == 2
+    assert entry["pairing"] == dict(paired_windows=2, full_only=0, nocons_only=0)
+
+
+def test_summarize_unpaired_and_missing_durations(tmp_path):
+    """V7-P2-2: paired statistics use the common windows only and say how many were left out; a condition with no
+    window at some T gives None means instead of crashing."""
+    _result(tmp_path, "po_jepa_full", _rows({180: 1., 181: 9.}))
+    _result(tmp_path, "po_jepa_no_consistency", _rows({180: 2.}) + _rows({180: 4.}, T=3.))
+    xe.summarize(type("A", (), dict(output=str(tmp_path)))())
+    two, three = json.loads((tmp_path/"summary.json").read_text())
+    assert two["means"]["po_jepa_full"]["direct"] == pytest.approx(5.) and two["means"]["po_jepa_full"]["windows"] == 2
+    assert two["pairing"] == dict(paired_windows=1, full_only=1, nocons_only=0)
+    assert two["full_vs_nocons"]["direct"]["full_mean"] == pytest.approx(1.)
+    assert two["full_vs_nocons"]["direct"]["relative"] == pytest.approx(-.5)
+    assert three["means"]["po_jepa_full"]["windows"] == 0 and three["means"]["po_jepa_full"]["direct"] is None
+    assert three["pairing"] == dict(paired_windows=0, full_only=0, nocons_only=1) and three["full_vs_nocons"] == {}
+
+
+@pytest.mark.parametrize("case", ["old_format", "wrong_slot", "other_cache"])
+def test_summarize_refuses_unidentified_or_mixed_results(tmp_path, case):
+    _result(tmp_path, "po_jepa_full", _rows({180: .5}))
+    if case == "old_format":
+        _result(tmp_path, "po_jepa_no_consistency", _rows({180: .6}), identity=False)
+    elif case == "wrong_slot":
+        _result(tmp_path, "po_jepa_no_consistency", _rows({180: .6}), dataset="double_well-200", slot="van_der_pol-200")
+    else:
+        _result(tmp_path, "po_jepa_no_consistency", _rows({180: .6}), features="enc-B")
+    with pytest.raises(SystemExit):
+        xe.summarize(type("A", (), dict(output=str(tmp_path)))())
+    assert not (tmp_path/"summary.json").exists()
 
 
 def test_find_jobs_and_features_for(tmp_path):
@@ -236,7 +484,7 @@ def test_find_jobs_and_features_for(tmp_path):
     unfinished = tmp_path/"pilot"/"van_der_pol"/"seed1703"/"identity"/"run"/"job"; unfinished.mkdir(parents=True)
     (unfinished/"job.json").write_text(json.dumps(dict(condition="identity", dataset="van_der_pol-200", seed=1703, updates=2000)))
     jobs = xe.find_jobs(tmp_path/"pilot")
-    assert [j[0] for j in jobs] == [job]
+    assert [j[0] for j in jobs] == [job] and xe.duplicate_keys(jobs) == []
     recorded = tmp_path/"features"/"vdp"; recorded.mkdir(parents=True)
     (out/"console").mkdir()
     (out/"console"/"command.json").write_text(json.dumps(dict(argv=["python", "run", "--features-root", str(recorded)])))
