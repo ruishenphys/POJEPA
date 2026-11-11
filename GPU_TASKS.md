@@ -1,20 +1,22 @@
 # GPU tasks: handoff (2026-11-11)
 
 This file lists every PO-JEPA task that needs a GPU, which ones you can run now, which are still blocked, and what to send back.
-Code references: `full-model` branch e9016a8 (code in `po-jepa-full/`) and `v7` branch a305bfe (v7.1 + extra evaluation).
+Code references: `full-model` branch e9016a8 (code in `po-jepa-full/`) and `v7` branch 223e2a6 (v7.1 training code 748ca22 plus the extra-evaluation tool).
 Times, memory and disk figures marked *(est.)* are estimates, not measurements.
+
+Naming: "formal training" means the full-scale runs on the two datasets, the 12-scene simulation dataset (T5) and DROID (T6). Both use the same `full-model` code; they are not two rounds of experiments. `v8` in some file and folder names (`tools/make_v8_jobs.py`, `features-v8/`, `results-v8/`) is an old internal code name for the 12-scene simulation dataset and nothing more.
 
 ## 1. Summary
 
 | # | Task | Where | Status | GPU | Time on 2× RTX PRO 6000 |
 |---|---|---|---|---|---|
 | T0 | v7.1 formal run (`RESTART_V7_1.md`) | `v7` branch, `po-jepa/` | **Running. Keep going, do not change anything.** | both cards | as planned |
-| T1 | Extra evaluation of finished runs (`EXTRA_EVAL_V7.md`) | `v7` branch, `po-jepa/` | Pilot part: ready (CPU is fine). Formal part: after T0 | optional | pilot 10–20 min on a free GPU, ~2 h on CPU |
+| T1 | Extra evaluation of finished runs (`EXTRA_EVAL_V7.md`) | `v7` branch, `po-jepa/` | Pilot part: ready (CPU is fine); rerun it if you ran the a305bfe version. Formal part: after T0 | optional | pilot 10–20 min on a free GPU, ~2 h on CPU |
 | T2 | First-GPU checks for `full-model` | `full-model/po-jepa-full/` | **Ready.** Run when one card is free | 1 card, ~5 GB *(est.)* | ~10 min *(est.)* |
 | T3 | S22 two-frame tubelet probe | `full-model/po-jepa-full/` | **Ready.** Run when a card is free (skip if you already ran it) | 1–2 cards, ~5 GB *(est.)* | ≤1 GPU-hour *(est.)* |
 | T4 | Simulation add-on runs | `full-model/po-jepa-full/` | **Blocked**: waits for T0, then a code update for v7.1 | both cards | pilot ½ day, formal + variants 2–3 days, D3 7.5 h *(est.)* |
-| T5 | v8 dataset extension runs | `full-model/po-jepa-full/` | **Blocked**: waits for T0 results, method decisions and the S22 result | both cards | see §7 |
-| T6 | DROID real-robot pipeline | `full-model/po-jepa-full/` | **Blocked**: waits for decisions and two code segments | ≥40 GB card *(est.)* | 200–330 GPU-hours *(est.)* |
+| T5 | Simulation dataset (12 scenes): pilot, then formal training | `full-model/po-jepa-full/` | **Blocked**: waits for T0 results, method decisions and the S22 result | both cards | see §7 |
+| T6 | DROID (real robot): pilot, then formal training | `full-model/po-jepa-full/` | **Blocked**: waits for decisions and two code segments | ≥40 GB card *(est.)* | 200–330 GPU-hours *(est.)* |
 
 Order: T0 first and undisturbed. T2 and T3 are short; slot them in only when a card is idle, otherwise run them right after T0. T4–T6 get their own instructions when they are unblocked.
 
@@ -39,11 +41,12 @@ Follow `RESTART_V7_1.md` on the `v7` branch, as you are doing now. Do not edit t
 
 ## 4. T1: extra evaluation (`EXTRA_EVAL_V7.md`)
 
-Run it exactly as `EXTRA_EVAL_V7.md` on the `v7` branch says. It only reads finished checkpoints and adds three new files, so it does not affect T0.
+Run it exactly as `EXTRA_EVAL_V7.md` on the `v7` branch says, in the version of commit 223e2a6 or later (`git pull` in `po-jepa/` first). The pull only changes the three extra-evaluation files, which are not in the delivery manifest, and the tool only reads finished checkpoints, so it does not affect T0.
 
+- Outputs written by the first version of the tool (commit a305bfe, folder `extra-eval-v7/`) are not valid: the Transformer's `direct` and `dc_half` inputs differed from the formal evaluation, and the files carry no identity record. If you already ran it, rerun into the new folder `extra-eval-v7-r2/` as the guide says. Leave the old folder as it is.
 - Pilot results: available now; use `--device cpu` while both cards are busy.
-- Formal results: after T0 finishes, with `--results-root ../results-v7/full/v7.1 --output ../extra-eval-v7/full --max-test-trajectories 50`.
-- Send back `extra-eval-v7.zip` (JSON only, a few MB).
+- Formal results: after T0 finishes, with `--results-root ../results-v7/full/v7.1 --output ../extra-eval-v7-r2/full --max-test-trajectories 50`.
+- Send back `extra-eval-v7-r2.zip` (JSON only, a few MB).
 
 ## 5. T2: first-GPU checks (~10 minutes, one card)
 
@@ -136,11 +139,22 @@ Five extra conditions on the v7 scenes (`po_jepa_time_only`, `po_jepa_space_only
 
 Blocked because the add-on code was written against v7 (0ac45fe) and reads `results-v7/full/<scene>`, while v7.1 writes to `results-v7/full/v7.1/` and changed the source. After T0 finishes we will release a code update and a new English version of `po-jepa-full/ADDON_RUN_GUIDE.md`; follow that, not the current version. Size per the current guide: pilot 95 jobs (~½ day), formal 255 + variants 176 jobs (2–3 days), D3 5 jobs (7.5 h), all *(est.)* on your two cards.
 
-### T5: v8 dataset extension
+### T5: simulation dataset, pilot and formal training
 
-12 scenes (v7's 5 plus `gray_scott`, `push`, `pendulum`, `bouncing_balls`, `wave`, `cart_pole`, `spring_chain`). Job tables come from `tools/make_v8_jobs.py` (stages `pilot`, `full`, `variants`, `strength`, `long`, `timing`, `space`, `readout`, optional `addon`). Pilot: 7 scenes × 200 trajectories × 2,000 updates × 1 seed; full: 2,000 trajectories × 10,000 updates × 3 seeds.
+All 12 scenes go into the main experiment: the 7 first-order scenes (v7's 5 plus `gray_scott` and `push`) and the 5 second-order scenes (`pendulum`, `bouncing_balls`, `wave`, `cart_pole`, `spring_chain`). Job tables come from `tools/make_v8_jobs.py` (stages `pilot`, `full`, `addon-pilot`, `addon`, `variants`, `strength`, `long`, `timing`, `space`, `readout`). Its default is the 7 first-order scenes; the 5 second-order scenes have to be listed explicitly with `--scenes`.
 
-Blocked on: the v7.1 results and the method choices that follow from them (zero-initialised residual readout for PO-JEPA, the temporal-consistency fix, whether v8 uses the v7.1 early-stopping rule); the S22 result (T3), which decides the second-order encoding (segment S25b). For scale, the ICML plan estimates 510–1,140 GPU-hours for all simulation experiments together *(est.)*.
+Size for 12 scenes, counted from the tool's output (a run is one scene × one condition × one seed):
+
+| | Scale per scene | 6 main conditions (`pilot`, `full`) | 5 supplementary conditions (`addon-pilot`, `addon`) |
+|---|---|---|---|
+| Pilot | 200 trajectories × 2,000 updates × 1 seed | 146 commands, 72 of them runs | 74 commands, 60 of them runs |
+| Formal training | 2,000 trajectories × 10,000 updates × 3 seeds | 302 commands, 216 of them runs | 194 commands, 180 of them runs |
+
+The supplementary conditions (`po_jepa_time_only`, `po_jepa_space_only`, `transformer_consistency`, `fixed_fourier`, `koopman`) were marked optional on 2026-11-10; whether they are required is being confirmed. The evaluation-only stages (`variants`, `strength`, `long`, `timing`, `space`, `readout`) follow the formal training. Current plan (2026-11-11): the pilot is run first on our side; the formal training is planned for the advisor's machines.
+
+Blocked on: the v7.1 results and the method choices that follow from them (zero-initialised residual readout for PO-JEPA, the temporal-consistency fix, whether the formal training uses the v7.1 early-stopping rule); `full-model` does not have v7.1's AC checkpoint pruning yet (without it each official-scale AC run keeps 21 checkpoints, about 76 GB *(est.)*); the S22 result (T3), which decides how the 5 second-order scenes are encoded (segment S25b). The 7 first-order scenes do not depend on T3; the 5 second-order scenes start only after T3 and S25b.
+
+For scale *(est.)*: the ICML plan prices one formal run, including its evaluation, at 1.2–3.5 GPU-hours, so the 396 formal runs are roughly 480–1,390 GPU-hours before the evaluation-only stages. Base features are about 48 GB per scene, about 570 GB for 12 scenes. Measured times will come from T0.
 
 ### T6: DROID
 
@@ -155,7 +169,7 @@ Blocked on: whether DROID goes into the ICML submission (advisor and Jerry); seg
 | Task | Files |
 |---|---|
 | T0 | as in `RESTART_V7_1.md` |
-| T1 | `extra-eval-v7.zip` |
+| T1 | `extra-eval-v7-r2.zip` |
 | T2 | terminal output of steps 2–5, `droid-check/check_mp4.json` |
 | T3 | `features-v8/tubelet-probe-200/report.json`, `tubelet-probe-200-fit.txt`, the two encode logs |
 
