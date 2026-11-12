@@ -32,28 +32,29 @@ v7 正式运行（机哥，2026-11-09 起）结束后，在同一台两卡机器
 
 这样 po-jepa-full 的 `load_protocol()` 不用改，读到的 σ_z、λ 和 v7 正式运行逐位相同。`configs/calibration/` 不进 MANIFEST（v7 原来就排除了它）。
 
-### 3.2 补跑标定（transformer_consistency 和 fixed_fourier 各自的 λ）
+### 3.2 补跑标定（transformer_consistency 和 fixed_fourier 各自的 λ，po_jepa_rollout_sup 的 λ_r）
 
-`run.py calibrate-addon`，每个场景一条任务，依次标定两个条件，方法和 v7 的 `workflow.calibrate_weights` 相同：
+`run.py calibrate-addon`，每个场景一条任务，依次标定三个条件（`addon.calibration.CALIBRATED_CONDITIONS`），方法和 v7 的 `workflow.calibrate_weights` 相同。po_jepa_rollout_sup（08 §6，2026-11-12 加）只标 λ_r：第 2 步用 po_jepa_no_consistency（就是 v7 calibrate 的模型），第 5 步用 `addon.calibration.rollout_gradient_norms`（time 一格是 L_roll），λ_s 不重标、原样抄基础标定的值，记录里 `space_weight_source` 为 `base_calibration`（另两个条件为 `calibrated`）：
 
 1. 种子固定 1703（和 v7 的 calibrate 相同，不传 `--seed`）。σ_z 用导入的值，不重新标定。
 2. 建只用 JEPA 的版本：transformer_consistency 用 matched_transformer 的模型；fixed_fourier 用两个权重为 0 的 fixed_fourier。
 3. 在初始状态下量前 32 个训练批的三项梯度范数（只记录）。
 4. 用训练查询序列的前 300 批只做 JEPA 训练（学习率调度、裁剪和正式训练相同）。
 5. 在第 301–332 批上量三项梯度范数（transformer_consistency 用 `addon.calibration.generic_gradient_norms`，fixed_fourier 用 `training.consistency_gradient_norms`），取中位数，λ_c = ρ·median|∇L_JEPA| / median|∇L_c|，ρ = `calibration.rho` = 1。λ 必须有限且为正；分母为 0 时报错，不除出 inf（`<条件>: median grad_<项> = 0.0; λ 的分母为 0，不能标定（不除出 inf）`）。transformer_consistency 在登记的初始化下一致性梯度恰为 0（残差读出的 `p_out` 零初始化），所以第 3 步会记到 0，这是正常的：初始状态那一组（只记录）分母为 0 时 λ 记 `None`，不报错；第 5 步在 300 步之后量，分母一般非零。
-6. 两个条件都完成后，一次性写 `configs/calibration/addon/<tag>-u<步数>.yaml`。这个文件已存在就报错（`补跑标定文件已存在：…确实要重标定请先告诉 Jerry`），不覆盖：文件一旦写出，同一场景的 D 任务就可能已经读过它，重标定会让已经训练的任务和后来的任务用不同的 λ。下面的例子是示意（流格式）；实际写的是首行注释加 `yaml.safe_dump(sort_keys=True)` 的块格式，和 v7 的 `write_v7_calibration` 一致，读出来的值相同：
+6. 全部条件都完成后，一次性写 `configs/calibration/addon/<tag>-u<步数>.yaml`。这个文件已存在就报错（`补跑标定文件已存在：…确实要重标定请先告诉 Jerry`），不覆盖：文件一旦写出，同一场景的 D 任务就可能已经读过它，重标定会让已经训练的任务和后来的任务用不同的 λ。下面的例子是示意（流格式）；实际写的是首行注释加 `yaml.safe_dump(sort_keys=True)` 的块格式，和 v7 的 `write_v7_calibration` 一致，读出来的值相同：
 
 ```yaml
 # 仿真补跑标定（run.py calibrate-addon 自动写入，勿手改）：<tag>，<步数> 步
 fixed_fourier: {rho: 1.0, space_weight: …, time_weight: …, source: …}
+po_jepa_rollout_sup: {rho: 1.0, space_weight: …（= 基础标定的 λ_s）, time_weight: …（λ_r）, source: …}
 transformer_consistency: {rho: 1.0, space_weight: …, time_weight: …, source: …}
 sigma_z_used: …
 v7_calibration_sha256: …   # 导入的 v7 标定文件的 SHA
 ```
 
-逐批记录写在任务输出目录的 `run/calibration-<条件>.json`：v7 的 calibration.json 的 17 个键全有、含义相同，另加 `condition`、`v7_calibration_sha256`、`addon_calibration_file` 三个；`note` 的文字改成补跑的说法。三个种子共用这一组 λ（和 v7 一样）。
+逐批记录写在任务输出目录的 `run/calibration-<条件>.json`：v7 的 calibration.json 的 17 个键全有、含义相同，另加 `condition`、`v7_calibration_sha256`、`addon_calibration_file`、`base_calibration`（S26a）、`space_weight_source`（08 §6）；`note` 的文字改成补跑的说法。三个种子共用这一组 λ（和 v7 一样）。
 
-读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。
+读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个（加 po_jepa_rollout_sup 后是六个；只有旧格式的文件读不进来，要重跑 calibrate-addon）；po_jepa_rollout_sup 的 `space_weight` 等于协议的 `loss.space_weight`；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。
 
 ## 4. 复用 v7 的产物
 

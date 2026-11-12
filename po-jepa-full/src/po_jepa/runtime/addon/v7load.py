@@ -26,7 +26,7 @@ DATA_FIELDS = ("evidence_role", "split", "paper_sha256", "upstream_commit", "enc
                "preprocess_sha256", "feature_manifest_sha256", "protocol_sha256")
 
 PO_LABELS = dict(po_jepa_full="full", po_jepa_no_consistency="no_consistency", po_jepa_time_only="time_only",
-                 po_jepa_space_only="space_only", fixed_fourier="full")
+                 po_jepa_space_only="space_only", fixed_fourier="full", po_jepa_rollout_sup="rollout_sup")
 TRANSFORMER_LABELS = dict(matched_transformer="no_consistency", transformer_consistency="full")
 AC_SCHEMA = "v7_vjepa2_ac_checkpoint_v1"
 TRANSFORMER_SCHEMA = "F05_transformer_checkpoint_v1"

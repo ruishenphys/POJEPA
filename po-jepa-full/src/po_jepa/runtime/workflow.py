@@ -419,7 +419,7 @@ def execute(args):
         cache._write_json(output/'environment.json',environment.verify_versions())
         stage='calibration'
         require_calibrated_weights(swept=args.command not in ('check','sweep'))
-        if getattr(args,'condition',None) in ('transformer_consistency','fixed_fourier'):   # 07 §2.6：还要补跑标定（16 §3.2）
+        if getattr(args,'condition',None) in ('transformer_consistency','fixed_fourier','po_jepa_rollout_sup'):   # 07 §2.6、08 §6：还要补跑标定（16 §3.2；和 addon.calibration.CALIBRATED_CONDITIONS 相同，测试核对）
             from .addon import calibration as addon_calibration
             addon_calibration.require_addon_calibration()
         if checks.is_v7() and args.command=='transfer':

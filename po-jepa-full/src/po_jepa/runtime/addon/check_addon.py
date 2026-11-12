@@ -1,7 +1,7 @@
-"""16 §5：run.py check-addon——5 个新条件在真实特征上各做一次检查，写 <输出>/check-addon.json。
+"""16 §5：run.py check-addon——6 个新条件在真实特征上各做一次检查，写 <输出>/check-addon.json。
 
 每个条件：comparison.build_condition 构造；初始权重哈希（v7jobs._model_hash）和 08 §1.3 的关系（time_only、space_only、
-fixed_fourier 等于 po_jepa_full，transformer_consistency 等于 matched_transformer，koopman 只记录）；参数量和预登记
+fixed_fourier、po_jepa_rollout_sup 等于 po_jepa_full，transformer_consistency 等于 matched_transformer，koopman 只记录）；参数量和预登记
 （comparison._validate_registration，koopman 另记 K）；v7 check 的同一批 4 个窗口上的一次真实更新
 （comparison._observed_update：读出次数等于 addon.conditions.expected_readouts），之后每个参数的梯度都存在且有限；
 再用新建的模型做 TIMED_UPDATES 次正常更新（v7 check 的同一个 100×4 查询序列）并计时。依赖和设备由 entry 先核。
@@ -24,11 +24,11 @@ from . import conditions
 
 TIMED_UPDATES = 100
 REFERENCE = dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full", fixed_fourier="po_jepa_full",
-                 transformer_consistency="matched_transformer", koopman=None)
+                 transformer_consistency="matched_transformer", koopman=None, po_jepa_rollout_sup="po_jepa_full")
 
 
 def initial_relations(hashes: dict) -> dict:
-    """08 §1.3：hashes 含 7 个名字（5 个新条件和两个参照）的初始哈希。返回每个新条件的参照名（koopman 为 None）；
+    """08 §1.3：hashes 含 8 个名字（6 个新条件和两个参照）的初始哈希。返回每个新条件的参照名（koopman 为 None）；
     不相等就报错。"""
     for condition, reference in REFERENCE.items():
         if reference is not None and hashes[condition] != hashes[reference]:

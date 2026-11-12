@@ -53,7 +53,9 @@ def test_stage_sections_and_counts(stage, tmp_path):
 def test_names_match_runtime_lists():
     from po_jepa.runtime import v7jobs
     from po_jepa.runtime.addon import conditions
-    assert jobs.ADDON_CONDITIONS == conditions.ADDON_CONDITIONS == ADDON
+    # 08 §6：po_jepa_rollout_sup 只进仿真数据集的任务表（make_v8_jobs.py），v7 场景补跑仍是原来 5 个
+    assert jobs.ADDON_CONDITIONS == tuple(c for c in conditions.ADDON_CONDITIONS if c != "po_jepa_rollout_sup") == ADDON
+    assert conditions.ADDON_CONDITIONS == (*ADDON, "po_jepa_rollout_sup")
     assert jobs.V7_CONDITIONS == V7 == v7jobs.JOB_CONDITIONS[:6]
     assert jobs.BASE_SCENES == SCENES and jobs.STAGES["pilot"]["scenes"] == jobs.STAGES["full"]["scenes"] == SCENES
 

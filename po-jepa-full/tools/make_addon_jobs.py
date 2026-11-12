@@ -21,7 +21,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_v7_jobs import BASE_SCENES, CONDITIONS as V7_CONDITIONS, SEEDS, TEST_VARIANTS, merged, split_scene  # noqa: E402
 
-# 和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）；这里不导入 torch
+# 和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 去掉 po_jepa_rollout_sup 相同（测试核对）；这里不导入 torch。
+# 08 §6 的 po_jepa_rollout_sup 只进仿真数据集的任务表（make_v8_jobs.py --stage addon；Jerry 2026-11-12 定“仿真 12 个场景各一条”），
+# 不进这里的 v7 场景补跑
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
 STAGES = dict(pilot=dict(scenes=BASE_SCENES, n=200, updates=2000, seeds=SEEDS[:1]),
               full=dict(scenes=BASE_SCENES, n=2000, updates=10000, seeds=SEEDS))

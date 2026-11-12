@@ -57,7 +57,8 @@ def small(local, monkeypatch):
         return value
     monkeypatch.setattr(checks, "load_protocol", protocol)
     zero = e06_config(time_weight=0., space_weight=0.)
-    models = dict(fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer)
+    models = dict(fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer,
+                  po_jepa_rollout_sup=lambda: po(max_modes=20))
     monkeypatch.setattr(calibrate, "_jepa_only", lambda condition, device: (models[condition](), zero))
     monkeypatch.setattr(calibrate.data, "load_training_batch", lambda features, queries, device: e06_case()[1])
     return local
@@ -291,7 +292,8 @@ def test_make_v8_jobs_addon_stage():
     cal = [l for l in commands if " calibrate-addon " in l]
     check = [l for l in commands if " check-addon " in l]
     runs = [l for l in commands if l.startswith("python run.py run ")]
-    assert len(cal) == len(protocols.SCENES) == 7 and len(check) == 1 and len(runs) == 7*3*5
+    k = len(conditions.ADDON_CONDITIONS)
+    assert k == 6 and len(cal) == len(protocols.SCENES) == 7 and len(check) == 1 and len(runs) == 7*3*k
     assert len(commands) == len(cal)+len(check)+len(runs)+1 and commands[-1].startswith("python tools/summarize_v7.py --results ../results-v8/full ")
     assert all("--base-calibration local" in l and "--trajectories 2000 --updates 10000" in l for l in cal+check)
     assert not any("--base-calibration" in l for l in runs)
@@ -305,10 +307,30 @@ def test_make_v8_jobs_addon_stage():
             if l.startswith("python tools/long_rollout.py")]
     assert {shlex.split(l)[shlex.split(l).index("--job")+1] for l in long} == expected
     pilot = [l for l in _jobs("--stage", "addon-pilot") if not l.startswith("#")]
-    assert len([l for l in pilot if l.startswith("python run.py run ")]) == 7*1*5
+    assert len([l for l in pilot if l.startswith("python run.py run ")]) == 7*1*k
     assert all("--trajectories 200 --updates 2000" in l and "../results-v8/pilot/" in l for l in pilot if l.startswith("python run.py"))
     second = _jobs("--stage", "addon", "--scenes", "pendulum")
-    assert second[0].startswith("# 注意：二阶场景 pendulum") and len([l for l in second if " run.py run " in f" {l}"]) == 3*5
+    assert second[0].startswith("# 注意：二阶场景 pendulum") and len([l for l in second if " run.py run " in f" {l}"]) == 3*k
+
+
+def test_make_v8_jobs_addon_rollout_only_on_twelve_scenes():
+    """08 §6（Jerry 2026-11-12 定）：只排 po_jepa_rollout_sup，12 个场景各一条（正式 3 个种子 36 条、试跑 1 个种子 12 条），
+    补跑标定每个场景照样 1 条（三个要标定的条件一起标）。"""
+    from po_jepa import protocols
+    scenes = ",".join(protocols.ALL_SCENES)
+    for stage, seeds, root in (("addon", (1703, 1704, 1705), "full"), ("addon-pilot", (1703,), "pilot")):
+        lines = _jobs("--stage", stage, "--scenes", scenes, "--conditions", "po_jepa_rollout_sup")
+        runs = [l for l in lines if l.startswith("python run.py run ")]
+        cal = [l for l in lines if " calibrate-addon " in l]
+        assert len(protocols.ALL_SCENES) == 12 and len(cal) == 12 and len(runs) == 12*len(seeds)
+        assert all("--condition po_jepa_rollout_sup " in l for l in runs)
+        outputs = {shlex.split(l)[shlex.split(l).index("--output")+1] for l in runs}
+        names = protocols.ALL_SCENES   # 目录名就是场景名（landscape 的调节项已是规范写法）
+        assert outputs == {f"../results-v8/{root}/{n}/seed{seed}/po_jepa_rollout_sup" for n in names for seed in seeds}
+        assert "po_jepa_rollout_sup 的 λ_r" in "\n".join(lines)
+    both = _jobs("--stage", "addon", "--scenes", "push", "--conditions", "po_jepa_rollout_sup,koopman")
+    assert [shlex.split(l)[shlex.split(l).index("--condition")+1] for l in both if l.startswith("python run.py run ")][:2] == [
+        "koopman", "po_jepa_rollout_sup"]   # 按 ADDON_CONDITIONS 的顺序
 
 
 def test_make_v8_jobs_conditions_option():
@@ -323,8 +345,12 @@ def test_make_v8_jobs_conditions_option():
     assert space and all(("fixed_fourier" in l) != ("transformer_consistency" in l) for l in space)
     assert "koopman 还不能评空间采样" in _jobs("--stage", "space", "--conditions", "koopman", ok=False)
     assert "没有这些条件" in _jobs("--stage", "long", "--conditions", "fictional", ok=False)
-    for stage in ("full", "pilot", "addon"):
+    for stage in ("full", "pilot"):
         assert "--conditions 只用于" in _jobs("--stage", stage, "--conditions", "koopman", ok=False)
+    for stage in ("addon", "addon-pilot"):   # 08 §6 起 addon 阶段可以只排几个补跑条件，但只收补跑条件、不收重复
+        for bad in ("matched_transformer", "koopman,koopman"):
+            assert "的 --conditions 只能是不重复的补跑条件" in _jobs("--stage", stage, "--conditions", bad, ok=False)
+        assert "没有这些条件" in _jobs("--stage", stage, "--conditions", "koopman,fictional", ok=False)
     for stage in ("pilot", "full", "variants", "strength", "long", "timing", "space"):      # 默认任务表不排补跑条件
         assert not any(c in l for l in _jobs("--stage", stage) for c in conditions.ADDON_CONDITIONS)
 
@@ -342,7 +368,7 @@ def test_every_addon_command_passes_run_py(tmp_path, monkeypatch):
         Path(argv[argv.index("--features-root")+1]).mkdir(parents=True, exist_ok=True)
         assert run.main(argv[2:]) == 0, line
         count += 1
-    assert count == 2+1+2*3*5
+    assert count == 2+1+2*3*len(conditions.ADDON_CONDITIONS)
 
 
 # ---------- 汇总 ----------
@@ -386,7 +412,8 @@ def test_summarize_with_addon_conditions(tmp_path, monkeypatch):
         _job(tmp_path/"r", c, 1703, h, value=.25)
     summary = _summarize(tmp_path/"r", tmp_path/"o", monkeypatch)
     assert summary["problems"] == []
-    assert summary["missing"] == [dict(dataset="push-2000", updates=10000, seed=1703, condition="koopman")]
+    assert summary["missing"] == [dict(dataset="push-2000", updates=10000, seed=1703, condition=c)
+                                  for c in ("koopman", "po_jepa_rollout_sup")]
     assert {r["condition"] for r in summary["table"]} == set(V7)|set(addon)
     refs = {c["reference"]: c["future"]["mean"] for c in summary["comparisons"]}
     assert refs["fixed_fourier"] == pytest.approx(.25) and refs["matched_transformer"] == pytest.approx(0.)
@@ -396,7 +423,8 @@ def test_summarize_with_addon_conditions(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("condition,reference", [("po_jepa_time_only", "po_jepa_full"), ("po_jepa_space_only", "po_jepa_full"),
-                                                 ("fixed_fourier", "po_jepa_full"), ("transformer_consistency", "matched_transformer")])
+                                                 ("fixed_fourier", "po_jepa_full"), ("transformer_consistency", "matched_transformer"),
+                                                 ("po_jepa_rollout_sup", "po_jepa_full")])
 def test_summarize_checks_initial_weights(tmp_path, monkeypatch, condition, reference):
     for c, h in V7.items():
         _job(tmp_path/"r", c, 1703, h)

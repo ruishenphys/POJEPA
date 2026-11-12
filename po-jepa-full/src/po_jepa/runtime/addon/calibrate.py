@@ -1,10 +1,13 @@
-"""16 §3.2：run.py calibrate-addon——transformer_consistency、fixed_fourier 各自的一致性权重 λ。
+"""16 §3.2：run.py calibrate-addon——transformer_consistency、fixed_fourier 各自的一致性权重 λ，po_jepa_rollout_sup 的 λ_r。
 
 方法和 v7 的 workflow.calibrate_weights 相同：种子 1703；σ_z 用导入的 v7 标定（load_protocol 读，不重新标定）；只用 JEPA 的
 版本（transformer_consistency 用 matched_transformer 的模型，fixed_fourier 用两个权重为 0 的 fixed_fourier）先在初始状态下量
 训练查询序列前 batches 批的三项梯度范数（只记录），再用前 pretrain_updates 批只做 JEPA 训练（学习率调度、裁剪和正式训练
 相同），然后在紧接着的 batches 批上量三项梯度范数、取中位数：λ_c = ρ·median|∇L_JEPA| / median|∇L_c|。分母为 0 时报错。
-两个条件都完成后才写文件：任务目录里的 calibration-<条件>.json，最后一次性写 configs/calibration/addon/<tag>-u<步数>.yaml
+po_jepa_rollout_sup（08 §6）：JEPA 预训练和 v7 的 calibrate 完全相同（po_jepa_no_consistency 的模型和单步），量的是
+L_JEPA、L_roll、L_space 三项，只标定 λ_r = ρ·median|∇L_JEPA| / median|∇L_roll|（写在 time_weight 那格）；space_weight
+不重标，原样用基础标定的 λ_s（和 po_jepa_full 相同）。
+全部条件都完成后才写文件：任务目录里的 calibration-<条件>.json，最后一次性写 configs/calibration/addon/<tag>-u<步数>.yaml
 （calibration.load_addon_weights 读）。中途失败不留下这两种文件。
 """
 
@@ -99,21 +102,32 @@ def _jepa_only(condition, device):
         return build_fixed_fourier(config["model"], check.model_seed(), device), replace(loss, time_weight=0., space_weight=0.)
     if condition == "transformer_consistency":
         return comparison.build_condition("matched_transformer", device)
-    raise ValueError("only fixed_fourier and transformer_consistency use the add-on calibration")
+    if condition == "po_jepa_rollout_sup":   # 08 §6：和 v7 的 workflow.calibrate_weights 相同的模型和零权重
+        return comparison.build_condition("po_jepa_no_consistency", device)
+    raise ValueError(f"only {', '.join(calibration.CALIBRATED_CONDITIONS)} use the add-on calibration")
 
 
 def _gradient_norms(condition, model, batch, loss) -> dict:
     """三项梯度范数，键 jepa、time、space、grad_jepa、grad_time、grad_space（16 §3.2 第 5 步）。"""
     if condition == "transformer_consistency":
         return calibration.generic_gradient_norms(model, batch, loss_config=loss)
+    if condition == "po_jepa_rollout_sup":   # time 一格是 L_roll（08 §6）
+        return calibration.rollout_gradient_norms(model, batch, loss_config=loss)
     return training.consistency_gradient_norms(model, batch, loss_config=loss)
 
 
 def _pretrain_step(condition, model, optimizer, batch, loss, completed):
-    """只做 JEPA 的一步：Transformer 走 matched_transformer 的单步，fixed_fourier 和 v7 的 calibrate 一样走 no_consistency。"""
+    """只做 JEPA 的一步：Transformer 走 matched_transformer 的单步，fixed_fourier、po_jepa_rollout_sup 和 v7 的 calibrate
+    一样走 no_consistency。"""
     if condition == "transformer_consistency":
         return comparison.condition_step("matched_transformer", model, optimizer, batch, loss, completed)
     return training.train_step(model, optimizer, batch, loss_config=loss, completed_steps=completed, condition="no_consistency")
+
+
+# 每个条件标定哪几个 λ（键是 _gradient_norms 返回的梯度范数名）；po_jepa_rollout_sup 只标 time 那格的 λ_r（08 §6）
+CALIBRATED_TERMS = dict(fixed_fourier=(("time_weight", "grad_time"), ("space_weight", "grad_space")),
+                        transformer_consistency=(("time_weight", "grad_time"), ("space_weight", "grad_space")),
+                        po_jepa_rollout_sup=(("time_weight", "grad_time"),))
 
 
 def _summary(rows) -> dict:
@@ -123,7 +137,7 @@ def _summary(rows) -> dict:
 
 def calibrate_condition(condition, features, device) -> dict:
     """一个条件的标定记录。键是 v7 calibration.json 的键加 condition；v7_calibration_file、v4_overlay_sha256_after 等
-    由 calibrate_addon 在两个条件都完成后补上。"""
+    由 calibrate_addon 在全部条件都完成后补上。"""
     config = check.load_protocol()
     cal = config["calibration"]
     pre, count, rho = cal["pretrain_updates"], cal["batches"], cal["rho"]
@@ -149,7 +163,11 @@ def calibrate_condition(condition, features, device) -> dict:
     after, before = _summary(measured), _summary(initial)
     median = after["median"]
     weights, initial_weights = {}, {}
-    for name, key in (("time_weight", "grad_time"), ("space_weight", "grad_space")):
+    if condition == "po_jepa_rollout_sup":   # 08 §6：λ_s 不重标，用基础标定的值（协议 loss.space_weight）
+        weights["space_weight"] = config["loss"]["space_weight"]
+        if type(weights["space_weight"]) not in (int, float) or not (math.isfinite(weights["space_weight"]) and weights["space_weight"] > 0):
+            raise ValueError("po_jepa_rollout_sup needs a finite positive base space_weight (run.py calibrate first)")
+    for name, key in CALIBRATED_TERMS[condition]:
         if not median[key] > 0:
             raise ValueError(f"{condition}: median {key} = {median[key]!r}; λ 的分母为 0，不能标定（不除出 inf）")
         weights[name] = rho*median["grad_jepa"]/median[key]
@@ -163,7 +181,9 @@ def calibrate_condition(condition, features, device) -> dict:
                 initial_state=dict(per_batch=initial, **before, **initial_weights), **weights,
                 graph=dict(sigma_x=graph["sigma_x"], sigma_z=graph["sigma_z"], max_modes=graph["max_modes"]),
                 v4_overlay_sha256_before=cache.file_sha(OVERLAY),
-                note="仿真补跑标定；λ 写进 configs/calibration/addon/，三个种子共用")
+                space_weight_source="base_calibration" if condition == "po_jepa_rollout_sup" else "calibrated",
+                note="仿真补跑标定；λ 写进 configs/calibration/addon/，三个种子共用"
+                     + ("；po_jepa_rollout_sup 的 time 一格是 L_roll，time_weight 即 λ_r" if condition == "po_jepa_rollout_sup" else ""))
 
 
 def _relative(path: Path) -> str:

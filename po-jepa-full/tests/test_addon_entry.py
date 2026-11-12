@@ -25,7 +25,7 @@ from test_training import e06_case, e06_config
 CPU = torch.device("cpu")
 V7_KEYS = {"rho", "batches", "statistic", "method", "pretrain_updates", "pretrain_history", "per_batch", "median", "mean",
            "initial_state", "time_weight", "space_weight", "graph", "v4_overlay_sha256_before", "note",
-           "v7_calibration_file", "v4_overlay_sha256_after"}
+           "v7_calibration_file", "v4_overlay_sha256_after", "space_weight_source"}
 
 
 @pytest.fixture
@@ -65,7 +65,8 @@ def small(v7, monkeypatch):
         return value
     monkeypatch.setattr(checks, "load_protocol", protocol)
     zero = e06_config(time_weight=0., space_weight=0.)
-    models = dict(fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer)
+    models = dict(fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer,
+                  po_jepa_rollout_sup=lambda: po(max_modes=20))
     monkeypatch.setattr(calibrate, "_jepa_only", lambda condition, device: (models[condition](), zero))
     monkeypatch.setattr(calibrate.data, "load_training_batch", lambda features, queries, device: e06_case()[1])
     return v7
@@ -95,15 +96,25 @@ def test_calibrate_addon_writes_yaml_and_records(small, tmp_path, one_thread):
         assert record["condition"] == condition and len(record["per_batch"]) == 2 and len(record["pretrain_history"]) == 3
         assert [r["step"] for r in record["pretrain_history"]] == [1, 2, 3] and len(record["initial_state"]["per_batch"]) == 2
         rows = record["per_batch"]
+        rollout = condition == "po_jepa_rollout_sup"
+        assert record["space_weight_source"] == ("base_calibration" if rollout else "calibrated")
         for name, key in (("time_weight", "grad_time"), ("space_weight", "grad_space")):     # λ 按同一组梯度范数手算
             expected = 1.0*statistics.median(r["grad_jepa"] for r in rows)/statistics.median(r[key] for r in rows)
+            if rollout and name == "space_weight":   # 08 §6：λ_s 不重标，是基础标定的值
+                assert entry_value[name] == record[name] == 4.0 and expected != 4.0
+                continue
             assert entry_value[name] == record[name] == expected and math.isfinite(expected) and expected > 0
         assert calibration.load_addon_weights(condition) == dict(time_weight=entry_value["time_weight"], space_weight=entry_value["space_weight"])
     tc = json.loads((output/"calibration-transformer_consistency.json").read_text(encoding="utf-8"))
     # 登记的初始化下 p_out 为零，一致性梯度恰为 0：初始状态的 λ 记 None（S10b §9 第 13 条），300 步之后的不为 0
     assert all(r["grad_time"] == 0. and r["grad_space"] == 0. for r in tc["initial_state"]["per_batch"])
     assert tc["initial_state"]["time_weight"] is None and tc["initial_state"]["space_weight"] is None
-    assert sorted(p.name for p in output.iterdir()) == ["calibration-fixed_fourier.json", "calibration-transformer_consistency.json"]
+    assert sorted(p.name for p in output.iterdir()) == ["calibration-fixed_fourier.json", "calibration-po_jepa_rollout_sup.json",
+                                                        "calibration-transformer_consistency.json"]
+    # 08 §6：rollout 的 time 一格是 L_roll（composed 对真值的 JEPA 距离），不是时间一致性；初始状态只记 time_weight
+    ro = json.loads((output/"calibration-po_jepa_rollout_sup.json").read_text(encoding="utf-8"))
+    assert set(ro["initial_state"]) == {"per_batch", "median", "mean", "time_weight"}
+    assert all(r["time"] > 0 and r["grad_time"] > 0 for r in ro["per_batch"])
     assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
 
 
@@ -136,10 +147,14 @@ def test_lambda_equals_hand_computed_value(small, tmp_path, monkeypatch):
         fixed_fourier=[dict(grad_jepa=2., grad_time=8., grad_space=.5), dict(grad_jepa=4., grad_time=4., grad_space=1.5),
                        dict(grad_jepa=9., grad_time=1., grad_space=1.)],
         transformer_consistency=[dict(grad_jepa=1., grad_time=3., grad_space=2.), dict(grad_jepa=5., grad_time=1., grad_space=2.),
-                                 dict(grad_jepa=3., grad_time=8., grad_space=6.)]), count=3)
+                                 dict(grad_jepa=3., grad_time=8., grad_space=6.)],
+        po_jepa_rollout_sup=[dict(grad_jepa=2., grad_time=5., grad_space=0.), dict(grad_jepa=6., grad_time=2., grad_space=0.),
+                             dict(grad_jepa=7., grad_time=4., grad_space=0.)]), count=3)
     payload, _ = run_calibration(tmp_path)
     assert payload["fixed_fourier"]["time_weight"] == 4./4. and payload["fixed_fourier"]["space_weight"] == 4./1.
     assert payload["transformer_consistency"]["time_weight"] == 3./3. and payload["transformer_consistency"]["space_weight"] == 3./2.
+    # 08 §6：λ_r = 6/4；空间梯度为 0 也不报错（不标 λ_s），space_weight 是基础标定的 4.0
+    assert payload["po_jepa_rollout_sup"]["time_weight"] == 6./4. and payload["po_jepa_rollout_sup"]["space_weight"] == 4.0
 
 
 @pytest.mark.parametrize("bad", [dict(grad_time=0.), dict(grad_space=0.)])
@@ -263,7 +278,11 @@ def test_jepa_only_versions_and_initial_hashes(v7):
     model, loss = calibrate._jepa_only("transformer_consistency", CPU)
     reference, _ = comparison.build_condition("matched_transformer", CPU)
     assert v7jobs._model_hash(model) == v7jobs._model_hash(reference) and (loss.time_weight, loss.space_weight) == (0., 0.)
-    with pytest.raises(ValueError, match="^only fixed_fourier and transformer_consistency"):
+    model, loss = calibrate._jepa_only("po_jepa_rollout_sup", CPU)   # 08 §6：就是 v7 calibrate 用的 po_jepa_no_consistency
+    reference, reference_loss = comparison.build_condition("po_jepa_no_consistency", CPU)
+    assert v7jobs._model_hash(model) == v7jobs._model_hash(reference) == v7jobs._model_hash(full)
+    assert loss == reference_loss and (loss.time_weight, loss.space_weight) == (0., 0.)
+    with pytest.raises(ValueError, match="^only fixed_fourier, transformer_consistency, po_jepa_rollout_sup"):
         calibrate._jepa_only("koopman", CPU)
 
 
@@ -271,10 +290,11 @@ def test_jepa_only_versions_and_initial_hashes(v7):
 
 def test_initial_relations():
     hashes = dict(po_jepa_full="a", matched_transformer="b", po_jepa_time_only="a", po_jepa_space_only="a",
-                  fixed_fourier="a", transformer_consistency="b", koopman="c")
+                  fixed_fourier="a", transformer_consistency="b", koopman="c", po_jepa_rollout_sup="a")
     assert check_addon.initial_relations(hashes) == dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full",
-        fixed_fourier="po_jepa_full", transformer_consistency="matched_transformer", koopman=None)
+        fixed_fourier="po_jepa_full", transformer_consistency="matched_transformer", koopman=None, po_jepa_rollout_sup="po_jepa_full")
     for condition, reference in (("po_jepa_time_only", "po_jepa_full"), ("fixed_fourier", "po_jepa_full"),
+                                 ("po_jepa_rollout_sup", "po_jepa_full"),
                                  ("po_jepa_space_only", "po_jepa_full"), ("transformer_consistency", "matched_transformer")):
         with pytest.raises(ValueError, match=f"^{condition} 的初始权重和 {reference} 不同"):
             check_addon.initial_relations(dict(hashes, **{condition: "x"}))

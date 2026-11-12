@@ -79,6 +79,7 @@ def consumer_sources():
                   "src/po_jepa/datasets.py"]
         # 07 §2.7：补跑新条件的源码（runtime/addon/ 下全部 .py，后续段加的文件也自动进来）
         names += ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py",
+                  "src/po_jepa/rollout_supervision.py",   # 08 §6：po_jepa_rollout_sup 的滚动损失
                   *sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/"src/po_jepa/runtime/addon").glob("*.py"))]
     for name in names:
         sources[name] = data.cache.file_sha(ROOT/name)

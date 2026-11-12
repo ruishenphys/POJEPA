@@ -277,7 +277,8 @@ def test_ac_family_snapshot():
 def test_condition_list_and_data_fields():
     assert v7load.D4_CONDITIONS == ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small",
                                     "vjepa2_ac", "po_jepa_time_only", "po_jepa_space_only", "transformer_consistency",
-                                    "fixed_fourier", "koopman")
+                                    "fixed_fourier", "koopman", "po_jepa_rollout_sup")
+    assert v7load.PO_LABELS["po_jepa_rollout_sup"] == addon_conditions.LOSS_LABELS["po_jepa_rollout_sup"] == "rollout_sup"   # 08 §6
     assert v7load.DATA_FIELDS == ("evidence_role", "split", "paper_sha256", "upstream_commit", "encoder_checkpoint_sha256",
                                   "preprocess_sha256", "feature_manifest_sha256", "protocol_sha256")
     with pytest.raises(ValueError, match="--condition"):

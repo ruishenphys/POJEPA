@@ -26,7 +26,7 @@ def main(argv=None):
     parser.add_argument('--updates',type=int,required=True,choices=(2000,10000),help='v7：每个条件的训练步数（2000 试跑，10000 正式）')
     parser.add_argument('--condition',choices=('po_jepa_full','po_jepa_no_consistency','matched_transformer','identity',
                         'vjepa2_ac_small','vjepa2_ac','po_jepa_time_only','po_jepa_space_only','transformer_consistency',
-                        'fixed_fourier','koopman'),help='v7：run/resume/evaluate 每次只跑一个条件，可并行提交（后 5 个是补跑的新条件，07 §2.6）')
+                        'fixed_fourier','koopman','po_jepa_rollout_sup'),help='v7：run/resume/evaluate 每次只跑一个条件，可并行提交（后 6 个是补跑的新条件，07 §2.6、08 §6）')
     parser.add_argument('--ac-checkpoint',type=Path,help='v7：vjepa2_ac 需要的官方权重 vjepa2-ac-vitg.pt')
     parser.add_argument('--test-variant',help='v7 transfer：测试集的调节项（--system/--variant/--trajectories 写训练用的基础数据集）')
     parser.add_argument('--base-calibration',choices=('v7-import','local'),help='S26a，只用于 calibrate-addon/check-addon：基础标定的来源；默认 v7-import（导入的 v7 标定），v8 任务表的补跑用 local（本目录 run.py calibrate 写的）')

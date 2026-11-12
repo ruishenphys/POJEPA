@@ -1,4 +1,4 @@
-"""S10b：5 个新条件的分发（07 §2.4–§2.7，08）——名单、构造和初始权重、单步和读出次数、20 步续训、检查点读回和隔离、
+"""S10b：6 个新条件（08 §6 的 po_jepa_rollout_sup 2026-11-12 加）的分发（07 §2.4–§2.7，08）——名单、构造和初始权重、单步和读出次数、20 步续训、检查点读回和隔离、
 评测分发、监控名单、补跑标定读取、登记核对、来源登记和入口。全部是 CPU 上的虚构小模型和合成批。"""
 
 import copy
@@ -29,7 +29,7 @@ from test_training import e06_case, e06_config, v4_loss_fields
 
 CPU = torch.device("cpu")
 from po_jepa import datasets
-ADDON = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
+ADDON = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman", "po_jepa_rollout_sup")
 KOOPMAN_MODES = 5   # E=3 时参数量 451 + 448K
 
 
@@ -91,7 +91,8 @@ def case(condition):
     """(模型, 合成批, 损失配置)：PO 类和 transformer_consistency 用 e06 的 4×6→2×3 批，koopman 用 16×16 批。"""
     _, batch = e06_case()
     model = dict(po_jepa_time_only=lambda: po(max_modes=20), po_jepa_space_only=lambda: po(max_modes=20),
-                 fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer, koopman=koopman_model)[condition]()
+                 fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer, koopman=koopman_model,
+                 po_jepa_rollout_sup=lambda: po(max_modes=20))[condition]()
     weights = dict(po_jepa_time_only=(1e-3, 0.), po_jepa_space_only=(0., 1e-3), koopman=(0., 0.)).get(condition, (1e-3, 1e-3))
     if condition == "koopman":
         batch = batch16(batch)
@@ -109,7 +110,8 @@ def test_condition_lists_labels_and_entry_points():
     assert comparison.ALL_CONDITIONS == (*comparison.V7_CONDITIONS, *ADDON) and "identity" not in comparison.ALL_CONDITIONS
     assert comparison.V7_CONDITIONS == ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full", "vjepa2_ac", "vjepa2_ac_small")
     assert conditions.LOSS_LABELS == dict(po_jepa_time_only="time_only", po_jepa_space_only="space_only",
-                                          transformer_consistency="full", fixed_fourier="full", koopman="no_consistency")
+                                          transformer_consistency="full", fixed_fourier="full", koopman="no_consistency",
+                                          po_jepa_rollout_sup="rollout_sup")
     assert evaluation.CONDITIONS == ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full", "identity",
                                      "vjepa2_ac", "vjepa2_ac_small", *ADDON)
     assert v7jobs.JOB_CONDITIONS == ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity",
@@ -146,14 +148,16 @@ def test_build_condition_weights_and_initial_hashes(monkeypatch, request, protoc
         request.getfixturevalue("v7")
     monkeypatch.setattr(calibration, "load_addon_weights",
                         lambda condition: dict(fixed_fourier=dict(time_weight=.25, space_weight=.5),
-                                               transformer_consistency=dict(time_weight=.125, space_weight=.0625))[condition])
+                                               transformer_consistency=dict(time_weight=.125, space_weight=.0625),
+                                               po_jepa_rollout_sup=dict(time_weight=.375, space_weight=7.))[condition])
     config = checks.load_protocol()
     before = torch.get_rng_state().clone()
     built = {name: comparison.build_condition(name, CPU) for name in ("po_jepa_full", "matched_transformer", *ADDON)}
     assert torch.equal(before, torch.get_rng_state())
     full_hash = v7jobs._model_hash(built["po_jepa_full"][0])
-    for name in ("po_jepa_time_only", "po_jepa_space_only", "fixed_fourier"):
+    for name in ("po_jepa_time_only", "po_jepa_space_only", "fixed_fourier", "po_jepa_rollout_sup"):
         assert v7jobs._model_hash(built[name][0]) == full_hash
+    assert type(built["po_jepa_rollout_sup"][0].spectrum) is GraphSpectrum
     assert type(built["fixed_fourier"][0].spectrum) is FourierSpectrum
     assert type(built["po_jepa_time_only"][0].spectrum) is GraphSpectrum
     assert v7jobs._model_hash(built["transformer_consistency"][0]) == v7jobs._model_hash(built["matched_transformer"][0])
@@ -169,6 +173,7 @@ def test_build_condition_weights_and_initial_hashes(monkeypatch, request, protoc
     assert weights["po_jepa_time_only"] == (lt, 0.) and weights["po_jepa_space_only"] == (0., ls)
     assert weights["fixed_fourier"] == (.25, .5) and weights["transformer_consistency"] == (.125, .0625)
     assert weights["koopman"] == (0., 0.)
+    assert weights["po_jepa_rollout_sup"] == (.375, ls)   # 08 §6：λ_r 来自补跑标定，λ_s 用协议的（不读补跑文件里的那格）
     reference = built["po_jepa_full"][1]
     for name in ADDON:
         assert replace(built[name][1], time_weight=lt, space_weight=ls) == reference
@@ -217,7 +222,7 @@ def test_koopman_optimizer_contract():
 
 @pytest.mark.parametrize("condition, readouts, phi_calls", [
     ("po_jepa_time_only", 10, 5), ("po_jepa_space_only", 10, 5), ("fixed_fourier", 10, 5),
-    ("transformer_consistency", 6, 6), ("koopman", 2, 1)])
+    ("transformer_consistency", 6, 6), ("koopman", 2, 1), ("po_jepa_rollout_sup", 10, 5)])
 def test_one_update_readouts_and_all_gradients(one_thread, condition, readouts, phi_calls):
     model, batch, config = case(condition)
     optimizer = comparison.make_optimizer(model)
@@ -330,12 +335,13 @@ def test_consistency_share_dispatch(monkeypatch, condition):
     fake = dict(jepa=1., time=2., space=3., grad_jepa=4., grad_time=8., grad_space=2.)
     monkeypatch.setattr(training, "consistency_gradient_norms", lambda *a, **k: seen.append("po") or fake)
     monkeypatch.setattr(calibration, "generic_gradient_norms", lambda *a, **k: seen.append("generic") or fake)
+    monkeypatch.setattr(calibration, "rollout_gradient_norms", lambda *a, **k: seen.append("rollout") or fake)
     assert comparison.consistency_share(condition, model, batch, config, 3) is None
     result = comparison.consistency_share(condition, model, batch, config, 2)
     if condition == "koopman":
         assert result is None and seen == []
         return
-    assert seen == ["generic" if condition == "transformer_consistency" else "po"]
+    assert seen == [dict(transformer_consistency="generic", po_jepa_rollout_sup="rollout").get(condition, "po")]
     assert result == dict(**fake, warmup_scale=1.,
                           share=dict(time=config.time_weight*8./4., space=config.space_weight*2./4.))
 
@@ -696,7 +702,8 @@ def test_load_selected_errors(tmp_path, monkeypatch):
 
 def _eval_model(condition):
     return dict(po_jepa_time_only=lambda: po(max_modes=20), po_jepa_space_only=lambda: po(max_modes=20),
-                fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer, koopman=koopman_model)[condition]()
+                fixed_fourier=lambda: po("fourier"), transformer_consistency=transformer, koopman=koopman_model,
+                po_jepa_rollout_sup=lambda: po(max_modes=20))[condition]()
 
 
 @pytest.mark.parametrize("condition", ADDON)
@@ -724,7 +731,8 @@ def test_validation_metrics_accept_new_models(condition):
 
 @pytest.mark.parametrize("condition, wrong", [
     ("fixed_fourier", lambda: po("graph")), ("po_jepa_time_only", lambda: po("fourier")),
-    ("po_jepa_space_only", transformer), ("transformer_consistency", koopman_model), ("koopman", transformer)])
+    ("po_jepa_space_only", transformer), ("transformer_consistency", koopman_model), ("koopman", transformer),
+    ("po_jepa_rollout_sup", lambda: po("fourier"))])
 def test_evaluation_rejects_wrong_model_type(tmp_path, condition, wrong):
     with pytest.raises(TypeError, match="^condition/model type mismatch$"):
         evaluation.run_prepared_evaluation(wrong(), condition, tmp_path/"none", tmp_path/"run", e06_config(),
@@ -756,10 +764,12 @@ def addon_files(monkeypatch, tmp_path):
     path = tmp_path/"addon.yaml"
     monkeypatch.setattr(checks, "v7_calibration_path", lambda: v7)
     monkeypatch.setattr(calibration, "addon_calibration_path", lambda: path)
-    monkeypatch.setattr(checks, "load_protocol", lambda: dict(calibration=dict(rho=1.), model=dict(graph=dict(sigma_z=.5))))
+    monkeypatch.setattr(checks, "load_protocol", lambda: dict(calibration=dict(rho=1.), model=dict(graph=dict(sigma_z=.5)),
+                                                              loss=dict(space_weight=4.)))
     def write(**changes):
         value = dict(fixed_fourier=dict(rho=1., space_weight=.5, time_weight=.25, source="fictional"),
                      transformer_consistency=dict(rho=1., space_weight=2, time_weight=1e-3, source="fictional"),
+                     po_jepa_rollout_sup=dict(rho=1., space_weight=4., time_weight=.75, source="fictional"),
                      sigma_z_used=.5, v7_calibration_sha256=w.cache.file_sha(v7))
         value.update(changes)
         path.write_text(yaml.safe_dump(value), encoding="utf-8")
@@ -775,10 +785,11 @@ def test_addon_calibration_reads_and_validates(addon_files):
     assert calibration.load_addon_weights("fixed_fourier") == dict(time_weight=.25, space_weight=.5)
     weights = calibration.load_addon_weights("transformer_consistency")
     assert weights == dict(time_weight=1e-3, space_weight=2.) and type(weights["space_weight"]) is float
+    assert calibration.load_addon_weights("po_jepa_rollout_sup") == dict(time_weight=.75, space_weight=4.)
     calibration.require_addon_calibration()
     entry = value["fixed_fourier"]
     cases = [
-        (dict(extra=1), "^add-on calibration must contain exactly fixed_fourier, transformer_consistency, sigma_z_used, v7_calibration_sha256$"),
+        (dict(extra=1), "^add-on calibration must contain exactly fixed_fourier, po_jepa_rollout_sup, sigma_z_used, transformer_consistency, v7_calibration_sha256$"),
         (dict(fixed_fourier=entry | dict(extra=1)), "^add-on calibration entry fixed_fourier must contain exactly rho, space_weight, time_weight, source$"),
         (dict(fixed_fourier=entry | dict(time_weight=0.)), "^add-on calibration fixed_fourier.time_weight must be a finite positive number$"),
         (dict(fixed_fourier=entry | dict(space_weight=True)), "^add-on calibration fixed_fourier.space_weight must be a finite positive number$"),
@@ -793,6 +804,18 @@ def test_addon_calibration_reads_and_validates(addon_files):
         write(**changes)
         with pytest.raises(ValueError, match=message):
             calibration.load_addon_weights("fixed_fourier")
+    # 08 §6：po_jepa_rollout_sup 的 space_weight 必须等于协议（基础标定）的 λ_s，不收另标的值；文件少这一项也不收
+    write(po_jepa_rollout_sup=value["po_jepa_rollout_sup"] | dict(space_weight=4.5))
+    assert calibration.load_addon_weights("fixed_fourier") == dict(time_weight=.25, space_weight=.5)
+    with pytest.raises(ValueError, match="^add-on calibration po_jepa_rollout_sup.space_weight differs from the protocol"):
+        calibration.load_addon_weights("po_jepa_rollout_sup")
+    with pytest.raises(ValueError, match="^add-on calibration po_jepa_rollout_sup.space_weight differs from the protocol"):
+        calibration.require_addon_calibration()
+    old = write()
+    del old["po_jepa_rollout_sup"]
+    path.write_text(yaml.safe_dump(old), encoding="utf-8")
+    with pytest.raises(ValueError, match="^add-on calibration must contain exactly"):
+        calibration.load_addon_weights("fixed_fourier")
     path.write_text("[1, 2]\n", encoding="utf-8")
     with pytest.raises(ValueError, match="^add-on calibration must contain exactly"):
         calibration.load_addon_weights("fixed_fourier")
@@ -800,7 +823,7 @@ def test_addon_calibration_reads_and_validates(addon_files):
     v7.unlink()
     with pytest.raises(ValueError, match="^add-on calibration was made against a different v7 calibration file$"):
         calibration.load_addon_weights("fixed_fourier")
-    with pytest.raises(ValueError, match="^only fixed_fourier and transformer_consistency use the add-on calibration$"):
+    with pytest.raises(ValueError, match="^only fixed_fourier, transformer_consistency, po_jepa_rollout_sup use the add-on calibration$"):
         calibration.load_addon_weights("koopman")
 
 
@@ -825,7 +848,8 @@ def test_workflow_requires_addon_calibration(v7, monkeypatch, tmp_path, conditio
     monkeypatch.setattr(v7jobs, "run_job", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fictional job reached")))
     args = Namespace(command="run", device="cuda:0", features_root=tmp_path/"absent", output=tmp_path/"run", condition=condition,
                      resume_from=None, training_run=None)
-    needs = condition in ("transformer_consistency", "fixed_fourier")
+    needs = condition in ("transformer_consistency", "fixed_fourier", "po_jepa_rollout_sup")
+    assert needs is (condition in calibration.CALIBRATED_CONDITIONS)
     with pytest.raises(ValueError if needs else RuntimeError, match="fictional missing add-on calibration" if needs else "fictional job reached"):
         w.execute(args)
     assert calls == (["v7", "addon"] if needs else ["v7"])
@@ -877,7 +901,8 @@ def test_consumer_sources_register_new_files(v7, monkeypatch):
     sources = comparison.consumer_sources()
     addon = sorted(p.relative_to(comparison.ROOT).as_posix() for p in (comparison.ROOT/"src/po_jepa/runtime/addon").glob("*.py"))
     assert {"__init__.py", "calibration.py", "conditions.py"} <= {name.rsplit("/", 1)[1] for name in addon}   # S17、S18 加的文件也在这里
-    added = ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py", *addon]
+    added = ["src/po_jepa/fourier.py", "src/po_jepa/koopman.py", "src/po_jepa/generic_consistency.py", "src/po_jepa/ln_metrics.py",
+             "src/po_jepa/rollout_supervision.py", *addon]
     assert checks.is_v7()
     assert list(sources)[-len(added):] == added
     for name in added:

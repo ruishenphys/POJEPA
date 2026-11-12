@@ -217,10 +217,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "984331579dfbba9aaee56d316b8c6ec654cbc3a25623e8ad70b6c426dcfabcc6",
+      "candidate_sha256": "8f8d6149b4cde63790b23099b696c51f661abdd90672ab99813ae85b97c8e5e3",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "c5202ac6e4351dab6d5b2e7ea88bcfdcbf086011519a8fe8f03c59114a4700d7",
+      "executable_ast_sha256": "c09d950627ebc18703390c6d8c4153f97f718b27558a42d67ed018095ebe9852",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "v7_previous_candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b"
@@ -370,9 +370,9 @@
         "train_step"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "b74c3f343d1722bd3d1d1b09cb4b8caca7449c2b2be31fb046b969e149a41b77",
+      "candidate_sha256": "4cca8aa527cd618435b586ab06cbb902f05c5d92eb5dcc165645699957f5615e",
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
-      "executable_ast_sha256": "2c63913560716ca3df0d8dce9a00a11ae8997713ece30c9e2b2e7f1047b8adff",
+      "executable_ast_sha256": "7cebf80c1a476b6223db1532e57be8f4cf2798eecc3882f726fa66f02c206022",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71",
       "v7_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
@@ -383,9 +383,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "fba54f265e78bdfe0b05db628f82348a4daba2d5863972b0a56a8510299123c1",
+      "candidate_sha256": "e4ef1bc5663261749bc40d29b85bfab9f419d989e7ca6fab7a490a443443dff1",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "abb7b872c9a17fe02fc5cdcf80ed5e794189487eae7a71c0bdb7fb7d2fa83fc8",
+      "executable_ast_sha256": "ba446e523800f7109bd77c2ad0c88e1a6079f78cd258b10c18aed1cc5acc9933",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "v7_previous_candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df"

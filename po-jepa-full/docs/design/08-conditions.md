@@ -2,7 +2,7 @@
 
 ## 1. 条件总表
 
-### 1.1 仿真（v7 的 6 个加补跑的 5 个）
+### 1.1 仿真（v7 的 6 个加补跑的 6 个）
 
 | 条件 | 来源 | 模型 | λ_t | λ_s | 损失标签 | 每次更新的 Φ 次数 | 每次更新的 p_out 次数 | 参数量（m = 2） |
 |---|---|---|---|---|---|---|---|---|
@@ -17,6 +17,7 @@
 | transformer_consistency | 补跑 | 与 matched_transformer 完全相同 | 补跑标定 | 补跑标定 | full | 6 | 6 | 同 matched_transformer |
 | fixed_fourier | 补跑 | POJEPA + FourierSpectrum | 补跑标定 | 补跑标定 | full | 5 | 10 | 227,617 |
 | koopman | 补跑 | KoopmanPredictor，K = 103 | 0 | 0 | no_consistency | 1 | 2 | 227,840 |
+| po_jepa_rollout_sup | 补跑（§6，2026-11-12） | 与 full 完全相同 | 时间项换成 L_roll，权重 λ_r 补跑标定 | v7 full 的 λ_s | rollout_sup | 5 | 10 | 227,617 |
 
 参数量是 v7 协议（`PO_JEPA_PROTOCOL=v7`，v7 提交 0ac45fe，`configs/train/v7.yaml` 设 `model.dynamics.forcing_space: token`）下用代码数的：PO-JEPA 是 token 写法，227,617（含 `p_out.bias` 的 1,408）；fixed_fourier 和它同结构，也是 227,617。v6 协议（不设 `PO_JEPA_PROTOCOL=v7`）下 PO-JEPA 仍是模态写法 215,778。
 
@@ -32,7 +33,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 
 同一场景、同一种子下：
 
-- po_jepa_time_only、po_jepa_space_only、fixed_fourier 的 `initial_model_sha256`（`v7jobs._model_hash`）必须等于 v7 那次 po_jepa_full 的值。fixed_fourier 也能相等，因为 `FourierSpectrum` 不加参数和 buffer，构造时消耗的随机数和 `GraphSpectrum` 相同。
+- po_jepa_time_only、po_jepa_space_only、fixed_fourier、po_jepa_rollout_sup 的 `initial_model_sha256`（`v7jobs._model_hash`）必须等于 v7 那次 po_jepa_full 的值。fixed_fourier 也能相等，因为 `FourierSpectrum` 不加参数和 buffer，构造时消耗的随机数和 `GraphSpectrum` 相同。
 - transformer_consistency 的初始哈希必须等于 v7 那次 matched_transformer 的值。
 - koopman 没有可对照的 v7 条件，只登记自己的值。
 
@@ -205,3 +206,35 @@ class KoopmanConfig:
 ```
 
 读回时核对快照逐项相等、`model_state` 的名字形状精度相同，再 `load_state_dict(strict=True)`。
+
+
+## 6. po_jepa_rollout_sup（有真值监督的两段滚动，2026-11-12）
+
+### 6.1 是什么、为什么
+
+审稿人最先会问：时间一致性是不是只相当于“多训几步滚动”。po_jepa_rollout_sup 就是这个对照：模型、初始化、查询序列、空间项、λ_s、学习率调度、裁剪、一致性预热、验证选点都和 po_jepa_full 完全相同，只把无标签的时间一致性项换成有真值的两段滚动损失。Jerry 2026-11-12 定：仿真数据集 12 个场景各一条（`make_v8_jobs.py --stage addon`），DROID 不做，Transformer 不加；v7 场景上的补跑（`make_addon_jobs.py`）不排它。
+
+### 6.2 损失
+
+同一次 `losses.temporal_predictions`（3 次 Φ，τ = σ = T/2，训练批里 T = τ + σ 逐位成立）：
+
+- direct = Φ(Z, u1⊕u2, τ+σ)，intermediate = Φ(Z, u1, τ)，composed = Φ(intermediate, u2, σ)；
+- L_JEPA = d(direct, Z_target)，和 po_jepa_full 相同；
+- **L_roll = d(composed, Z_target)**，Z_target 就是 JEPA 项的同一个 `batch.raw_target`（τ+σ 时刻的真实帧，同源）；
+- d 是 JEPA 距离（`losses.jepa_distance`，式14）：d(P, Y) = mean_B mean_(N,E) |LN(P) − LN(Y)|，两侧沿 E 做无 affine LN（eps 1e-5），p = 1，Y 停梯度；intermediate 不 detach，梯度经两段传回；
+- L = L_JEPA + w(s)·(λ_r·L_roll + λ_s·L_space)，w(s) 是一致性预热（v7 正式：前 1000 步线性升到 1）。
+
+和时间一致性项 L_time = mean((direct − composed)/s)² / ((τσ)² + ε) 的区别：L_roll 的比较对象是真值，不是模型自己的长支；不除 (τσ)²（那个分母是给“组合缺口随 τσ → 0 消失”配的，真值误差不随 τσ 消失；T ∈ {1,2,4,8} 时 (τσ)² 跨 4096 倍）；不用 `consistency_metric`。这一选择（JEPA 距离、不除 (τσ)²）是 Claude 的推荐，已在线程里请 Jerry 确认。
+
+代码：`po_jepa/rollout_supervision.py` 的 `rollout_supervision_loss(temporal, raw_target, config)`，返回 float64 `ReducedLoss`；单步 `addon.conditions.rollout_sup_step`（和 `training.train_step` 逐步相同，只把 `temporal_consistency_loss` 换成它）。每次更新 5 次 Φ、10 次 p_out。
+
+### 6.3 权重和标签
+
+- `LossConfig` 不加字段：L_roll 放在时间那一格，`time_weight` 就是 λ_r，`space_weight` 是 λ_s。损失标签 `rollout_sup`（`training._loss_config`：两个权重都 > 0），检查点的 `condition` 存 `"rollout_sup"`，因此和 po_jepa_full 的检查点互相读不进来。日志的 `time`、`weighted_time`，监控的 `share.time`、`grad_time` 对这个条件都是 L_roll 的。
+- λ_r 用补跑标定（16 §3.2）：和 v7 calibrate 相同的 JEPA 预训练（po_jepa_no_consistency 的模型和单步，300 步），再在接下来 32 批上量 |∇L_JEPA| 和 |∇L_roll|（`addon.calibration.rollout_gradient_norms`），λ_r = ρ·median|∇L_JEPA| / median|∇L_roll|，ρ = 1。
+- λ_s 不重标，原样用基础标定的值（和 po_jepa_full 相同）；补跑标定文件里这一项的 `space_weight` 是抄过来的，读的时候核它等于协议的 `loss.space_weight`，`build` 也直接用协议的值。
+- 一致性监控和提前检查看 time（L_roll）和 space 两项，规则和其他补跑条件相同（07 §2.4）。
+
+### 6.4 不做的事
+
+不加中间时刻 τ 的真值监督（训练批里没有 Z_target(τ)）；不改 JEPA 项；不给 Transformer、DROID 加这个条件；不加多于两段的滚动。

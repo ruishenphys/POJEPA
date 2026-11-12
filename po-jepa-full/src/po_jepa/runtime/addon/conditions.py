@@ -1,4 +1,4 @@
-"""07 §1、§2.4、§2.5，08：5 个新条件的构造、优化器、单步、读出计数、一致性梯度占比、登记核对、检查点和读回。
+"""07 §1、§2.4、§2.5，08：6 个新条件的构造、优化器、单步、读出计数、一致性梯度占比、登记核对、检查点和读回。
 
 comparison、evaluation 的共享函数开头各有一行“是新条件就交给本模块”，v7 条件不经过这里。comparison 在模块顶层
 导入本模块，所以本模块用到 comparison 时在函数里导入。
@@ -33,14 +33,18 @@ from po_jepa.generic_consistency import spatial_predictions, temporal_prediction
 from po_jepa.koopman import KoopmanConfig, KoopmanPredictor, build_koopman, choose_modes, parameter_count
 from po_jepa.losses import (LossConfig, jepa_distance, spatial_consistency_loss, temporal_consistency_loss,
                             weighted_total_loss)
+from po_jepa.losses import temporal_predictions as po_temporal_predictions, spatial_predictions as po_spatial_predictions
 from po_jepa.model import POJEPA
+from po_jepa.rollout_supervision import rollout_supervision_loss
 from po_jepa.spectral import GraphSpectrum
 
-ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
+# 08 §6（2026-11-12 Jerry 定）：po_jepa_rollout_sup 排在最后，前 5 个的顺序不变
+ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
+                    "po_jepa_rollout_sup")
 
 # 08 §1.1 的损失标签（training._loss_config 的第二个参数，检查点里存的 condition / loss_config 快照用它）
 LOSS_LABELS = dict(po_jepa_time_only="time_only", po_jepa_space_only="space_only", transformer_consistency="full",
-                   fixed_fourier="full", koopman="no_consistency")
+                   fixed_fourier="full", koopman="no_consistency", po_jepa_rollout_sup="rollout_sup")
 
 KOOPMAN_FIELDS = frozenset({"schema_version", "completed_steps", "condition", "model_state", "optimizer_state",
     "optimizer_param_names", "model_config", "loss_config", "optimizer_config", "provenance", "rng_state",
@@ -54,7 +58,7 @@ def _require(condition) -> None:
 
 def expected_type(condition, model):
     """07 §2.5：run_prepared_evaluation 的 expected_type。PO 类另核谱模块：fixed_fourier 要 FourierSpectrum，
-    两个单项消融要 GraphSpectrum（type is，不收子类），不符报和 v7 相同的 TypeError。"""
+    两个单项消融和 po_jepa_rollout_sup 要 GraphSpectrum（type is，不收子类），不符报和 v7 相同的 TypeError。"""
     _require(condition)
     if condition == "transformer_consistency":
         return TokenTransformer
@@ -93,7 +97,8 @@ def koopman_config(config: dict) -> KoopmanConfig:
 
 def build(condition, device):
     """07 §2.4 build_condition：返回 (model, loss)。权重按 08 §1.1：time_only 只留协议的 λ_t，space_only 只留 λ_s，
-    transformer_consistency、fixed_fourier 用补跑标定，koopman 两个都为 0。"""
+    transformer_consistency、fixed_fourier 用补跑标定，koopman 两个都为 0；po_jepa_rollout_sup（08 §6）的模型和 full 相同，
+    time_weight 换成补跑标定的 λ_r，space_weight 是协议的 λ_s（calibration.load_addon_weights 核过等于协议值）。"""
     _require(condition)
     config = check.load_protocol()
     loss = LossConfig(**{f.name: config["loss"][f.name] for f in fields(LossConfig)})
@@ -106,6 +111,8 @@ def build(condition, device):
     weights = calibration.load_addon_weights(condition)
     if condition == "fixed_fourier":
         model = build_fixed_fourier(config["model"], check.model_seed(), device)
+    elif condition == "po_jepa_rollout_sup":   # 08 §6：只换 λ_r，λ_s 留协议（基础标定）的值，和 po_jepa_full 相同
+        return check.build_full_model(config, device), replace(loss, time_weight=weights["time_weight"])
     else:
         model = _registered_transformer(device)
     return model, replace(loss, time_weight=weights["time_weight"], space_weight=weights["space_weight"])
@@ -185,6 +192,36 @@ def transformer_consistency_step(model, optimizer, batch, loss_config, completed
                    {k: value.detach().item() for k, value in losses.items()}, "Transformer")
 
 
+def rollout_sup_step(model, optimizer, batch, loss_config, completed_steps):
+    """08 §6：和 training.train_step（po_jepa_full）逐步相同，只把时间一致性项换成有真值的两段滚动损失。
+
+    同一次 temporal_predictions（3 次 Φ）：JEPA 项仍在长支 direct 上，L_roll 用两段滚动 composed 对同一个 raw_target；
+    空间项（2 次 Φ）、λ_s、一致性预热（w(s) 同样乘在 λ_r 上）、裁剪、调度都不变。每次更新 5 次 Φ、10 次 p_out。
+    日志的 time / weighted_time 两格记的是 L_roll 和 λ_r·w(s)·L_roll（检查点和日志靠标签 rollout_sup 区分）。
+    """
+    training._count(completed_steps, "completed_steps")
+    training._loss_config(loss_config, "rollout_sup")
+    parameters = training._optimizer(model, optimizer)
+    if not all(part.training for part in model.modules()) or not torch.is_grad_enabled() or torch.is_inference_mode_enabled():
+        raise ValueError("caller must explicitly model.train() with gradient mode enabled outside inference")
+    training._batch(batch, model)
+    optimizer.zero_grad(set_to_none=True)
+    temporal = po_temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config)
+    rollout = rollout_supervision_loss(temporal, batch.raw_target, config=loss_config)
+    spatial = po_spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
+    space = spatial_consistency_loss(spatial, config=loss_config)
+    total = weighted_total_loss(jepa, rollout, space, config=loss_config,
+                                consistency_scale=training.consistency_warmup_scale(loss_config, completed_steps))
+    losses = dict(jepa=jepa.mean, time=rollout.mean, space=space.mean, weighted_time=total.weighted_time,
+                  weighted_space=total.weighted_space, total=total.total)
+    if any(not torch.isfinite(value) for value in losses.values()):
+        raise ValueError("all six training losses must be finite before backward")
+    total.total.backward()
+    return _finish(parameters, optimizer, loss_config, completed_steps,
+                   {k: value.detach().item() for k, value in losses.items()}, "predictor")
+
+
 def koopman_step(model, optimizer, batch, loss_config, completed_steps):
     """08 §5.4：和 matched_transformer 的单步结构相同，一次 16×16 前向，只有 JEPA 损失。"""
     from .. import comparison
@@ -212,12 +249,15 @@ def condition_step(condition, model, optimizer, batch, loss_config, completed_st
         return transformer_consistency_step(model, optimizer, batch, loss_config, completed_steps)
     if condition == "koopman":
         return koopman_step(model, optimizer, batch, loss_config, completed_steps)
+    if condition == "po_jepa_rollout_sup":
+        return rollout_sup_step(model, optimizer, batch, loss_config, completed_steps)
     return training.train_step(model, optimizer, batch, loss_config=loss_config,
                                completed_steps=completed_steps, condition=LOSS_LABELS[condition])
 
 
 def expected_readouts(condition, model) -> int:
-    """07 §2.4：每次更新 p_out 被调用的次数。PO 类 5 × readouts_per_phi（残差读出 10），transformer_consistency 6，koopman 2。"""
+    """07 §2.4：每次更新 p_out 被调用的次数。PO 类（含 po_jepa_rollout_sup）5 × readouts_per_phi（残差读出 10），
+    transformer_consistency 6，koopman 2。"""
     _require(condition)
     if condition == "transformer_consistency":
         return 6
@@ -246,13 +286,16 @@ def observed_update(condition, model, optimizer, batch, config, completed):
 
 def consistency_share(condition, model, batch, loss_config, completed):
     """07 §2.4 consistency_share：间隔、warmup_scale、share 的公式和键和 comparison.consistency_share 相同；
-    PO 类用 training.consistency_gradient_norms，transformer_consistency 用 calibration.generic_gradient_norms，koopman 返回 None。"""
+    PO 类用 training.consistency_gradient_norms，transformer_consistency 用 calibration.generic_gradient_norms，
+    po_jepa_rollout_sup 用 calibration.rollout_gradient_norms（time 一格是 L_roll），koopman 返回 None。"""
     _require(condition)
     interval = check.load_protocol()["monitoring"]["consistency_interval"]
     if condition == "koopman" or completed % interval:
         return None
     if condition == "transformer_consistency":
         norms = calibration.generic_gradient_norms(model, batch, loss_config=loss_config)
+    elif condition == "po_jepa_rollout_sup":
+        norms = calibration.rollout_gradient_norms(model, batch, loss_config=loss_config)
     else:
         norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config)
     scale = training.consistency_warmup_scale(loss_config, completed)

@@ -145,7 +145,8 @@ def _provenance(value: dict) -> dict:
     return value
 
 def _loss_config(config: LossConfig, condition: str) -> dict:
-    """消费合法Real为原生float64快照；full双正、no_consistency双零，单项消融time_only只时间正、space_only只空间正。"""
+    """消费合法Real为原生float64快照；full双正、no_consistency双零，单项消融time_only只时间正、space_only只空间正；
+    rollout_sup（08 §6，po_jepa_rollout_sup）双正：time_weight 是有真值两段滚动损失的 λ_r，space_weight 是 λ_s。"""
     if not isinstance(config, LossConfig):
         raise TypeError("loss_config must be LossConfig")
     config.__post_init__()
@@ -166,6 +167,10 @@ def _loss_config(config: LossConfig, condition: str) -> dict:
         if weights[0] == 0. and weights[1] > 0:
             return native
         raise ValueError("condition space_only requires a zero time weight and a positive space weight")
+    if condition == "rollout_sup":
+        if all(w > 0 for w in weights):
+            return native
+        raise ValueError("condition rollout_sup requires a positive rollout (time slot) weight and a positive space weight")
     raise ValueError("condition must be full with two positive weights or no_consistency with two zero weights")
 
 def _parameters(model: POJEPA) -> list:

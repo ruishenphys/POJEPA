@@ -2,7 +2,8 @@
 run.py 把这两个子命令交给本模块（python -m po_jepa.runtime.addon.entry …），参数和 cli.py 的相同。
 
 --output 是 run.py 传来的 <输出>/run，必须不存在：
-  calibrate-addon：calibration-fixed_fourier.json、calibration-transformer_consistency.json、COMPLETE.json，
+  calibrate-addon：calibration-fixed_fourier.json、calibration-transformer_consistency.json、
+                   calibration-po_jepa_rollout_sup.json、COMPLETE.json，
                    另写 configs/calibration/addon/<tag>-u<步数>.yaml（和 v7 的 calibrate 一样不核 CUDA 设备）
   check-addon：environment.json、check-addon.json、gpu-inventory-*、COMPLETE.json（要求 cuda:N，和 v7 的 check 相同）
 失败时写 FAILED.json（字段和 workflow.execute 的相同）并以非零退出码结束。

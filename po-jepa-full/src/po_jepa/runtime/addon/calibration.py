@@ -1,10 +1,14 @@
-"""16 §3.2、08 §3：补跑标定文件的读取和核对，transformer_consistency 的三项梯度范数。
+"""16 §3.2、08 §3、08 §6：补跑标定文件的读取和核对，transformer_consistency、po_jepa_rollout_sup 的三项梯度范数。
 
 本模块只读补跑标定；写文件的 calibrate-addon 在 S17。文件 configs/calibration/addon/<tag>-u<步数>.yaml 的格式（16 §3.2）：
 
     fixed_fourier: {rho: …, space_weight: …, time_weight: …, source: …}
+    po_jepa_rollout_sup: {rho: …, space_weight: …, time_weight: …, source: …}
     transformer_consistency: {rho: …, space_weight: …, time_weight: …, source: …}
     sigma_z_used: …
+
+po_jepa_rollout_sup 的 time_weight 是有真值两段滚动损失的 λ_r（08 §6，标定）；它的 space_weight 不标定，是基础标定的 λ_s
+原样抄过来（读的时候核它等于协议的 loss.space_weight）。
     v7_calibration_sha256: …
 """
 
@@ -20,8 +24,10 @@ from .. import checks as check
 from .. import data
 from po_jepa.generic_consistency import spatial_predictions, temporal_predictions
 from po_jepa.losses import jepa_distance, spatial_consistency_loss, temporal_consistency_loss
+from po_jepa import losses as po_losses
+from po_jepa.rollout_supervision import rollout_supervision_loss
 
-CALIBRATED_CONDITIONS = ("fixed_fourier", "transformer_consistency")
+CALIBRATED_CONDITIONS = ("fixed_fourier", "transformer_consistency", "po_jepa_rollout_sup")
 ENTRY_KEYS = frozenset({"rho", "space_weight", "time_weight", "source"})
 FILE_KEYS = frozenset({*CALIBRATED_CONDITIONS, "sigma_z_used", "v7_calibration_sha256"})
 
@@ -34,18 +40,19 @@ def addon_calibration_path() -> Path:
 def load_addon_weights(condition: str) -> dict:
     """读补跑标定并核对，返回 dict(time_weight=float, space_weight=float)。
 
-    要求：condition 是 fixed_fourier 或 transformer_consistency；文件存在；顶层键恰好是 FILE_KEYS；这一项的键恰好是
+    要求：condition 在 CALIBRATED_CONDITIONS 里；文件存在；顶层键恰好是 FILE_KEYS；这一项的键恰好是
     ENTRY_KEYS；两个 λ 是有限正数（int 或 float，不收 bool）；rho 等于协议的 calibration.rho；sigma_z_used 等于协议的
-    model.graph.sigma_z；v7_calibration_sha256 等于 checks.v7_calibration_path() 当前文件的 SHA。任一不符报 ValueError。
+    model.graph.sigma_z；v7_calibration_sha256 等于 checks.v7_calibration_path() 当前文件的 SHA；po_jepa_rollout_sup 的
+    space_weight 等于协议的 loss.space_weight（基础标定的 λ_s，08 §6）。任一不符报 ValueError。
     """
     if condition not in CALIBRATED_CONDITIONS:
-        raise ValueError("only fixed_fourier and transformer_consistency use the add-on calibration")
+        raise ValueError(f"only {', '.join(CALIBRATED_CONDITIONS)} use the add-on calibration")
     path = addon_calibration_path()
     if not path.exists():
         raise ValueError(f"补跑标定文件不存在：{path}；请先运行 python run.py calibrate-addon")
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     if type(value) is not dict or set(value) != FILE_KEYS:
-        raise ValueError("add-on calibration must contain exactly fixed_fourier, transformer_consistency, sigma_z_used, v7_calibration_sha256")
+        raise ValueError(f"add-on calibration must contain exactly {', '.join(sorted(FILE_KEYS))}")
     entry = value[condition]
     if type(entry) is not dict or set(entry) != ENTRY_KEYS:
         raise ValueError(f"add-on calibration entry {condition} must contain exactly rho, space_weight, time_weight, source")
@@ -60,6 +67,8 @@ def load_addon_weights(condition: str) -> dict:
         raise ValueError("add-on calibration rho differs from the protocol calibration.rho")
     if type(value["sigma_z_used"]) is bool or value["sigma_z_used"] != protocol["model"]["graph"]["sigma_z"]:
         raise ValueError("add-on calibration sigma_z_used differs from the protocol sigma_z")
+    if condition == "po_jepa_rollout_sup" and weights["space_weight"] != protocol["loss"]["space_weight"]:
+        raise ValueError("add-on calibration po_jepa_rollout_sup.space_weight differs from the protocol (base) space_weight")
     v7 = check.v7_calibration_path()
     if not v7.exists() or value["v7_calibration_sha256"] != data.cache.file_sha(v7):
         raise ValueError("add-on calibration was made against a different v7 calibration file")
@@ -67,7 +76,7 @@ def load_addon_weights(condition: str) -> dict:
 
 
 def require_addon_calibration() -> None:
-    """07 §2.6：transformer_consistency、fixed_fourier 的任务开始前，两项补跑标定都要能读出并通过核对。"""
+    """07 §2.6：CALIBRATED_CONDITIONS 的任务开始前，三项补跑标定都要能读出并通过核对。"""
     for condition in CALIBRATED_CONDITIONS:
         load_addon_weights(condition)
 
@@ -89,6 +98,27 @@ def generic_gradient_norms(model, batch, *, loss_config) -> dict:
     space = spatial_consistency_loss(spatial, config=loss_config).mean
     result = dict(jepa=jepa.item(), time=time.item(), space=space.item())
     for name, loss in (("jepa", jepa), ("time", time), ("space", space)):
+        grads = torch.autograd.grad(loss, parameters, retain_graph=name != "space", allow_unused=True)
+        result["grad_"+name] = math.sqrt(sum(float(g.double().square().sum()) for g in grads if g is not None))
+    return result
+
+
+def rollout_gradient_norms(model, batch, *, loss_config) -> dict:
+    """08 §6：po_jepa_rollout_sup 的三项梯度范数，键和 training.consistency_gradient_norms 相同，time 一格是 L_roll。
+
+    同一批、和 addon.conditions.rollout_sup_step 相同的 5 次 Φ（时间 3 次、空间 2 次），JEPA 在 direct 上，L_roll 是
+    composed 对 raw_target 的 JEPA 距离；三项分别用 torch.autograd.grad 对全部 27/29 个参数求导，不写 .grad、不改参数。
+    """
+    from .. import training
+    parameters = [p for _, p in training._parameters(model)]
+    training._batch(batch, model)
+    temporal = po_losses.temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config).mean
+    rollout = rollout_supervision_loss(temporal, batch.raw_target, config=loss_config).mean
+    spatial = po_losses.spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
+    space = spatial_consistency_loss(spatial, config=loss_config).mean
+    result = dict(jepa=jepa.item(), time=rollout.item(), space=space.item())
+    for name, loss in (("jepa", jepa), ("time", rollout), ("space", space)):
         grads = torch.autograd.grad(loss, parameters, retain_graph=name != "space", allow_unused=True)
         result["grad_"+name] = math.sqrt(sum(float(g.double().square().sum()) for g in grads if g is not None))
     return result

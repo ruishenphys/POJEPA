@@ -8,7 +8,7 @@
 核对项（不通过就在报告里标红，不静默合并）：
 - 同一 (数据集, 种子) 下所有条件的预登记（源码、配置、查询序列）SHA 必须一致；
 - po_jepa_full 与 po_jepa_no_consistency 的初始权重 SHA 必须一致（唯一差别是一致性项）。
-- S26a：补跑条件的初始权重按 08 §1.3 核（time_only、space_only、fixed_fourier 等于 po_jepa_full，transformer_consistency 等于 matched_transformer）。
+- S26a：补跑条件的初始权重按 08 §1.3 核（time_only、space_only、fixed_fourier、rollout_sup 等于 po_jepa_full，transformer_consistency 等于 matched_transformer）。
 """
 import argparse
 from collections import defaultdict
@@ -25,12 +25,13 @@ from po_jepa.runtime import plots  # noqa: E402
 V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
 # S26a：v8 任务表 --stage addon 的补跑条件（N1 基线、N2 消融），和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）。
 # 它们和 v7 条件进同一张表；某个 (数据集, 步数, 种子) 一个补跑条件都没有时不算缺失（补跑是可选的）。
-ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
+ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
+                    "po_jepa_rollout_sup")   # 08 §6：有真值两段滚动的对照（2026-11-12 加）
 CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
 REFERENCES = CONDITIONS[1:]
 # 08 §1.3：同一数据集、同一种子下补跑条件的初始权重必须和这个 v7 条件相同（koopman 没有对照）
 INITIAL_SAME_AS = dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full", fixed_fourier="po_jepa_full",
-                       transformer_consistency="matched_transformer")
+                       transformer_consistency="matched_transformer", po_jepa_rollout_sup="po_jepa_full")
 POINT_METRICS = ("future_jepa_distance", "tcd_normalized", "delta_act")
 PAIR_METRICS = ("scd_normalized",)
 
