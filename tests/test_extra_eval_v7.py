@@ -386,6 +386,19 @@ def test_verify_registered_run_refuses_consistent_rewrites(tmp_path, v7_double_w
         _edit(path, lambda t: [r.update(seed=1704) for r in t["records"]])
     with pytest.raises(ValueError, match="was not run with seed 1704"):
         xe.verify_registered_run(job, xe.formal_selection(job, "matched_transformer"))
+    # R5-v7 P3: each of the two sequence guards on its own. (a) training preregistration rewritten to seed 1704 and
+    # its sequence, only the selected checkpoint's provenance still carries seed 1703's sequence
+    seq_now = sequence_sha()
+    _edit(root/"registration.json", lambda r: r["preregistration"].update(model_seed=1704, query_sequence_sha256=seq_now))
+    with pytest.raises(ValueError, match="was not run with seed 1704.*'checkpoint': \\(1704, '(?!" + seq_now + ")"):
+        xe.verify_registered_run(job, xe.formal_selection(job, "matched_transformer"))
+    monkeypatch.delenv(checks.SEED_ENV)
+    # (b) a seed-1703 job whose checkpoint provenance is right but whose training preregistration names another seed
+    job_b, root_b = make("prereg-only")
+    _edit(root_b/"registration.json", lambda r: r["preregistration"].update(model_seed=1704))
+    with pytest.raises(ValueError, match="was not run with seed 1703"):
+        xe.verify_registered_run(job_b, xe.formal_selection(job_b, "matched_transformer"))
+    monkeypatch.setenv(checks.SEED_ENV, "1704")
     # a run genuinely trained with seed 1704 passes under seed 1704 (sequence differs from seed 1703's)
     seq_1704 = sequence_sha()
     monkeypatch.delenv(checks.SEED_ENV)
