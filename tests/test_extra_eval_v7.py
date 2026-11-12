@@ -196,13 +196,13 @@ def _bind(folder):
     _json(folder/"COMPLETE.json", dict(report_sha256=hashlib.sha256((folder/"report.json").read_bytes()).hexdigest()))
 
 
-def _checkpoint(root, payload, step):
+def _checkpoint(root, payload, step, prov=PROV):
     buffer = io.BytesIO(); torch.save(payload, buffer); raw = buffer.getvalue()
     path = root/"checkpoints"/f"step-{step:04d}.pt"
     path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(raw)
     return dict(step=step, mean=.5+step/1000, windows=400, metric="future_jepa_distance",
                 checkpoint=f"checkpoints/step-{step:04d}.pt", checkpoint_sha256=hashlib.sha256(raw).hexdigest(),
-                checkpoint_provenance=PROV)
+                checkpoint_provenance=prov)
 
 
 def fake_job(base, condition, payloads=None, selected=10, layout="local", seed=1703):
@@ -227,6 +227,58 @@ def fake_job(base, condition, payloads=None, selected=10, layout="local", seed=1
     _json(evaluation_dir/"registration.json", dict(condition=condition, checkpoint=best))
     _json(evaluation_dir/"COMPLETE.json", dict(status="completed_real_evaluation"))
     return job_dir, root
+
+
+def sequence_sha():
+    """Query-sequence SHA of the active protocol/dataset/seed, as comparison.preregister computes it."""
+    from po_jepa.runtime import learning
+    return comparison.sequence_sha(learning.make_query_sequence(checks.load_protocol())[0])
+
+
+def registered_job(base, condition, payloads, selected, seed=1703, means=None):
+    """A finished v7 job whose registered run is complete enough for verify_registered_run (needs v7_double_well):
+    the full validation schedule with the 400 raw validation values per step (selected step strictly best), the
+    training registration with the preregistered seed and query sequence, checkpoints whose provenance carries that
+    sequence, and registered evaluation rows naming the checkpoint and seed. `payloads` must be built with PROV_SEQ()."""
+    job_dir = base/"run"/"job"
+    job = dict(condition=condition, dataset=datasets.active().tag, seed=seed, updates=checks.v7_updates(),
+               resume_from=None, training_run=None)
+    best = None
+    if condition != "identity":
+        root = job_dir/"training"/condition
+        interval = checks.load_protocol()["validation"]["interval_updates"]
+        steps = list(range(0, job["updates"]+1, interval))
+        means = means or {s: (.25 if s == selected else .5) for s in steps}
+        queries = [dict(trajectory_id=t, start_tick=st, duration_cycles=d) for t in datasets.validation_ids()
+                   for st in (0, 5, 10, 15, 20) for d in (1., 2., 4., 8.)]
+        prov = dict(PROV, f04_query_sequence_sha256=sequence_sha())
+        rows = []
+        for step in steps:
+            row = _checkpoint(root, payloads[step], step, prov) if step in payloads else dict(
+                step=step, windows=400, metric="future_jepa_distance", checkpoint=f"checkpoints/step-{step:04d}.pt",
+                checkpoint_sha256="0"*64, checkpoint_provenance=prov)
+            row["mean"] = means[step]
+            rows.append(row)
+            for offset in range(0, 400, 4):
+                _json(root/"validations"/f"{step:04d}"/f"{offset:04d}.json",
+                      dict(queries=queries[offset:offset+4], values=dict(future_jepa_distance=[means[step]]*4)))
+        best = next(r for r in rows if r["step"] == selected)
+        _json(root/"report.json", dict(best=best, validations=rows, completed_updates=job["updates"])); _bind(root)
+        _json(root/"registration.json", dict(condition=condition, preregistration=dict(
+            model_seed=seed, query_sequence_sha256=prov["f04_query_sequence_sha256"])))
+    _json(job_dir/"job.json", job)
+    _json(job_dir/"report.json", dict(job=job, preflight=dict(cache_identity=RECEIPT), best=best)); _bind(job_dir)
+    evaluation_dir = job_dir/"evaluation"/condition
+    _json(evaluation_dir/"registration.json", dict(condition=condition, checkpoint=best))
+    _json(evaluation_dir/"COMPLETE.json", dict(status="completed_real_evaluation"))
+    for tid in (180, 181):
+        _json(evaluation_dir/"trajectories"/f"{tid:04d}.json", dict(records=[
+            dict(condition=condition, seed=seed, checkpoint=best) for _ in range(2)], summary={}))
+    return job_dir
+
+
+def PROV_SEQ():
+    return dict(PROV, f04_query_sequence_sha256=sequence_sha())
 
 
 def _edit(path, change, bind=False):
@@ -281,6 +333,77 @@ def test_formal_selection_reused_training(tmp_path, layout):
     assert not (job/"training").exists()
     got = xe.formal_selection(job, "matched_transformer")
     assert got["root"] == root and root.is_relative_to(tmp_path/"old") and got["best"]["step"] == 10
+
+
+def _relabel_best(job, root, condition, step, rows_too):
+    """Re-point the training report, the top-level report and the evaluation registration (and optionally the
+    registered rows) consistently to another stored checkpoint, rebinding every COMPLETE flag."""
+    target = next(r for r in json.loads((root/"report.json").read_text())["validations"] if r["step"] == step)
+    _edit(root/"report.json", lambda r: r.update(best=target), bind=True)
+    _edit(job/"report.json", lambda r: r.update(best=target), bind=True)
+    _edit(job/"evaluation"/condition/"registration.json", lambda r: r.update(checkpoint=target))
+    if rows_too:
+        for path in (job/"evaluation"/condition/"trajectories").glob("*.json"):
+            _edit(path, lambda t: [r.update(checkpoint=target) for r in t["records"]])
+    return target
+
+
+def test_verify_registered_run_refuses_consistent_rewrites(tmp_path, v7_double_well, monkeypatch):
+    """R4-2-P1-1: rewriting best in all three records (flags rebound) or relabelling the seed is caught by what a
+    metadata rewrite cannot change: registered rows, the raw validation values, the seed-dependent query sequence."""
+    model, _ = comparison.build_condition("matched_transformer", "cpu")
+    def payload(step):
+        return dict(schema="F05_transformer_checkpoint_v1", config=asdict(model.spec), provenance=PROV_SEQ(),
+                    completed_steps=step, model_state=model.state_dict())
+    def make(name, seed=1703):
+        job = registered_job(tmp_path/name, "matched_transformer", {200: payload(200), 400: payload(400)}, 200, seed=seed)
+        return job, job/"training"/"matched_transformer"
+    job, root = make("ok")
+    sel = xe.formal_selection(job, "matched_transformer")
+    xe.verify_registered_run(job, sel)
+    assert xe.load_selected("matched_transformer", job, torch.device("cpu"), sel)[2]["step"] == 200
+    # reviewer's case: best re-pointed to the stored step-400 checkpoint in all three records, rows untouched
+    job, root = make("repoint")
+    _relabel_best(job, root, "matched_transformer", 400, rows_too=False)
+    sel = xe.formal_selection(job, "matched_transformer")                     # the metadata chain alone accepts it
+    with pytest.raises(ValueError, match="registered evaluation row is for checkpoint step 200"):
+        xe.verify_registered_run(job, sel)
+    # ... and with the rows rewritten too: the selection no longer follows from the raw validation values
+    job, root = make("repoint-rows")
+    _relabel_best(job, root, "matched_transformer", 400, rows_too=True)
+    with pytest.raises(ValueError, match="does not follow from the raw validation values"):
+        xe.verify_registered_run(job, xe.formal_selection(job, "matched_transformer"))
+    # seed relabel: job.json / report.job -> 1704 with the environment on 1704 (as run_all would set it)
+    job, root = make("seed")
+    monkeypatch.setenv(checks.SEED_ENV, "1704")
+    for path in (job/"job.json",):
+        _edit(path, lambda j: j.update(seed=1704))
+    _edit(job/"report.json", lambda r: r["job"].update(seed=1704), bind=True)
+    sel = xe.formal_selection(job, "matched_transformer")
+    with pytest.raises(ValueError, match="seed 1703, not the selected step 200 / seed 1704"):
+        xe.verify_registered_run(job, sel)
+    for path in (job/"evaluation"/"matched_transformer"/"trajectories").glob("*.json"):  # records relabelled too
+        _edit(path, lambda t: [r.update(seed=1704) for r in t["records"]])
+    with pytest.raises(ValueError, match="was not run with seed 1704"):
+        xe.verify_registered_run(job, xe.formal_selection(job, "matched_transformer"))
+    # a run genuinely trained with seed 1704 passes under seed 1704 (sequence differs from seed 1703's)
+    seq_1704 = sequence_sha()
+    monkeypatch.delenv(checks.SEED_ENV)
+    assert sequence_sha() != seq_1704
+    monkeypatch.setenv(checks.SEED_ENV, "1704")
+    job, root = make("genuine-1704", seed=1704)
+    xe.verify_registered_run(job, xe.formal_selection(job, "matched_transformer"))
+    # identity: rows only
+    monkeypatch.delenv(checks.SEED_ENV)
+    job = registered_job(tmp_path/"identity", "identity", {}, None)
+    xe.verify_registered_run(job, xe.formal_selection(job, "identity"))
+    _edit(sorted((job/"evaluation"/"identity"/"trajectories").glob("*.json"))[1], lambda t: t["records"][1].update(seed=1704))
+    with pytest.raises(ValueError, match="registered evaluation row"):
+        xe.verify_registered_run(job, xe.formal_selection(job, "identity"))
+    for path in (job/"evaluation"/"identity"/"trajectories").glob("*.json"):            # no records at all
+        _edit(path, lambda t: t.update(records=[]))
+    with pytest.raises(ValueError, match="no trajectory records"):
+        xe.verify_registered_run(job, xe.formal_selection(job, "identity"))
 
 
 def _po_payload(model, step=10, condition="full"):
@@ -343,9 +466,9 @@ def test_run_one_end_to_end(tmp_path, v7_double_well, monkeypatch, capsys):
     reuse only on an equal identity, refusal otherwise, atomic write, environment/job consistency."""
     model, loss = comparison.build_condition("matched_transformer", "cpu")
     weights = _perturb(model).state_dict()
-    payload = dict(schema="F05_transformer_checkpoint_v1", config=asdict(model.spec), provenance=PROV, completed_steps=10,
-                   model_state=weights)
-    job, _ = fake_job(tmp_path, "matched_transformer", {10: payload})
+    payload = dict(schema="F05_transformer_checkpoint_v1", config=asdict(model.spec), provenance=PROV_SEQ(),
+                   completed_steps=200, model_state=weights)
+    job = registered_job(tmp_path, "matched_transformer", {200: payload}, 200)
     torch.manual_seed(1)
     frames = torch.randn(20, 1, 256, 1408)
 
@@ -365,7 +488,7 @@ def test_run_one_end_to_end(tmp_path, v7_double_well, monkeypatch, capsys):
     rows = {r["duration_cycles"]: r for r in result["rows"]}
     assert set(rows) == {1., 3., 6.} and all(r["trajectory_id"] == 180 and r["start_tick"] == 5 for r in rows.values())
     identity = result["identity"]
-    assert identity["metric_version"] == xe.METRIC_VERSION and identity["checkpoint"]["step"] == 10
+    assert identity["metric_version"] == xe.METRIC_VERSION and identity["checkpoint"]["step"] == 200
     assert identity["features"]["encode_report_sha256"] == "enc-A" and identity["max_test_trajectories"] == 1
     reference, _ = comparison.build_condition("matched_transformer", "cpu")
     reference.load_state_dict(weights); reference.eval()

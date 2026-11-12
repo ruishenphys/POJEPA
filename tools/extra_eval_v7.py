@@ -205,6 +205,50 @@ def formal_selection(job_dir: Path, condition: str):
     return out
 
 
+def verify_registered_run(job_dir: Path, selection: dict):
+    """R4-2-P1-1: facts that a consistent rewrite of job.json / report.json / registration.json (with rebound
+    COMPLETE flags) cannot fake. Needs the job's protocol, dataset and seed active (run_one checks the environment).
+    - every record of the registered evaluation (trajectories/*.json) names the selected checkpoint and the job's seed;
+    - the training's selection is recomputed from its raw validation values (workflow.verify_selection: the same
+      400 windows, the fixed future-only rule), so `best` cannot be re-pointed to another stored checkpoint;
+    - the seed-dependent query sequence (window seed shifted with the model seed) recomputed for the job's seed equals
+      the one in the training preregistration and in the selected checkpoint's provenance (load_selected compares
+      that provenance with the checkpoint bytes), so a run trained with another seed cannot be relabelled.
+    Rewriting the checkpoint, the raw validation values and every evaluation row together is out of scope."""
+    from po_jepa.runtime import checks, comparison, learning, workflow
+    job, best = selection["job"], selection["best"]
+    if type(job.get("seed")) is not int:
+        raise ValueError(f"{job_dir}: job seed {job.get('seed')!r} is not an integer")
+    registered = _read(job_dir/"evaluation"/job["condition"]/"registration.json")["checkpoint"]
+    # evaluation.run_prepared_evaluation writes every row to rows/ and again, grouped, to trajectories/<id>.json at
+    # the end; the trajectory files are what result packs keep, so they are read here
+    files = sorted((job_dir/"evaluation"/job["condition"]/"trajectories").glob("*.json"))
+    records = [(path, row) for path in files for row in _read(path).get("records") or []]
+    if not files or not records:
+        raise ValueError(f"{job_dir}: the registered evaluation has no trajectory records")
+    for path, row in records:
+        if row.get("checkpoint") != registered or type(row.get("seed")) is not int or row["seed"] != job["seed"]:
+            raise ValueError(f"{path}: registered evaluation row is for checkpoint step "
+                             f"{(row.get('checkpoint') or {}).get('step')!r} / seed {row.get('seed')!r}, not the "
+                             f"selected step {(best or {}).get('step')!r} / seed {job['seed']}")
+    if best is None:
+        return
+    root = selection["root"]
+    train_report = _read(root/"report.json")
+    try:
+        workflow.verify_selection(root, train_report)
+    except (KeyError, OSError, ValueError) as error:
+        raise ValueError(f"{root}: selection does not follow from the raw validation values ({error})") from None
+    sequence, _ = learning.make_query_sequence(checks.load_protocol())
+    expected = comparison.sequence_sha(sequence)
+    preregistration = _read(root/"registration.json").get("preregistration") or {}
+    found = dict(preregistration=(preregistration.get("model_seed"), preregistration.get("query_sequence_sha256")),
+                 checkpoint=(job["seed"], (best.get("checkpoint_provenance") or {}).get("f04_query_sequence_sha256")))
+    if any(v != (job["seed"], expected) for v in found.values()):
+        raise ValueError(f"{root}: training was not run with seed {job['seed']} (query sequence {expected[:12]}…; "
+                         f"found {found})")
+
+
 def load_selected(condition, job_dir, device, selection=None):
     """Model of `condition` with the checkpoint the registered evaluation used: identity chain (formal_selection), file
     SHA, step, training provenance, condition/architecture and strict state. Optimizer/RNG/runtime are not restored
@@ -316,6 +360,7 @@ def run_one(job_dir, features, output, device_name, max_test=None):
     if (datasets.active().tag, checks.model_seed(), checks.v7_updates()) != (job["dataset"], job["seed"], job["updates"]):
         raise ValueError(f"{job_dir}: dataset/seed/updates in the environment differ from job.json")
     selection = formal_selection(job_dir, condition)
+    verify_registered_run(job_dir, selection)
     digest = features_identity(features, selection["cache_identity"])
     identity = output_identity(selection, digest, max_test)
     if reusable(output, identity):
