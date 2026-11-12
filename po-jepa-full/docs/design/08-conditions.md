@@ -224,7 +224,7 @@ class KoopmanConfig:
 - d 是 JEPA 距离（`losses.jepa_distance`，式14）：d(P, Y) = mean_B mean_(N,E) |LN(P) − LN(Y)|，两侧沿 E 做无 affine LN（eps 1e-5），p = 1，Y 停梯度；intermediate 不 detach，梯度经两段传回；
 - L = L_JEPA + w(s)·(λ_r·L_roll + λ_s·L_space)，w(s) 是一致性预热（v7 正式：前 1000 步线性升到 1）。
 
-和时间一致性项 L_time = mean((direct − composed)/s)² / ((τσ)² + ε) 的区别：L_roll 的比较对象是真值，不是模型自己的长支；不除 (τσ)²（那个分母是给“组合缺口随 τσ → 0 消失”配的，真值误差不随 τσ 消失；T ∈ {1,2,4,8} 时 (τσ)² 跨 4096 倍）；不用 `consistency_metric`。这一选择（JEPA 距离、不除 (τσ)²）是 Claude 的推荐，已在线程里请 Jerry 确认。
+和时间一致性项 L_time = mean((direct − composed)/s)² / ((τσ)² + ε) 的区别：L_roll 的比较对象是真值，不是模型自己的长支；不除 (τσ)²（那个分母是给“组合缺口随 τσ → 0 消失”配的，真值误差不随 τσ 消失；T ∈ {1,2,4,8} 时 (τσ)² 跨 4096 倍）；不用 `consistency_metric`。这一选择（JEPA 距离、不除 (τσ)²）由 Jerry 2026-11-12 定（决策卡选 A：同 JEPA 项的 LN-L1，不除 (τσ)²）。
 
 代码：`po_jepa/rollout_supervision.py` 的 `rollout_supervision_loss(temporal, raw_target, config)`，返回 float64 `ReducedLoss`；单步 `addon.conditions.rollout_sup_step`（和 `training.train_step` 逐步相同，只把 `temporal_consistency_loss` 换成它）。每次更新 5 次 Φ、10 次 p_out。
 
@@ -235,6 +235,10 @@ class KoopmanConfig:
 - λ_s 不重标，原样用基础标定的值（和 po_jepa_full 相同）；补跑标定文件里这一项的 `space_weight` 是抄过来的，读的时候核它等于协议的 `loss.space_weight`，`build` 也直接用协议的值。
 - 一致性监控和提前检查看 time（L_roll）和 space 两项，规则和其他补跑条件相同（07 §2.4）。
 
-### 6.4 不做的事
+### 6.4 任务表和汇总
+
+`make_v8_jobs.py --stage addon --conditions po_jepa_rollout_sup` 只排这个条件（`--conditions` 不写时排 6 个补跑条件；写了就按原值核，只收不重复的补跑条件，写 v7 条件列表会被拒绝）。AE 汇总行带 `--addon-conditions <本次排的条件>`，`summarize_v7.py` 据此要求每组（数据集, 步数, 种子）都有这些补跑条件；不带时只要求结果里出现过的补跑条件，并且只核出现过补跑条件的组。
+
+### 6.5 不做的事
 
 不加中间时刻 τ 的真值监督（训练批里没有 Z_target(τ)）；不改 JEPA 项；不给 Transformer、DROID 加这个条件；不加多于两段的滚动。

@@ -12,7 +12,7 @@ import torch
 from . import cache, checks, comparison, data, environment, evaluation, plots
 
 JOB_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity",
-                  "vjepa2_ac_small", "vjepa2_ac", *comparison.ADDON_CONDITIONS)   # 07 §2.6：补跑的 5 个新条件
+                  "vjepa2_ac_small", "vjepa2_ac", *comparison.ADDON_CONDITIONS)   # 07 §2.6：补跑的 6 个条件（S27a 加了 po_jepa_rollout_sup）
 
 
 def _light_preflight(features, output, device):

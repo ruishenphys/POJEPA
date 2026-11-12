@@ -1,8 +1,8 @@
-"""S26a：N1 基线、N2 消融（仿真补跑的 5 个条件）做成 v8 任务表的可选阶段。
+"""S26a：N1 基线、N2 消融（仿真补跑的条件，S27a 起 6 个）做成 v8 任务表的可选阶段。
 
 - 补跑标定的基础标定可以是本目录 run.py calibrate 写的（--base-calibration local），默认仍是导入的 v7 标定；
-- make_v8_jobs.py --stage addon / addon-pilot，variants、strength、long、timing 的 --conditions 收这 5 个条件；
-- summarize_v7.py 把补跑条件并进同一张表，按 08 §1.3 核初始权重，补跑条件全缺时不算缺失。
+- make_v8_jobs.py --stage addon / addon-pilot，variants、strength、long、timing 的 --conditions 收这些条件（S27a 起 6 个）；
+- summarize_v7.py 把补跑条件并进同一张表，按 08 §1.3 核初始权重；缺失按 --addon-conditions（AE 行传入）或结果里出现过的补跑条件核。
 """
 
 import importlib.util
@@ -351,6 +351,11 @@ def test_make_v8_jobs_conditions_option():
         for bad in ("matched_transformer", "koopman,koopman"):
             assert "的 --conditions 只能是不重复的补跑条件" in _jobs("--stage", stage, "--conditions", bad, ok=False)
         assert "没有这些条件" in _jobs("--stage", stage, "--conditions", "koopman,fictional", ok=False)
+        # S27a 审核 P2-2：显式写 v7 的完整条件列表也要拒绝，不能当成“没写”而排 6 个补跑条件
+        v7 = ",".join(_tool("make_v8_jobs").CONDITIONS)
+        assert "的 --conditions 只能是不重复的补跑条件" in _jobs("--stage", stage, "--conditions", v7, ok=False)
+    for stage in ("full", "pilot"):     # 显式写默认列表也算写了
+        assert "--conditions 只用于" in _jobs("--stage", stage, "--conditions", ",".join(_tool("make_v8_jobs").CONDITIONS), ok=False)
     for stage in ("pilot", "full", "variants", "strength", "long", "timing", "space"):      # 默认任务表不排补跑条件
         assert not any(c in l for l in _jobs("--stage", stage) for c in conditions.ADDON_CONDITIONS)
 
@@ -386,9 +391,9 @@ def _job(root, condition, seed, initial, dataset="push-2000", value=.5):
                                                                                           tcd_normalized=0.))))
 
 
-def _summarize(results, out, monkeypatch):
+def _summarize(results, out, monkeypatch, *extra):
     s = _tool("summarize_v7")
-    monkeypatch.setattr(sys, "argv", ["summarize_v7", "--results", str(results), "--output", str(out)])
+    monkeypatch.setattr(sys, "argv", ["summarize_v7", "--results", str(results), "--output", str(out), *extra])
     s.main()
     return json.loads((out/"summary.json").read_text(encoding="utf-8"))
 
@@ -411,15 +416,57 @@ def test_summarize_with_addon_conditions(tmp_path, monkeypatch):
     for c, h in addon.items():
         _job(tmp_path/"r", c, 1703, h, value=.25)
     summary = _summarize(tmp_path/"r", tmp_path/"o", monkeypatch)
-    assert summary["problems"] == []
-    assert summary["missing"] == [dict(dataset="push-2000", updates=10000, seed=1703, condition=c)
-                                  for c in ("koopman", "po_jepa_rollout_sup")]
+    assert summary["problems"] == [] and summary["missing"] == []    # 没写 --addon-conditions：只要求结果里出现过的补跑条件
+    explicit = _summarize(tmp_path/"r", tmp_path/"o2", monkeypatch, "--addon-conditions", ",".join(conditions.ADDON_CONDITIONS))
+    assert explicit["missing"] == [dict(dataset="push-2000", updates=10000, seed=1703, condition=c)
+                                   for c in ("koopman", "po_jepa_rollout_sup")]
     assert {r["condition"] for r in summary["table"]} == set(V7)|set(addon)
     refs = {c["reference"]: c["future"]["mean"] for c in summary["comparisons"]}
     assert refs["fixed_fourier"] == pytest.approx(.25) and refs["matched_transformer"] == pytest.approx(0.)
     assert any(r.get("condition") == "fixed_fourier" for r in summary["across_seeds"])
     assert any(r.get("comparison") == "po_jepa_full − koopman" for r in summary["across_seeds"]) is False
     assert "fixed_fourier" in (tmp_path/"o/SUMMARY.md").read_text(encoding="utf-8")
+
+
+def _rollout_only(root, datasets, rollout_in):
+    for d in datasets:
+        for c, h in V7.items():
+            _job(root, c, 1703, h, dataset=d)
+        if d in rollout_in:
+            _job(root, "po_jepa_rollout_sup", 1703, "P", dataset=d)
+
+
+def test_summarize_rollout_only_run(tmp_path, monkeypatch):
+    """S27a 审核 P2-1：只排 po_jepa_rollout_sup 时其余 5 个补跑条件不算缺失；rollout 缺了要列出来（显式参数下全缺也要列）。"""
+    rollout = ("--addon-conditions", "po_jepa_rollout_sup")
+    _rollout_only(tmp_path/"a", ("push-2000", "wave-2000"), {"push-2000", "wave-2000"})
+    for extra in ((), rollout):
+        assert _summarize(tmp_path/"a", tmp_path/"oa", monkeypatch, *extra)["missing"] == []
+    _rollout_only(tmp_path/"b", ("push-2000", "wave-2000"), {"push-2000"})     # 一组缺 rollout：显式参数要列出
+    lost = [dict(dataset="wave-2000", updates=10000, seed=1703, condition="po_jepa_rollout_sup")]
+    assert _summarize(tmp_path/"b", tmp_path/"ob", monkeypatch, *rollout)["missing"] == lost
+    assert _summarize(tmp_path/"b", tmp_path/"ob2", monkeypatch)["missing"] == []   # 不写时一个补跑条件都没有的组不核（补跑可选）
+    _job(tmp_path/"b", "koopman", 1703, None, dataset="wave-2000")              # 该组有别的补跑条件：不写参数也要列出 rollout
+    assert _summarize(tmp_path/"b", tmp_path/"ob3", monkeypatch)["missing"] == [   # 出现过的补跑条件每组（有补跑的）都要有
+        dict(dataset="push-2000", updates=10000, seed=1703, condition="koopman"), *lost]
+    assert _summarize(tmp_path/"b", tmp_path/"ob4", monkeypatch, *rollout)["missing"] == lost
+    _rollout_only(tmp_path/"c", ("push-2000", "wave-2000"), set())             # 全缺：只有显式参数能发现
+    assert _summarize(tmp_path/"c", tmp_path/"oc", monkeypatch)["missing"] == []
+    assert _summarize(tmp_path/"c", tmp_path/"od", monkeypatch, *rollout)["missing"] == [
+        dict(dataset=d, updates=10000, seed=1703, condition="po_jepa_rollout_sup") for d in ("push-2000", "wave-2000")]
+    for bad in ("", "matched_transformer", "koopman,koopman", "fictional"):
+        with pytest.raises(SystemExit, match="只能是不重复的补跑条件"):
+            _summarize(tmp_path/"a", tmp_path/"oe", monkeypatch, "--addon-conditions", bad)
+
+
+def test_make_v8_jobs_addon_summary_gets_selected_conditions():
+    """AE 汇总行把本次排的补跑条件传给 summarize_v7（S27a 审核 P2-1）。"""
+    rollout = [l for l in _jobs("--stage", "addon", "--scenes", "push", "--conditions", "po_jepa_rollout_sup") if "summarize_v7" in l]
+    assert rollout == ["python tools/summarize_v7.py --results ../results-v8/full --output ../results-v8/full/summary "
+                       "--addon-conditions po_jepa_rollout_sup"]
+    every = [l for l in _jobs("--stage", "addon-pilot", "--scenes", "push") if "summarize_v7" in l]
+    assert every == ["python tools/summarize_v7.py --results ../results-v8/pilot --output ../results-v8/pilot/summary "
+                     f"--addon-conditions {','.join(conditions.ADDON_CONDITIONS)}"]
 
 
 @pytest.mark.parametrize("condition,reference", [("po_jepa_time_only", "po_jepa_full"), ("po_jepa_space_only", "po_jepa_full"),

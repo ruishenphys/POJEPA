@@ -78,9 +78,9 @@ def main():
     p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space", "readout", "addon", "addon-pilot"), required=True)
     p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
-    p.add_argument("--conditions", default=",".join(CONDITIONS),
-                   help="variants、strength、long、timing、space、readout 评哪些条件；可以加补跑的 6 个（S26a、08 §6，要先跑 --stage addon）；"
-                        "addon、addon-pilot 阶段只能写补跑条件，默认 6 个全排")
+    p.add_argument("--conditions", default=None,
+                   help="variants、strength、long、timing、space、readout 评哪些条件（默认 v7 的条件）；可以加补跑的 6 个（S26a、08 §6，"
+                        "要先跑 --stage addon）；addon、addon-pilot 阶段只能写补跑条件，不写时 6 个全排；pilot、full 不收这个参数")
     p.add_argument("--shards", type=int, default=4, help="每个场景的编码切成几片（每片一张卡）")
     p.add_argument("--features", default="../features-v8")
     p.add_argument("--results", default="../results-v8")
@@ -96,13 +96,17 @@ def main():
     ids = [i for i in a.protocols.split(",") if i] or None
     if ids and not set(ids) <= set(protocols.BY_ID):
         raise SystemExit(f"没有这些协议：{sorted(set(ids)-set(protocols.BY_ID))}")
-    conditions = [c for c in a.conditions.split(",") if c]
+    # 默认值按阶段定：只有确实没写 --conditions 时才用默认（S27a 审核：不能拿字符串是否等于 v7 列表来判断“没写”）
+    addon_stage = a.stage in ("addon", "addon-pilot")
+    if a.conditions is None:
+        conditions = list(ADDON_CONDITIONS if addon_stage else CONDITIONS)
+    else:
+        conditions = [c for c in a.conditions.split(",") if c]
     if not set(conditions) <= {*CONDITIONS, *ADDON_CONDITIONS}:
         raise SystemExit(f"没有这些条件：{sorted(set(conditions)-{*CONDITIONS, *ADDON_CONDITIONS})}")
-    if a.stage in ("pilot", "full") and a.conditions != ",".join(CONDITIONS):
+    if a.stage in ("pilot", "full") and a.conditions is not None:
         raise SystemExit(f"--conditions 只用于 variants、strength、long、timing、space、readout、addon；{a.stage} 的条件是固定的")
-    if a.stage in ("addon", "addon-pilot"):
-        conditions = list(ADDON_CONDITIONS) if a.conditions == ",".join(CONDITIONS) else conditions
+    if addon_stage:
         if not conditions or not set(conditions) <= set(ADDON_CONDITIONS) or len(set(conditions)) != len(conditions):
             raise SystemExit(f"{a.stage} 的 --conditions 只能是不重复的补跑条件：{ADDON_CONDITIONS}")
         conditions = [c for c in ADDON_CONDITIONS if c in conditions]   # 按 ADDON_CONDITIONS 的顺序排
@@ -146,8 +150,8 @@ def main():
                 for c in conditions:
                     print(f"python run.py run {ds(s)} --updates {updates} --seed {seed} --condition {c} "
                           f"--features-root {feats(s)} --device cuda:0 --output {root}/{name(s)}/seed{seed}/{c}")
-        print("# ===== AE 汇总（CPU，AD 段完成后；和 v7 条件同一张表）=====")
-        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary")
+        print("# ===== AE 汇总（CPU，AD 段完成后；和 v7 条件同一张表，每组都要有本次排的补跑条件）=====")
+        print(f"python tools/summarize_v7.py --results {root} --output {root}/summary --addon-conditions {','.join(conditions)}")
         return
 
     if a.stage == "long":

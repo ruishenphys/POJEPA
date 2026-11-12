@@ -24,7 +24,9 @@ from po_jepa.runtime import plots  # noqa: E402
 
 V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
 # S26a：v8 任务表 --stage addon 的补跑条件（N1 基线、N2 消融），和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）。
-# 它们和 v7 条件进同一张表；某个 (数据集, 步数, 种子) 一个补跑条件都没有时不算缺失（补跑是可选的）。
+# 它们和 v7 条件进同一张表。缺失怎么算（S27a 审核后）：--addon-conditions 写了时，每个 (数据集, 步数, 种子) 都要有 v7 条件加这些
+# 补跑条件（任务生成器 make_v8_jobs.py --stage addon 的 AE 行会传本次排的补跑条件）；没写时，只在某组里出现过补跑条件才核，
+# 要求的是结果里任何一组出现过的补跑条件（不再要求 6 个全有：只排一部分补跑条件时其余的不算缺失）。
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
                     "po_jepa_rollout_sup")   # 08 §6：有真值两段滚动的对照（2026-11-12 加）
 CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
@@ -105,7 +107,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--results", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--addon-conditions", default=None,
+                   help="逗号分隔，每组都必须有的补跑条件（不重复）；不写时按结果里出现过的补跑条件核（见文件头）")
     a = p.parse_args()
+    expected_addon = None
+    if a.addon_conditions is not None:
+        expected_addon = [c for c in a.addon_conditions.split(",") if c]
+        if not expected_addon or not set(expected_addon) <= set(ADDON_CONDITIONS) or len(set(expected_addon)) != len(expected_addon):
+            raise SystemExit(f"--addon-conditions 只能是不重复的补跑条件：{ADDON_CONDITIONS}")
     jobs = [load_job(f) for f in find_jobs(a.results)]
     if not jobs:
         raise SystemExit(f"{a.results} 下没有完成的 v7 任务")
@@ -139,8 +148,7 @@ def main():
                 if ref in by_c:
                     comparisons.append(dict(dataset=dataset, updates=updates, seed=seed, reference=ref,
                                             future=paired(f, by_c[ref]), delta_act=paired(f, by_c[ref], "delta_act")))
-    missing = [dict(dataset=d, updates=u, seed=s, condition=c) for (d, u, s), by_c in sorted(groups.items())
-               for c in (CONDITIONS if set(by_c) & set(ADDON_CONDITIONS) else V7_CONDITIONS) if c not in by_c]
+    missing = missing_jobs(groups, expected_addon)
 
     # 跨种子
     across = []
@@ -192,6 +200,20 @@ def main():
     (a.output/"summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     (a.output/"SUMMARY.md").write_text(_markdown(summary), encoding="utf-8")
     print(f"{len(jobs)} 个任务；问题 {len(problems)} 个；缺失 {len(missing)} 个 → {a.output/'SUMMARY.md'}")
+
+
+def missing_jobs(groups, expected_addon=None):
+    """每组（数据集, 步数, 种子）缺的条件。expected_addon 给了：每组都要 v7 条件 + 这些补跑条件；
+    没给：结果里出现过的补跑条件，只在本组出现过补跑条件时要求（补跑是可选的）。"""
+    seen = {c for by_c in groups.values() for c in by_c if c in ADDON_CONDITIONS}
+    out = []
+    for (d, u, s), by_c in sorted(groups.items()):
+        if expected_addon is not None:
+            addon = [c for c in ADDON_CONDITIONS if c in expected_addon]
+        else:
+            addon = [c for c in ADDON_CONDITIONS if c in seen] if set(by_c) & set(ADDON_CONDITIONS) else []
+        out += [dict(dataset=d, updates=u, seed=s, condition=c) for c in (*V7_CONDITIONS, *addon) if c not in by_c]
+    return out
 
 
 def _label(job):

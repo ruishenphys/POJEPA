@@ -61,7 +61,7 @@ CONDITIONS = ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full")
 # v7：外部基线 V-JEPA 2-AC 两个版本（官方规模微调 / 参数匹配缩小版）；只在 v7 协议下可用
 from po_jepa.ac_baseline import AC_CONDITIONS, ACPredictor
 V7_CONDITIONS = (*CONDITIONS, *AC_CONDITIONS)
-# 07 §1 第 3、4 条：补跑的 5 个新条件定义在 addon.conditions，共享函数开头按名字分发；ALL_CONDITIONS 不含 identity
+# 07 §1 第 3、4 条：补跑的 6 个条件定义在 addon.conditions，共享函数开头按名字分发；ALL_CONDITIONS 不含 identity
 from .addon import conditions as addon_conditions
 ADDON_CONDITIONS = addon_conditions.ADDON_CONDITIONS
 ALL_CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
@@ -615,7 +615,7 @@ def monitored_consistency_terms(condition, loss_config):
     """07 §2.4：一致性监控和提前检查看哪几项。
 
     po_jepa_full 固定看 ("time", "space")，不读权重（v7 行为）；其余 v7 条件和 identity 不看，返回 None；
-    5 个新条件看权重 > 0 的项（按 time、space 的顺序），一项都没有就返回 None；其他名字报 ValueError（S10）。
+    补跑的 6 个条件看权重 > 0 的项（按 time、space 的顺序），一项都没有就返回 None；其他名字报 ValueError（S10）。
     """
     if condition == "po_jepa_full":
         return ("time", "space")

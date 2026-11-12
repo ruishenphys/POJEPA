@@ -217,7 +217,7 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "8f8d6149b4cde63790b23099b696c51f661abdd90672ab99813ae85b97c8e5e3",
+      "candidate_sha256": "871da710d1b18f2530ad13e22ffcd6e2da248792f4a53dcbc94728ab22876597",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
       "executable_ast_sha256": "c09d950627ebc18703390c6d8c4153f97f718b27558a42d67ed018095ebe9852",
