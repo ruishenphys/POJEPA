@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -132,6 +131,7 @@ def _acquire(lock: Path) -> int:
     """取运行器锁：`flock` 排他锁，从取得到运行器退出一直持有（S14-fix1：原先先看文件在不在再写 PID，两个运行器
     可以同时取得）。锁跟着打开的文件描述符走，进程不管怎么退出（包括被杀）内核都会释放，没有陈旧锁要处理；锁文件
     不删（删了别的进程可能锁在已删的旧文件上）。文件内容只是当前持锁进程的 PID，给人看。返回描述符，`_release` 关。"""
+    import fcntl                   # 只在 Linux/macOS 有；在这里导入，Windows 上模块和测试照样能收集（R4 审核）
     lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
     try:

@@ -136,6 +136,28 @@ def _view_json(path: Path) -> dict:
     return ix._loads(Path(path).read_bytes(), str(path))
 
 
+def selected_checkpoint_identity(path: Path, selection: Mapping, *, condition: str, seed: int,
+                                 registration_sha256: str) -> None:
+    """R4-1-P1-1：选中的检查点自己记的训练身份（`train.checkpoint_provenance` 存的 `droid_training`）必须等于登记的
+    (条件, 种子) 和 registration.json 的文件 SHA；文件 SHA 先要等于 selection.json 记的。登记、报告、source、job 都能
+    一起改写再重新绑定 SHA，检查点里的这一项不重新训练就改不了，所以汇总也要核它（评测端 `evaluate.load_selected` 同样核）。
+    用 mmap 读，只取来源字典，不把官方规模 AC 的权重整份读进内存。缺这一项的检查点也拒绝（没有旧格式兼容）。"""
+    from po_jepa.droid import train as tr
+    best = selection.get("best") or {}
+    root = Path(path).resolve()
+    ckpt = (root/str(best.get("checkpoint"))).resolve()
+    if not ckpt.is_relative_to(root/"checkpoints") or not ckpt.is_file():
+        raise ValueError(f"{path}: the selected checkpoint {best.get('checkpoint')!r} is not a file under checkpoints/")
+    if cache.file_sha(ckpt) != best.get("checkpoint_sha256"):
+        raise ValueError(f"{path}: {ckpt.name} differs from the checkpoint SHA in selection.json")
+    payload = torch.load(ckpt, map_location="cpu", weights_only=True, mmap=True)
+    stored = (payload.get("provenance") or {}).get(tr.TRAINING_IDENTITY_KEY) if type(payload) is dict else None
+    want = dict(condition=condition, seed=seed, registration_sha256=registration_sha256)
+    del payload
+    if stored != want or type(stored.get("seed")) is not int:
+        raise ValueError(f"{path}: {ckpt.name} was saved by the training {stored!r}, not by {want!r}")
+
+
 def read_train(path: Path) -> TrainView:
     """一个完成的训练任务（09 §4.1、§4.2、§5，S09a 的格式；S09b 写）：registration.json、report.json（COMPLETE.json 绑定）、
     selection.json、train-log.jsonl。收敛曲线：验证点的 (步, 均值)，训练 JEPA 损失取日志每行（100 步）的平均、记在该行末步。
@@ -154,6 +176,8 @@ def read_train(path: Path) -> TrainView:
         raise ValueError(f"{path}: report.json was written for another registration.json")
     if (reg["condition"], reg["seed"]) != (report["condition"], report["seed"]):
         raise ValueError(f"{path}: registration and report name different tasks")
+    selected_checkpoint_identity(path, selection, condition=reg["condition"], seed=reg["seed"],
+                                 registration_sha256=cache.file_sha(path/"registration.json"))
     rows = tr._read_lines(path/tr.LOG_FILE)
     try:
         tr.check_log_coverage(rows, reg["schedule"]["updates"])

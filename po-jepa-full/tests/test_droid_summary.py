@@ -546,6 +546,44 @@ def test_misplaced_task_directories_are_rejected(tmp_path):
     assert not ds._same_seed(1704.0, 1704) and not ds._same_seed(True, 1)
 
 
+def test_selected_checkpoint_identity(tmp_path):
+    """R4-1-P1-1：汇总的训练读取器核选中检查点里的 droid_training（条件、种子、登记 SHA），SHA 先等于 selection.json 的；
+    缺这一项、种子是 1704.0、路径逃出 checkpoints/ 的都拒绝。"""
+    import torch
+    from po_jepa.droid import train as tr
+    root = tmp_path/"train"
+    (root/"checkpoints").mkdir(parents=True)
+    want = dict(condition="koopman", seed=S0, registration_sha256="r"*64)
+
+    def save(name, identity):
+        path = root/"checkpoints"/name
+        prov = {"batch": "x"} if identity is None else {"batch": "x", tr.TRAINING_IDENTITY_KEY: identity}
+        torch.save(dict(completed_steps=10, provenance=prov, model_state={"w": torch.zeros(2)}), path)
+        return dict(checkpoint=f"checkpoints/{name}", checkpoint_sha256=cache.file_sha(path))
+
+    def check(best, **kw):
+        ds.selected_checkpoint_identity(root, dict(best=best), **{**want, **kw})
+
+    good = save("good.pt", want)
+    check(good)
+    with pytest.raises(ValueError, match="was saved by the training"):
+        check(good, seed=S1)
+    with pytest.raises(ValueError, match="was saved by the training"):
+        check(good, condition="po_jepa_full")
+    with pytest.raises(ValueError, match="was saved by the training"):
+        check(good, registration_sha256="s"*64)
+    with pytest.raises(ValueError, match="was saved by the training None"):
+        check(save("old.pt", None))
+    with pytest.raises(ValueError, match="was saved by the training"):
+        check(save("float.pt", dict(want, seed=float(S0))))
+    with pytest.raises(ValueError, match="differs from the checkpoint SHA"):
+        check(dict(good, checkpoint_sha256="0"*64))
+    outside = tmp_path/"other.pt"
+    outside.write_bytes((root/"checkpoints"/"good.pt").read_bytes())
+    with pytest.raises(ValueError, match="not a file under checkpoints/"):
+        check(dict(good, checkpoint="../other.pt"))
+
+
 def test_read_eval_view_binds_source_to_job(tmp_path):
     """RF-P1-1：真实读取器 `read_eval_view` 要求 source.json 的 schema、条件、种子等于 job.json 的，并带出它记的训练
     registration.json SHA（“评测”核对拿它和训练目录的登记比）。"""

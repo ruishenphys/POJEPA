@@ -25,6 +25,9 @@ import droid_jobs  # noqa: E402
 import droid_run  # noqa: E402
 from po_jepa.droid.config import load_config  # noqa: E402
 
+# 运行器的锁（fcntl.flock）只在 Linux/macOS 有；Windows 上跳过真起运行器的测试，其余照常收集、运行（R4 审核）
+POSIX_RUNNER = pytest.mark.skipif(sys.platform == "win32", reason="droid_run.py runner lock is Linux/macOS only")
+
 CONFIGS = ROOT/"configs"/"droid"
 DATA, RUNS = "/data/droid-1.0.1", "/runs/po-jepa-droid"
 CONDITIONS = ["po_jepa_full", "po_jepa_no_consistency", "fixed_fourier", "koopman",
@@ -362,6 +365,7 @@ def runner(tmp_path, path, *extra):
     return droid_run.main([str(path), "--workdir", str(tmp_path), "--poll-seconds", "0.02", *extra])
 
 
+@POSIX_RUNNER
 def test_runner_skips_done_requeues_75_and_logs(tmp_path, capsys):
     path = fake_graph(tmp_path, [("a", [], 0, 1, 1, 0), ("b", ["a"], 0, 1, 1, 1), ("c", ["b"], 0, 1, 1, 2)])
     flag_a = tmp_path/"runs/fake/flags/a.done"
@@ -380,6 +384,7 @@ def test_runner_skips_done_requeues_75_and_logs(tmp_path, capsys):
     assert started(tmp_path) == ["b", "b", "b", "c"]
 
 
+@POSIX_RUNNER
 def test_runner_rechecks_train_eval_and_summary(tmp_path, capsys):
     """S11-P1-1、RF-P2-4：完成标志已在的 check、train、eval、summary 每次启动运行器都照常运行一次（由阶段核身份）；复核
     失败时下游不开始；其他阶段完成标志在就跳过。dry-run 把它们列成“要复核”。"""
@@ -408,6 +413,7 @@ def test_runner_rechecks_train_eval_and_summary(tmp_path, capsys):
     assert "因上游失败没有开始的：eval/x, summary, train/x" in capsys.readouterr().out
 
 
+@POSIX_RUNNER
 def test_runner_lock_is_released_when_writing_the_pid_fails(tmp_path, monkeypatch):
     """S14-P3-1：取得 flock 之后写 PID 出错（磁盘满）时描述符关掉、锁随之释放，同一进程再取能取到（描述符还开着的话 flock
     仍被持有，再取会报“另一个 droid_run.py 正在用”）；释放时清空出错也关描述符。"""
@@ -429,6 +435,7 @@ def test_runner_lock_is_released_when_writing_the_pid_fails(tmp_path, monkeypatc
     droid_run._release(droid_run._acquire(lock))
 
 
+@POSIX_RUNNER
 def test_runner_failure_blocks_downstream_only(tmp_path, capsys):
     path = fake_graph(tmp_path, [("a", [], 0, 1, 1, 0), ("b", ["a"], 0, 1, 1, 1), ("d", ["b"], 0, 1, 1, 2),
                                  ("c", [], 0, 1, 1, 5), ("e", ["c"], 0, 1, 1, 6), ("f", [], 0, 1, 1, 0)])
@@ -443,6 +450,7 @@ def test_runner_failure_blocks_downstream_only(tmp_path, capsys):
     assert started(tmp_path)[4:] == ["a", "f", "b", "d"]
 
 
+@POSIX_RUNNER
 def test_runner_priority_then_id(tmp_path):
     path = fake_graph(tmp_path, [("z", [], 0, 1, 1, 1), ("y", [], 0, 1, 1, 2), ("x", [], 0, 1, 1, 2),
                                  ("w", ["z"], 0, 1, 1, 0)])
@@ -459,6 +467,7 @@ def _max_overlap(evs, pick):
     return best
 
 
+@POSIX_RUNNER
 def test_runner_resource_accounting(tmp_path):
     specs = [(f"g{k}", [], 1, 2, 10, 0) for k in range(4)] + [(f"c{k}", [], 0, 3, 10, 1) for k in range(3)] \
         + [("big", [], 0, 1, 25, 2), ("gpu2", [], 2, 1, 1, 3), ("toomuch", [], 3, 1, 1, 0), ("after", ["toomuch"], 0, 1, 1, 0)]
@@ -498,6 +507,7 @@ def test_runner_dry_run_lists_all_in_order(tmp_path, capsys):
     assert events(tmp_path) == [] and not (tmp_path/"runs/fake/logs").exists()
 
 
+@POSIX_RUNNER
 def test_runner_ctrl_c_then_rerun_finishes_only_the_rest(tmp_path):
     path = fake_graph(tmp_path, [("a", [], 0, 1, 1, 0), ("b", ["a"], 0, 1, 1, 0), ("c", ["b"], 0, 1, 1, 0)])
     plan(tmp_path, b=["hang", 0])
@@ -550,6 +560,7 @@ def test_entry_as_a_script(tmp_path):
     assert r.returncode == 0 and "already complete" in r.stdout
 
 
+@POSIX_RUNNER
 def test_entry_runs_the_real_stage_on_a_bare_completion_flag(tmp_path):
     """S11-P1-1 的反例：训练、评测目录里只有一个空的 COMPLETE.json（没有报告、登记、job.json），统一入口进真实阶段代码，
     不报完成。"""
@@ -595,6 +606,7 @@ def _lock_workers(tmp_path, n, hold):
     return [p.returncode for p in procs], outs, lock
 
 
+@POSIX_RUNNER
 def test_runner_lock_is_exclusive_across_processes(tmp_path):
     codes, outs, lock = _lock_workers(tmp_path, 8, 2.0)
     assert sorted(codes) == [0] + [3]*7, outs              # 同时抢：恰好一个取得
@@ -605,6 +617,7 @@ def test_runner_lock_is_exclusive_across_processes(tmp_path):
     assert codes == [0]                                     # 释放后能再取
 
 
+@POSIX_RUNNER
 def test_runner_lock_survives_a_killed_holder_and_names_it(tmp_path):
     lock = tmp_path/"runs/fake/logs/RUNNER.pid"
     holder = subprocess.Popen([sys.executable, "-c", f"""

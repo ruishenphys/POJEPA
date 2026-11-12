@@ -461,6 +461,29 @@ def test_read_train_on_a_real_training_directory(root, tmp_path):
         tr._rewrite_lines(bad/tr.LOG_FILE, edited)
         got = ds.read_train(bad)
         assert got.log_ranges == view.log_ranges and "contiguously" in got.log_problem
+    # R4-1-P1-1：登记和报告一起重标成 seed1704、重新绑定 report→registration 和 COMPLETE→report 的 SHA，检查点不动：
+    # 只有检查点里的 droid_training 还记着 seed1703，read_train 必须拒绝（汇总默认读取器就是 read_train）
+    assert ds.Readers().train is ds.read_train
+    relabel = tmp_path/"relabel"
+    shutil.copytree(out, relabel)
+    reg2 = json.loads((relabel/"registration.json").read_text())
+    reg2["seed"] = 1704
+    (relabel/"registration.json").write_text(json.dumps(reg2))
+    rep2 = json.loads((relabel/"report.json").read_text())
+    rep2["seed"] = 1704
+    rep2["registration_sha256"] = cache.file_sha(relabel/"registration.json")
+    (relabel/"report.json").write_text(json.dumps(rep2))
+    (relabel/"COMPLETE.json").write_text(json.dumps(dict(json.loads((relabel/"COMPLETE.json").read_text()),
+                                                         report_sha256=cache.file_sha(relabel/"report.json"))))
+    with pytest.raises(ValueError, match=r"was saved by the training .*'seed': 1703.*not by .*'seed': 1704"):
+        ds.read_train(relabel)
+    # 选中的检查点字节被换过（SHA 和 selection.json 不符）也拒绝
+    swapped = tmp_path/"swapped"
+    shutil.copytree(out, swapped)
+    best = swapped/selection["best"]["checkpoint"]
+    best.write_bytes(best.read_bytes() + b"x")
+    with pytest.raises(ValueError, match="differs from the checkpoint SHA in selection.json"):
+        ds.read_train(swapped)
     tampered = json.loads((out/"registration.json").read_text())
     tampered["seed"] = 1
     (out/"registration.json").write_text(json.dumps(tampered))
