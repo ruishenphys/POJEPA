@@ -560,7 +560,6 @@ def test_entry_as_a_script(tmp_path):
     assert r.returncode == 0 and "already complete" in r.stdout
 
 
-@POSIX_RUNNER
 def test_entry_runs_the_real_stage_on_a_bare_completion_flag(tmp_path):
     """S11-P1-1 的反例：训练、评测目录里只有一个空的 COMPLETE.json（没有报告、登记、job.json），统一入口进真实阶段代码，
     不报完成。"""

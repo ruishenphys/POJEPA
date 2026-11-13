@@ -23,9 +23,18 @@
   的实现也能通过。改为夹具多一个只有清单的片 `train_extra`，断言两者不同、job 里记的仍是测试片清单；临时把实现改成传
   测试片清单，这个测试失败（核过后已还原）。
 - `tools/droid_run.py` 顶层 `import fcntl` 使 `test_droid_jobs.py` 在 Windows 上整个文件收集失败。`fcntl` 挪进 `_acquire`；
-  真起运行器或运行器锁的 10 个测试在 Windows 上标 skip（运行器锁仍只支持 Linux/macOS，同前），其余照常运行。
+  真起运行器或运行器锁的 9 个测试在 Windows 上标 skip（运行器锁仍只支持 Linux/macOS，同前），其余照常运行。
 
 ## 验证（CPU 验证级，Python 3.12.3、torch 2.11.0+cpu）
 
 - 相关 4 个文件 summary、calibrate_check、evaluate_extra、jobs：54 个里 53 过，失败的 1 个是新夹具漏建目录，修后该测试过。
 - 按约定修 Codex 意见不做故意改坏；上面那一处“传测试片清单”是为确认审核指出的测试缺口确实补上。全量回归见交接。
+
+## 第五轮本机 Codex 复审（R5-full，cb9d012）的两条
+
+- P2（父版本已有的残留）：零样本对照 `vjepa2_ac_zeroshot` 的构造种子只取自可改写的 job.json，汇总只在找到同种子的 vjepa2_ac
+  训练时比初始权重，找不到就跳过；构造种子改成 9999 也通过。现在 `run_checks` 的“初始权重”要求构造种子是 int 且等于
+  `eval_job.construction_seed(config)`（配置的第一个种子，09 §2.4），并固定用这个种子找 vjepa2_ac 训练比初始权重；
+  `read_eval_view` 对不训练的对照另核 source.json 和 job.json 记的构造种子、初始权重相同。测试：“初始权重”加 9999、
+  第二个种子带它的初始权重、1703.0 三例（各自只让这一项不通过）；read_eval_view 加两例。
+- P3：`test_entry_runs_the_real_stage_on_a_bare_completion_flag` 不起运行器，去掉 Windows skip（剩 9 个）。

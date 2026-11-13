@@ -467,7 +467,13 @@ CASES = {
           lambda run, reg: _train(reg, "po_jepa_full", S1, lambdas=None)],
     "初始权重": [lambda run, reg: _train(reg, "fixed_fourier", S1, initial_model_sha256="i"*64),
              lambda run, reg: _train(reg, "transformer_consistency", S0, initial_model_sha256="i"*64),
-             lambda run, reg: _eval(reg, "vjepa2_ac_zeroshot", None, initial_model_sha256="i"*64)],
+             lambda run, reg: _eval(reg, "vjepa2_ac_zeroshot", None, initial_model_sha256="i"*64),
+             # R5-full P2：构造种子不是配置的第一个种子（不存在的种子；换成第二个种子并带上它的初始权重）
+             lambda run, reg: _eval(reg, "vjepa2_ac_zeroshot", None, construction_seed=9999,
+                                    initial_model_sha256="no-such-initial-weights"),
+             lambda run, reg: _eval(reg, "vjepa2_ac_zeroshot", None, construction_seed=S1,
+                                    initial_model_sha256=f"init-vjepa2_ac-{S1}"),
+             lambda run, reg: _eval(reg, "vjepa2_ac_zeroshot", None, construction_seed=float(S0))],
     "训练日志": [lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (102, 500))),
              lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (100, 500))),
              lambda run, reg: _train(reg, "koopman", S0, log_ranges=((1, 100), (101, 400)), completed=400),
@@ -602,6 +608,22 @@ def test_read_eval_view_binds_source_to_job(tmp_path):
         make(tmp_path/f"bad{k}", {**good, **change})
         with pytest.raises(ValueError, match="source.json names"):
             ds.read_eval_view(tmp_path/f"bad{k}")
+    # R5-full P2：不训练的对照，source.json 和 job.json 记的构造种子、初始权重必须相同
+    def make_zeroshot(folder, source, **job):
+        folder.mkdir(parents=True)
+        write(folder/"source.json", source)
+        write(folder/"job.json", dict(kind=ej.JOB_KIND, condition="vjepa2_ac_zeroshot", seed=None,
+                                      feature_manifest_sha256="f"*64, data_sha256={}, checkpoint=None,
+                                      construction_seed=S0, initial_model_sha256="i0", **job,
+                                      source_sha256=hashlib.sha256(cache._json_bytes(source)).hexdigest()))
+    zs = dict(schema=ej.SOURCE_SCHEMA, condition="vjepa2_ac_zeroshot", seed=None, construction_seed=S0,
+              initial_model_sha256="i0")
+    make_zeroshot(tmp_path/"zs", zs)
+    assert ds.read_eval_view(tmp_path/"zs").construction_seed == S0
+    for k, change in enumerate((dict(construction_seed=S1), dict(initial_model_sha256="i1"))):
+        make_zeroshot(tmp_path/f"zs{k}", {**zs, **change})
+        with pytest.raises(ValueError, match="different construction seeds or initial weights"):
+            ds.read_eval_view(tmp_path/f"zs{k}")
 
 
 # ---------------------------------------------------------------- 自助法（13 §3、§8.2）

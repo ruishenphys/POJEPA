@@ -120,6 +120,7 @@ T5 的 ε̂ 和有效斜率：ε̂ 是每个 (场景, 种子, 条件) 上 D4 窗
 第三轮审核修复（e9016a8，见 `docs/segments/review-fix-e9016a8.md`）：读每个评测和训练目录时先核报告、`job.json`、`source.json`（或训练登记）里的 (条件, 种子) 都等于目录槽位、`job.json` 等于报告的 job，不等就报错退出（RF-P1-1：目录槽位不是身份）；“评测”另核 source.json 记的训练登记 SHA 等于该训练目录的；“σ_z”另核 `sigma_z.json` 的动作尺度 SHA 等于数据根的、截断间隙、PO-JEPA 类训练和 check/env 读的是同一份 `sigma_z.json`（RF-P1-2）；“特征”把 `sigma_z.json` 和 `check/env.json` 记的特征总清单也算进去；“配置”包括 `check/env.json`（RF-P2-4）。
 
 第四轮审核修复（fe48a5c，见 `docs/segments/review-fix-fe48a5c.md`）：训练读取器 `read_train` 另读 `selection.json` 选中的检查点（先核文件 SHA，再用 mmap 只取来源字典），检查点里训练时写下的 `droid_training`（条件、种子、registration.json 的文件 SHA）必须等于登记和槽位，缺这一项也拒绝（R4-1-P1-1：登记、报告、source、job 能一起改写再重新绑定，检查点里的这一项不重新训练就改不了）。
+第五轮复审补：“初始权重”要求 vjepa2_ac_zeroshot 的构造种子是 int 且等于配置的第一个种子（`eval_job.construction_seed`），固定用它找 vjepa2_ac 训练比初始权重；读取时 source.json 和 job.json 的构造种子、初始权重必须相同。
 
 ### 8.4 表
 

@@ -224,6 +224,8 @@ def read_eval_view(path: Path) -> EvalView:
             or source.get("seed") != job.get("seed")):
         raise ValueError(f"{path}: source.json names {source.get('condition')!r}/seed{source.get('seed')!r}, "
                          f"job.json {job.get('condition')!r}/seed{job.get('seed')!r}")
+    if job.get("seed") is None and any(source.get(k) != job.get(k) for k in ("construction_seed", "initial_model_sha256")):
+        raise ValueError(f"{path}: source.json and job.json record different construction seeds or initial weights")
     checkpoint = job.get("checkpoint")
     return EvalView(condition=job["condition"], seed=job["seed"], feature_manifest_sha256=job["feature_manifest_sha256"],
                     data_sha256=dict(job["data_sha256"]),
@@ -653,9 +655,14 @@ def run_checks(config: DroidConfig, got: Mapping) -> list[dict]:
     for (c, s), e in sorted(evals.items(), key=_order):
         if c == "vjepa2_ac_zeroshot":
             v = e["view"]
-            partner = trains.get(("vjepa2_ac", v.construction_seed))
+            # R5-full P2：构造种子是协议定的（eval_job.construction_seed = 配置的第一个种子），不是记录说了算
+            from po_jepa.droid import eval_job as ej
+            want = ej.construction_seed(config)
+            if type(v.construction_seed) is not int or v.construction_seed != want:
+                p.append(f"eval/vjepa2_ac_zeroshot construction seed {v.construction_seed!r} != {want} (09 §2.4)")
+            partner = trains.get(("vjepa2_ac", want))
             if partner is not None and v.initial_model_sha256 != partner.initial_model_sha256:
-                p.append(f"eval/vjepa2_ac_zeroshot initial weights differ from vjepa2_ac seed{v.construction_seed}")
+                p.append(f"eval/vjepa2_ac_zeroshot initial weights differ from vjepa2_ac seed{want}")
     out.append(_check("初始权重", p))
 
     p = []
