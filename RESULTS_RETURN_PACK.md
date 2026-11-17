@@ -52,6 +52,7 @@ python po-jepa/tools/pack_results.py pack results-v7/full/v7.1 logs-v7 po-jepa/c
 - 最后两行应该是 `verified N files: every rebuilt file matches its sha256 and size` 和 `wrote results-v7-....pack.sqlite: ... MB`，把这个 `.pack.sqlite` 文件发给 Jerry 就行。不用再压缩，里面已经压过了。
 - 中途出错或被打断时，不会留下 `.pack.sqlite`，只会留下 `.pack.sqlite.partial`，直接重跑同一条命令即可。如果报错，把屏幕输出发给 Jerry。
 - 主进程需要一些内存记录重复内容的位置，正式规模估计 1～2 GB。
+- 文件名里带 `\`、`:` 或控制字符的文件在 Windows 上没法还原，打包时会报错并给出文件名；改名或用 `--exclude` 去掉即可。用 2026-11-17 早先取的旧版工具打的包，新版照样能核对和解包。
 
 ## 三、Jerry 这边解包（Windows 也一样）
 
