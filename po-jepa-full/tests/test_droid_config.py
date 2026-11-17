@@ -262,7 +262,7 @@ def test_loss_config_takes_only_the_weights_from_arguments(monkeypatch):
     assert type(got) is LossConfig
     assert {f.name for f in dataclasses.fields(LossConfig)} == {
         *dc.V7_LOSS_ITEMS, "time_weight", "space_weight", "consistency_warmup_updates", "grad_clip_norm",
-        "lr_min", "lr_decay_updates", "lr_warmup_updates"}
+        "lr_min", "lr_decay_updates", "lr_warmup_updates", "temporal_partition"}   # S28b：DROID 取默认二等分
     assert got == LossConfig(jepa_exponent=v7["jepa_exponent"], layer_norm_epsilon=v7["layer_norm_epsilon"],
                              time_epsilon=v7["time_epsilon"], space_epsilon=v7["space_epsilon"],
                              consistency_metric=v7["consistency_metric"], time_weight=0.0123, space_weight=0.0456,

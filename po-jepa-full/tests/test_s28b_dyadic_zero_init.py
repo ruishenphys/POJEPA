@@ -429,6 +429,12 @@ def test_rollout_sup_build_stays_bisection_under_dyadic(v7, monkeypatch):
     assert loss.temporal_partition == "bisection"
     _, loss = conditions.build("po_jepa_time_only", torch.device("cpu"))
     assert loss.temporal_partition == "dyadic"
+    # Codex S28b P2-2：补跑标定的 JEPA-only 预训练也固定二等分
+    from po_jepa.runtime.addon import calibrate
+    _, loss = calibrate._jepa_only("po_jepa_rollout_sup", torch.device("cpu"))
+    assert loss.temporal_partition == "bisection" and loss.time_weight == loss.space_weight == 0.
+    _, loss = calibrate._jepa_only("fixed_fourier", torch.device("cpu"))
+    assert loss.temporal_partition == "dyadic"
 
 
 def test_summary_groups_variants_apart():

@@ -995,7 +995,7 @@ def figures(summary: Mapping, curves: Mapping) -> dict[str, str]:
         d8 = s["by_outcome"]["all"]["D8"]
         series = []
         for c in summary["conditions"]:
-            if c in AC:
+            if c in AC or c == "identity":   # S28b（C3）：identity 不作对比基线，不画
                 continue
             points = sorted((r["x"], r["pd_in"]["mean"]) for r in d8[c]["partitions"] if r["pd_in"]["mean"] is not None)
             if points:

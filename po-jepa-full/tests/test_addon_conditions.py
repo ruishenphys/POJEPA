@@ -254,7 +254,7 @@ def test_observed_update_rejects_wrong_readout_count(monkeypatch):
     model, batch, config = case("koopman")
     optimizer = comparison.make_optimizer(model)
     model.train()
-    monkeypatch.setattr(conditions, "expected_readouts", lambda condition, model: 3)
+    monkeypatch.setattr(conditions, "expected_readouts", lambda condition, model, **_: 3)   # S28b：多了 loss_config/batch/step
     with pytest.raises(ValueError, match="^condition update count/readouts/finite diagnostics mismatch$"):
         comparison._observed_update("koopman", model, optimizer, batch, config, 0)
 
@@ -917,8 +917,8 @@ def test_consumer_sources_register_new_files(v7, monkeypatch):
 def test_consistency_share_applies_warmup_scale(monkeypatch, condition):
     """S10b 审核 B M10：share = 权重 × warmup_scale × grad_k / grad_jepa，warmup_scale < 1 时也对。"""
     norms = dict(jepa=1., time=2., space=3., grad_jepa=4., grad_time=2., grad_space=1.)
-    monkeypatch.setattr(training, "consistency_gradient_norms", lambda model, batch, loss_config: dict(norms))
-    monkeypatch.setattr(calibration, "generic_gradient_norms", lambda model, batch, loss_config: dict(norms))
+    monkeypatch.setattr(training, "consistency_gradient_norms", lambda model, batch, loss_config, step=None: dict(norms))
+    monkeypatch.setattr(calibration, "generic_gradient_norms", lambda model, batch, loss_config, step=None: dict(norms))
     monkeypatch.setattr(training, "consistency_warmup_scale", lambda loss_config, completed: .25)
     interval = checks.load_protocol()["monitoring"]["consistency_interval"]
     loss_config = Namespace(time_weight=.5, space_weight=8.)

@@ -653,7 +653,7 @@ def figures(summary, curves):
                 series, f"{scene}：同分布误差—{defect}（每个种子一个点）", "同分布未来误差 e_c", defect)
         series = []
         for c in CONDITIONS:
-            if c in AC:          # 输入尺度的量对 AC 不可比，不画进同一坐标系
+            if c in AC or c == "identity":   # 输入尺度的量对 AC 不可比；identity 不作对比基线（S28b C3），都不画
                 continue
             rows = s["partitions"][c]["partitions"]
             points = sorted((r["x"], r["pd_in"]["mean"]) for r in rows if r["pd_in"]["mean"] is not None)

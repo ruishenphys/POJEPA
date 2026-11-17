@@ -107,6 +107,30 @@ def test_tcd_scd_normalized_match_paper_definitions():
 
 # ---------- 引理 5.4、5.3 和联合时空界：实测左边 ≤ 右边 ----------
 
+def hand_temporal(partition, eps, lip):
+    """引理 5.4 右边逐项手算：ε_t Σ_{i≥2} t_{i−1}τ_i e^{L(T−t_i)}。"""
+    t = [sum(partition[:i]) for i in range(len(partition)+1)]
+    return eps*sum(t[i-1]*partition[i-1]*math.exp(lip*(t[-1]-t[i])) for i in range(2, len(t)))
+
+
+def hand_spatial(partition, eps, lip):
+    """引理 5.3 右边逐项手算：ε_s Σ_{i≥1} τ_i e^{L(T−t_i)}。"""
+    t = [sum(partition[:i]) for i in range(len(partition)+1)]
+    return eps*sum(partition[i-1]*math.exp(lip*(t[-1]-t[i])) for i in range(1, len(t)))
+
+
+def test_right_hand_sums_match_hand_values():
+    """Codex S28b P3-1：非等分、非零 L 下，右端求和逐项和手算相同（不只是不等式方向）。
+    Π = (0.25, 0.75, 1)，L = 0.7：时间 = ε_t(0.25·0.75·e^{0.7} + 1·1·e^0)，空间 = ε_s(0.25e^{1.225} + 0.75e^{0.7} + 1)。"""
+    times = theory_bounds.partition_times((.25, .75, 1.))
+    assert times == [0., .25, 1., 2.]
+    assert math.isclose(theory_bounds.temporal_sum(times, 1.3, .7), 1.3*(.25*.75*math.exp(.7)+1.), rel_tol=1e-14)
+    assert math.isclose(theory_bounds.spatial_sum(times, 1.3, .7),
+                        1.3*(.25*math.exp(.7*1.75)+.75*math.exp(.7)+1.), rel_tol=1e-14)
+    assert math.isclose(theory_bounds.temporal_sum(times, 1.3, .7), hand_temporal((.25, .75, 1.), 1.3, .7), rel_tol=1e-14)
+    assert theory_bounds.temporal_sum([0., 2.], 5., 1.) == 0.          # 一段：没有 i ≥ 2 的项
+
+
 @pytest.mark.parametrize("partition", [(1., 1.), (.5, .5, .5, .5), (.25,)*8, (.5, 1.5), (.25, .75, 1.)])
 def test_lemma_temporal_partition_bound(partition):
     """引理 5.4：‖Φ_T(z) − Φ_Π(z)‖ ≤ ε_t Σ_{i≥2} t_{i−1}τ_i e^{L(T−t_i)} ≤ ε_t e^{LT}(T² − Σ τ_i²)/2，
@@ -117,6 +141,11 @@ def test_lemma_temporal_partition_bound(partition):
     for lhs in bound["lhs"]:
         assert lhs <= bound["sharp"]*(1+TOLERANCE)
     assert bound["sharp"] <= bound["coarse"]*(1+TOLERANCE)
+    # 右端精确值：用返回的 ε_t、L 逐项重算（式 temporal_accumulation_sharp / _coarse）
+    T = sum(partition)
+    assert math.isclose(bound["sharp"], hand_temporal(partition, bound["eps_t"], bound["L"]), rel_tol=1e-12, abs_tol=0)
+    assert math.isclose(bound["coarse"], bound["eps_t"]*math.exp(bound["L"]*T)*(T*T-sum(x*x for x in partition))/2,
+                        rel_tol=1e-12, abs_tol=0)
     if len(partition) > 1:
         assert min(bound["lhs"]) > 0 and bound["eps_t"] > 0   # 不是空洞的 0 ≤ 0
     else:
@@ -148,6 +177,9 @@ def test_lemma_spatial_accumulation_bound(partition):
     for lhs in bound["lhs"]:
         assert lhs <= bound["sharp"]*(1+TOLERANCE)
     assert bound["sharp"] <= bound["coarse"]*(1+TOLERANCE)
+    T = sum(partition)
+    assert math.isclose(bound["sharp"], hand_spatial(partition, bound["eps_s"], bound["L"]), rel_tol=1e-12)
+    assert math.isclose(bound["coarse"], bound["eps_s"]*T*math.exp(bound["L"]*T), rel_tol=1e-12)
 
 
 @pytest.mark.parametrize("partition,other", [((.5, .5, .5, .5), (1., 1.)), ((1., 1.), (.5, 1.5)), ((.25,)*8, (2.,))])
@@ -161,6 +193,13 @@ def test_theorem_joint_space_time_bound(partition, other):
     for lhs in bound["lhs"]:
         assert lhs <= bound["sharp"]*(1+TOLERANCE)
     assert bound["sharp"] <= bound["coarse"]*(1+TOLERANCE) <= bound["simple"]*(1+TOLERANCE)**2
+    # 右端精确值（式 joint_bound_sharp、main_bound、main_bound_simple），三项共用返回的 ε_s、ε_t、L
+    es, et, lip, T = bound["eps_s"], bound["eps_t"], bound["L"], sum(partition)
+    assert math.isclose(bound["sharp"], hand_spatial(partition, es, lip)+hand_temporal(partition, et, lip)+hand_temporal(other, et, lip),
+                        rel_tol=1e-12)
+    assert math.isclose(bound["coarse"], math.exp(lip*T)*(es*T+et/2*(2*T*T-sum(x*x for x in partition)-sum(x*x for x in other))),
+                        rel_tol=1e-12)
+    assert math.isclose(bound["simple"], math.exp(lip*T)*(es*T+et*T*T), rel_tol=1e-12)
 
 
 def test_bounds_hold_after_training_updates():

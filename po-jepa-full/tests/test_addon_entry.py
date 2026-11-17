@@ -130,7 +130,7 @@ def test_calibrate_addon_is_reproducible(small, tmp_path, one_thread):
 
 def scripted(monkeypatch, measured, count=2):
     """梯度范数按顺序给出：每个条件先 count 批初始状态，再 count 批预训练之后；后者来自 measured。"""
-    def norms(condition, model, batch, loss):
+    def norms(condition, model, batch, loss, step=None):   # S28b：_gradient_norms 多了批序号 step
         norms.calls[condition] = norms.calls.get(condition, 0)+1
         index = norms.calls[condition]-1
         row = dict(jepa=1., time=1., space=1., grad_jepa=1., grad_time=1., grad_space=1.)

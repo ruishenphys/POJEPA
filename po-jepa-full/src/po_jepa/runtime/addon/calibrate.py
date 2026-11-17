@@ -103,7 +103,9 @@ def _jepa_only(condition, device):
     if condition == "transformer_consistency":
         return comparison.build_condition("matched_transformer", device)
     if condition == "po_jepa_rollout_sup":   # 08 §6：和 v7 的 workflow.calibrate_weights 相同的模型和零权重
-        return comparison.build_condition("po_jepa_no_consistency", device)
+        # S28b（Codex S28b P2-2）：rollout_sup 所有入口固定二等分，JEPA-only 预训练也一样
+        model, loss = comparison.build_condition("po_jepa_no_consistency", device)
+        return model, replace(loss, temporal_partition="bisection")
     raise ValueError(f"only {', '.join(calibration.CALIBRATED_CONDITIONS)} use the add-on calibration")
 
 
