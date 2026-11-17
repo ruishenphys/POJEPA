@@ -74,7 +74,7 @@ def test_rollout_loss_is_zero_on_its_own_prediction_and_flows_through_both_segme
 def test_rollout_loss_contract_errors():
     model, batch, config = rollout_case()
     temporal = temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
-    with pytest.raises(TypeError, match="^predictions must be TemporalPredictions$"):
+    with pytest.raises(TypeError, match="^predictions must be TemporalPredictions or PartitionPredictions$"):
         rollout_supervision_loss(object(), batch.raw_target, config=config)
     with pytest.raises(TypeError, match="^raw_target must be a tensor$"):
         rollout_supervision_loss(temporal, batch.raw_target.numpy(), config=config)

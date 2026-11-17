@@ -244,4 +244,19 @@ class KoopmanConfig:
 
 ### 6.5 不做的事
 
-不加中间时刻 τ 的真值监督（训练批里没有 Z_target(τ)）；不改 JEPA 项；不给 Transformer、DROID 加这个条件；不加多于两段的滚动。
+不加中间时刻 τ 的真值监督（训练批里没有 Z_target(τ)）；不改 JEPA 项；不给 Transformer、DROID 加这个条件；默认变体（二等分）不加多于两段的滚动（多段切分变体见 §6.6）。
+
+### 6.6 多段切分变体下的 2^k 段滚动（S28d，2026-11-17）
+
+Jerry 2026-11-17 在决策卡上定：选了时间一致性多段切分（M1，`PO_JEPA_TEMPORAL_PARTITION=dyadic`）的变体里，po_jepa_rollout_sup 也改成 2^k 段有真值滚动，和 po_jepa_full 的时间一致性用同一种切分。S28b 的“rollout_sup 所有入口固定二等分”撤掉。定义：
+
+- **k**：k_b = `losses.dyadic_levels(T_b, sample_ids, step)`，和 po_jepa_full 同一个哈希抽法、同一个步序号，所以同一步同一批两者抽到的 k 逐行相同；k ∈ {1,2,3} 里段长 T/2^k ≥ 0.25 周期的那些中均匀抽一个。训练用 completed_steps，标定用批在查询序列里的序号，监控用 completed − 1（和 S28b 三处相同）。
+- **滚动路径**：Φ_Π(Z; u) 就是 `losses.partition_predictions` 的 composed（引理 5.4 的 Φ_{Π_k}）：2^k 段，每段长 h = T/2^k，第 i 段的动作是原控制 [i·h, (i+1)·h) 的精确交集，每段的输入是上一段的 raw 输出，不 LN、不 detach。direct 和二等分的长支逐位相同，L_JEPA 不变。
+- **真值目标**：只有终点 Z_target(T)（同一个 `batch.raw_target`）；中间各段的终点不监督（训练批里没有中间时刻的真值帧，和两段版不监督 τ 时刻相同）。
+- **距离和归一化**：L_roll = mean_B mean_(N,E) |LN(Φ_Π(Z; u)) − LN(Z_target(T))|，和两段版、JEPA 项同一个距离；**不除 c(Π_k)²**（理由同 §6.2：那个分母配的是组合缺口随段长 → 0 消失，真值误差不随它消失），不按 k 加权，各样本等权平均。
+- **k = 1 的特例**：2^1 段滚动和两段滚动逐位相同，所以两段版是这里 k = 1 的特例；默认变体（二等分）的代码路径、数值、检查点快照、标定文件格式都不变。
+- **Φ 次数**：每次更新 1 + Σ_{这批出现的不同 k} 2^k + 2 次（和同一变体的 po_jepa_full 相同），`expected_readouts` 已按这个数核读出。
+- **λ_r 标定**：`calibrate-addon` 在同一变体下标三个补跑条件；rollout_sup 的 JEPA-only 预训练跟变体走（和同一变体的基础 `run.py calibrate` 相同），L_roll 的梯度按标定批序号抽 k。标定文件（文件名带 `~dyadic`）里 po_jepa_rollout_sup 一项多一个键 `rollout_partition: dyadic`；没有这个键的 `~dyadic` 文件是 S28d 以前的代码按两段滚动标的，读的时候报错拒用。
+- **标签**：多段切分的 rollout_sup 检查点在 loss_config 快照里带 `temporal_partition: dyadic`，和二等分的 rollout_sup 检查点互相读会报 mismatch。
+
+代码：`rollout_supervision.rollout_predictions`（按切分选 `temporal_predictions` / `partition_predictions`）、`rollout_supervision_loss`（收两种预测）；单步 `addon.conditions.rollout_sup_step`，梯度范数 `addon.calibration.rollout_gradient_norms(step=…)`。测试 `tests/test_s28d_dyadic_rollout_sup.py`，段说明 `docs/segments/S28d.md`。

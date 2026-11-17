@@ -146,7 +146,8 @@ def _provenance(value: dict) -> dict:
 
 def _loss_config(config: LossConfig, condition: str) -> dict:
     """消费合法Real为原生float64快照；full双正、no_consistency双零，单项消融time_only只时间正、space_only只空间正；
-    rollout_sup（08 §6，po_jepa_rollout_sup）双正：time_weight 是有真值两段滚动损失的 λ_r，space_weight 是 λ_s。"""
+    rollout_sup（08 §6，po_jepa_rollout_sup）双正：time_weight 是有真值滚动损失的 λ_r，space_weight 是 λ_s。
+    S28d：rollout_sup 也收多段切分（2^k 段有真值滚动），切分照样进快照，两种 rollout_sup 检查点互相读会报 mismatch。"""
     if not isinstance(config, LossConfig):
         raise TypeError("loss_config must be LossConfig")
     config.__post_init__()
@@ -155,8 +156,6 @@ def _loss_config(config: LossConfig, condition: str) -> dict:
     # 多段切分写进快照（检查点标签），二等分和多段切分的检查点不会互相读错。
     if native["temporal_partition"] == "bisection":
         del native["temporal_partition"]
-    elif condition == "rollout_sup":
-        raise ValueError("condition rollout_sup keeps its two-segment supervised rollout; temporal_partition must be bisection")
     for name, scalar in native.items():
         if isinstance(scalar, str):
             continue

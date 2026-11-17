@@ -54,7 +54,7 @@ v7_calibration_sha256: …   # 导入的 v7 标定文件的 SHA
 
 逐批记录写在任务输出目录的 `run/calibration-<条件>.json`：v7 的 calibration.json 的 17 个键全有、含义相同，另加 `condition`、`v7_calibration_sha256`、`addon_calibration_file`、`base_calibration`（S26a）、`space_weight_source`（08 §6）；`note` 的文字改成补跑的说法。三个种子共用这一组 λ（和 v7 一样）。
 
-读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个（加 po_jepa_rollout_sup 后是六个；只有旧格式的文件读不进来，要重跑 calibrate-addon）；po_jepa_rollout_sup 的 `space_weight` 等于协议的 `loss.space_weight`；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。
+读这个文件时（S10 的 `addon.calibration`，训练任务开始前）核对：顶层键恰好是上面这五个（加 po_jepa_rollout_sup 后是六个；只有旧格式的文件读不进来，要重跑 calibrate-addon）；po_jepa_rollout_sup 的 `space_weight` 等于协议的 `loss.space_weight`；每个条件的键恰好是 `rho`、`space_weight`、`time_weight`、`source`，两个 λ 都是有限正数；`rho` 等于协议的 `calibration.rho`；`sigma_z_used` 等于协议的 σ_z；`v7_calibration_sha256` 等于当前导入的 v7 标定文件的 SHA。任何一项不符就报错。S28d（2026-11-17）：多段切分变体（文件名带 `~dyadic`）里 po_jepa_rollout_sup 这一项的键是这四个加 `rollout_partition`（值必须是 `dyadic`，表示 λ_r 是对 2^k 段有真值滚动标的，见 08 §6.6）；没有这个键的 `~dyadic` 文件是 S28d 以前的代码标的，拒用。二等分变体的格式不变。
 
 ## 4. 复用 v7 的产物
 

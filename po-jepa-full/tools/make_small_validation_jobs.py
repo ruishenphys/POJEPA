@@ -184,8 +184,9 @@ def c2_lines(partition, init):
     lines = [f"# 变体 {name}（C-1 汇总推荐，或 Jerry 指定）。前提：b-v7.1 的 R1、R2 已完成（探针和真值），L1–L2 的长时程测试集已编好。",
              f"# matched_transformer、vjepa2_ac_small、vjepa2_ac 不重训，复用 v7.1 种子 {SEED}（E 段先核 identity 和 v7.1 逐位相同）。"]
     if partition == "dyadic":
-        lines.append("# 注意：po_jepa_rollout_sup 在多段切分变体下仍是有真值的两段滚动（S28b 固定二等分）；要不要改成 2^k 段等 Jerry 定，"
-                     "定了要改代码的话，先改代码再跑带 rollout_sup 的行（AC 标定也含 rollout_sup 的 λ_r）。")
+        lines.append("# 注意：多段切分变体下 po_jepa_rollout_sup 是 2^k 段有真值滚动，和 po_jepa_full 同一串 k（S28d，Jerry 2026-11-17 定）；"
+                     "AC 补跑标定的 λ_r 也按 2^k 段标，标定文件里 po_jepa_rollout_sup 一项带 rollout_partition: dyadic，"
+                     "没有这个键的旧标定文件会被拒绝。")
     if v != DEFAULT_VARIANT:
         lines.append(f"# ===== C 标定（GPU，{len(SCENES)} 条；本变体的 σ_z、λ_t、λ_s）=====")
         for s in SCENES:
