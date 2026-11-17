@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import sys
+import tempfile
 import time
 
 FORMAT = "pojepa-results-pack-v1"
@@ -43,6 +44,7 @@ DEFAULT_MIN_BLOB = 1024        # nested objects/arrays at least this long (compa
 ROOT_BLOB = 65536              # a whole file is stored once only if it is at least this long
 CHUNK = 8*1024*1024            # uncompressed size of one compressed piece
 RAW_PART = 16*1024*1024
+MAX_DEPTH = 64                 # deeper JSON is kept as raw bytes, so rebuilding never hits the recursion limit
 _COMPACT = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), allow_nan=True).encode
 
 
@@ -94,6 +96,17 @@ def _pairs(items):
     return result
 
 
+def _depth(value):
+    """Nesting depth of containers (iterative, so any depth the json parser accepted can be measured)."""
+    deepest, stack = 0, [(value, 1)]
+    while stack:
+        item, level = stack.pop()
+        if isinstance(item, (dict, list)):
+            deepest = max(deepest, level)
+            stack.extend((child, level+1) for child in (item.values() if isinstance(item, dict) else item))
+    return deepest
+
+
 def exact_format(data):
     """(parsed value, format) when the json module rebuilds exactly these bytes, else None."""
     if REF_MARK in data:
@@ -102,7 +115,7 @@ def exact_format(data):
         value = json.loads(data.decode("utf-8"), object_pairs_hook=_pairs)
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if not isinstance(value, (dict, list)):
+    if not isinstance(value, (dict, list)) or _depth(value) > MAX_DEPTH:
         return None
     for fmt in _formats(data):
         try:
@@ -148,6 +161,19 @@ def selected(path, include=(), exclude=()):
     return not any(fnmatch.fnmatchcase(path, p) for p in exclude)
 
 
+def portable_parts(stored):
+    """Parts of a stored path that is safe to write under a folder on Linux, macOS and Windows.
+
+    Only plain relative '/'-separated paths are accepted: no backslash, no drive or ':' anywhere, no empty,
+    '.' or '..' part, no control character. Raises ValueError otherwise.
+    """
+    parts = stored.split("/")
+    if (not stored or "\\" in stored or ":" in stored or any(ord(c) < 32 for c in stored)
+            or any(part in ("", ".", "..") for part in parts)):
+        raise ValueError("unsafe or non-portable stored path: "+repr(stored))
+    return parts
+
+
 def _stored_path(path):
     """Relative posix path under the current directory; refuses absolute paths and '..'."""
     rel = Path(os.path.relpath(Path(path).absolute(), Path.cwd()))
@@ -177,6 +203,11 @@ def collect(roots, exclude):
             stored = _stored_path(item)
             if not selected(stored, (), exclude):
                 continue
+            try:
+                portable_parts(stored)
+            except ValueError:
+                raise ValueError(f"{stored}: a file name with '\\', ':' or a control character cannot be rebuilt "
+                                 "on every system; rename it or leave it out with --exclude") from None
             if stored in found:
                 raise ValueError("path given twice: "+stored)
             found[stored] = item
@@ -301,7 +332,8 @@ def _create(path):
     return db
 
 
-def pack(roots, output, *, exclude, min_blob=DEFAULT_MIN_BLOB, workers=1, level=6, verify=True, log=print):
+def pack(roots, output, *, exclude, min_blob=DEFAULT_MIN_BLOB, workers=1, level=6, verify=True, log=print,
+         start_method=None):
     """Write the pack to output (never overwrites); returns counts and sizes."""
     output = Path(output)
     if output.exists():
@@ -317,7 +349,8 @@ def pack(roots, output, *, exclude, min_blob=DEFAULT_MIN_BLOB, workers=1, level=
     writer = _Writer(db, level, max(1, min(4, workers)))
     tasks = [(stored, str(real), min_blob, level) for stored, real in items]
     _reset_seen()
-    pool = multiprocessing.Pool(workers, initializer=_reset_seen) if workers > 1 else None
+    context = multiprocessing.get_context(start_method)
+    pool = context.Pool(workers, initializer=_reset_seen) if workers > 1 else None
     json_files = 0
     try:
         results = pool.imap(_encode, tasks, chunksize=32) if pool else map(_encode, tasks)
@@ -367,6 +400,7 @@ class Pack:
             raise ValueError(f"{path} is not a complete {FORMAT} file")
         self.meta, self.chunk = meta, int(meta["chunk"])
         self.pieces, self.blocks = OrderedDict(), {}
+        self.seen_blocks, self.seen_raw = set(), set()   # what the records reached (checked by verify_pack)
 
     def _piece(self, number):
         data = self.pieces.get(number)
@@ -383,24 +417,29 @@ class Pack:
         return data
 
     def _block(self, offset, length):
-        value = self.blocks.get(offset)
+        if (type(offset) is not int or type(length) is not int or offset < 0 or length <= 0
+                or offset+length > int(self.meta["blob_bytes"])):
+            raise ValueError("block reference outside the stored blocks")
+        key = (offset, length)
+        value = self.blocks.get(key)
         if value is None:
-            if offset < 0 or length <= 0 or offset+length > int(self.meta["blob_bytes"]):
-                raise ValueError("block reference outside the stored blocks")
             first, last = offset//self.chunk, (offset+length-1)//self.chunk
             data = b"".join(self._piece(n) for n in range(first, last+1))
             start = offset-first*self.chunk
             value = self._resolve(json.loads(data[start:start+length].decode("utf-8"), object_pairs_hook=_pairs))
             if len(self.blocks) > 20000:
                 self.blocks.clear()
-            self.blocks[offset] = value
+            self.blocks[key] = value
+            self.seen_blocks.add(key)
         return value
 
     def _resolve(self, value):
         if isinstance(value, dict):
             if len(value) == 1 and REF_KEY in value:
-                offset, length = value[REF_KEY]
-                return self._block(offset, length)
+                ref = value[REF_KEY]
+                if not isinstance(ref, list) or len(ref) != 2:
+                    raise ValueError("damaged block reference")
+                return self._block(*ref)
             return {k: self._resolve(v) for k, v in value.items()}
         if isinstance(value, list):
             return [self._resolve(v) for v in value]
@@ -431,6 +470,7 @@ class Pack:
         else:
             parts = self.db.execute("SELECT data FROM raw WHERE sha256 = ? ORDER BY part", (sha,)).fetchall()
             data = b"".join(lzma.decompress(p[0]) for p in parts)
+            self.seen_raw.add(sha)
         if len(data) != size or hashlib.sha256(data).hexdigest() != sha:
             raise ValueError("rebuilt file differs from the original: "+path)
         return data
@@ -447,13 +487,31 @@ class Pack:
 
 
 def verify_pack(path, log=print):
+    """Rebuild every file and check it; also check the stored pieces against the pack record."""
     pack_ = Pack(path)
+    meta, db = pack_.meta, pack_.db
+    chunks, blob_bytes = int(meta["blob_chunks"]), int(meta["blob_bytes"])
+    numbers = [n for (n,) in db.execute("SELECT n FROM blob_chunks ORDER BY n")]
+    if numbers != list(range(chunks)):
+        raise ValueError("compressed block pieces differ from the pack record")
+    for n in numbers:
+        expected = min(pack_.chunk, blob_bytes-n*pack_.chunk)
+        if len(pack_._piece(n)) != expected:
+            raise ValueError(f"compressed block piece {n} has the wrong size")
+    if [n for (n,) in db.execute("SELECT n FROM file_chunks ORDER BY n")] != \
+            list(range(db.execute("SELECT COUNT(*) FROM file_chunks").fetchone()[0])):
+        raise ValueError("file list pieces are not numbered in order")
     count = 0
     for record in pack_.records():
         pack_.build(record)
         count += 1
         if count % 200000 == 0:
             log(f"  verified {count}")
+    if len(pack_.seen_blocks) != int(meta["blocks"]):
+        raise ValueError(f"{len(pack_.seen_blocks)} blocks reached, pack record says {meta['blocks']}")
+    stored_raw = {sha for (sha,) in db.execute("SELECT DISTINCT sha256 FROM raw")}
+    if stored_raw != pack_.seen_raw:
+        raise ValueError("raw contents stored in the pack differ from the ones the files use")
     log(f"verified {count} files: every rebuilt file matches its sha256 and size")
     return count
 
@@ -461,24 +519,36 @@ def verify_pack(path, log=print):
 def extract(path, output, include=(), exclude=(), log=print):
     pack_ = Pack(path)
     output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    base = output.resolve()
+    mask = os.umask(0)
+    os.umask(mask)
     written = skipped = 0
     for record in pack_.records(include, exclude):
         stored, sha, size, mtime = record[:4]
-        parts = PurePosixPath(stored).parts
-        if PurePosixPath(stored).is_absolute() or ".." in parts or ":" in parts[0]:
-            raise ValueError("unsafe stored path: "+stored)
+        parts = portable_parts(stored)
         target = output.joinpath(*parts)
+        if os.path.normcase(target.resolve()) != os.path.normcase(base.joinpath(*parts)):
+            raise ValueError(f"{target} would be written outside {output} (a linked folder or file is in the way)")
         data = pack_.build(record)
-        if target.exists():
-            if target.is_file() and target.stat().st_size == size and hashlib.sha256(target.read_bytes()).hexdigest() == sha:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            if (not target.is_symlink() and target.is_file() and target.stat().st_size == size
+                    and hashlib.sha256(target.read_bytes()).hexdigest() == sha):
                 skipped += 1
                 continue
             raise FileExistsError(f"{target} exists with different content; not overwritten")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_name(target.name+".partial")
-        temp.write_bytes(data)
-        temp.replace(target)
-        os.utime(target, ns=(mtime, mtime))
+        handle, temp = tempfile.mkstemp(dir=target.parent, prefix="."+target.name+".", suffix=".partial")
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+            os.chmod(temp, 0o666 & ~mask)   # same permissions as an ordinary new file, not mkstemp's 0600
+            os.utime(temp, ns=(mtime, mtime))
+            os.replace(temp, target)
+        except BaseException:
+            if os.path.exists(temp):
+                os.unlink(temp)
+            raise
         written += 1
     log(f"extracted {written} files to {output} ({skipped} identical files already there)")
     return written
