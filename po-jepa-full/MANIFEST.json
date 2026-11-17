@@ -3,6 +3,7 @@
   "scientific_results_verified": false,
   "files_sha256": {
     "DATASET.md": "bca5a3dfe9270b43e9e8f0ac7b028e3890aa310321681557fc9a8bc0908ad49f",
+    "RESULTS_RETURN_PACK.md": "5e1ab579139819989b287fc5318ebdfcfdf619ea0876b5ad557338578f653151",
     "SOURCE_MAP.json": "f0ef9f61707dabb770583bded62c0d9a71aeb598fb63e94bd78b455f88a426e8",
     "configs/droid/base.yaml": "609e2c748fd121c305a7e6613eafabd3a1ae3986142e2ae1f8aa486a3140e1f3",
     "configs/droid/full.yaml": "34c1cc781ef0333f1d9af44fcac2f9e400dcefe7bb4463356702c0e3604937d9",
@@ -163,6 +164,7 @@
     "tests/test_model.py": "0e9a5bae9ab3a0bd94163c9f53a61ebe2cf5c78f952614dea88312003e9b59e7",
     "tests/test_new_systems.py": "e8be799a262aa75763fef0d776f928f67944a4bab60122276a58238b40a1fec8",
     "tests/test_new_systems_registration.py": "760dbe65b0c33a8107ca9f68c4af0374b0bb4ec02961b5b8d02e8e8424294e6e",
+    "tests/test_pack_results.py": "20127e95e0d9fc7a2377bb94e7f82c1e591f64994385c905fef2cf1dc53a4643",
     "tests/test_real_training.py": "735eb9188a8c882fdaae00aedccde6efa3495110ce9628d7577fcc999396a7c6",
     "tests/test_rollout_sup.py": "9efe3ba11a22df2d4a5d8f5f708776c4bb7bce203488b41d7ba81a0b74db817f",
     "tests/test_runtime_gates.py": "bb0710690a045083d03c0f60b1f897c87a1a92b88f8e4411c1b122f577005ba5",
@@ -210,6 +212,7 @@
     "tools/make_v7_jobs.py": "aea7de2b28c5010ee50637f07b6f06b628e673f1ac9ff30eafdda75e8d0b03a4",
     "tools/make_v8_jobs.py": "800f869f18d3005bad52c7a18005755a215ceadfadfcfba9a36bf32a15f1f88c",
     "tools/modal_spectrum.py": "253a7b4784459ea428f73228f51d8078cd7e4be7e1065c99474d84f78d88e71d",
+    "tools/pack_results.py": "34c7d7b2d71c78168ea514512e5ea123d5d26ed6940239d84cb058840327c289",
     "tools/plan_v7.py": "60f05a2e8691b15d28d41b01dd70b90d4373db1cc2b801e44e360bcbf5b10a4e",
     "tools/preview_new_systems.py": "b3a0c508266fc9d086b8d5e5d36828ea533129030751e1c4ad05c800cb64bb69",
     "tools/preview_second_order.py": "31c1652aa88d7f256533b68affc743658f16a841d20227e251b24650243e9794",

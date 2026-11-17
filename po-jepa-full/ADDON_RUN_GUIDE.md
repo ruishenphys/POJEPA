@@ -100,14 +100,18 @@ python tools/run_jobs.py ../full-model/po-jepa-full/jobs-addon-v7tree.txt --gpus
 
 ## 六、传回结果
 
-在工作目录里执行，模型权重（`.pt`）不用传：
+用去重打包工具，不再用 `zip`（原因和实测见 `RESULTS_RETURN_PACK.md`：v7 试跑结果 4.46 GB 打包后 33 MB，zip 是 0.40 GB）。补跑进行中不要 `git pull`，所以先只把工具取出来，然后在工作目录里执行，模型权重（`.pt`）默认不打包：
 
 ```bash
-zip -r results-addon.zip results-addon logs-addon logs-v7/jobs-addon-v7tree full-model/po-jepa-full/configs/calibration full-model/po-jepa-full/jobs-addon-*.txt -x '*.pt'
-nvidia-smi > nvidia-smi.txt && zip results-addon.zip nvidia-smi.txt
+git -C full-model fetch origin full-model
+git -C full-model show origin/full-model:po-jepa-full/tools/pack_results.py > pack_results.py
+nvidia-smi > nvidia-smi.txt
+python pack_results.py pack results-addon logs-addon logs-v7/jobs-addon-v7tree \
+    full-model/po-jepa-full/configs/calibration full-model/po-jepa-full/jobs-addon-*.txt nvidia-smi.txt \
+    --output results-addon.pack.sqlite
 ```
 
-还没跑 D3 时 `zip` 会提示 `name not matched: logs-v7/jobs-addon-v7tree`，不要紧。把 `results-addon.zip` 发给 Jerry。**`features-v7/`、v6 的特征目录（`$V6`）、`results-v7/`、`results-addon/` 和里面的模型权重都请先保留**，之后补实验还要用。
+还没跑 D3 时把 `logs-v7/jobs-addon-v7tree` 从命令里去掉（列的路径不存在会报 `FileNotFoundError`）。最后两行应该是 `verified N files: ...` 和 `wrote results-addon.pack.sqlite: ... MB`，把 `results-addon.pack.sqlite` 发给 Jerry。**`features-v7/`、v6 的特征目录（`$V6`）、`results-v7/`、`results-addon/` 和里面的模型权重都请先保留**，之后补实验还要用。
 
 ## 七、常见报错
 
