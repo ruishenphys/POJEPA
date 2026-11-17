@@ -14,8 +14,8 @@ from torch import Tensor, nn
 
 from .actions import ActionSegments, split_action_segments, concatenate_action_segments
 from .geometry import GridSpec, SpatialTransfer, apply_spatial_transfer
-from .losses import (SpatialPredictions, TemporalPredictions, _temporal_raw_contract,
-                     _temporal_time_contract, input_scale)
+from .losses import (PartitionPredictions, SpatialPredictions, TemporalPredictions, _partition_core,
+                     _temporal_raw_contract, _temporal_time_contract, input_scale)
 
 
 def _require_predictor(model) -> None:
@@ -56,6 +56,13 @@ def temporal_predictions(model: nn.Module, raw_z: Tensor, controls: ActionSegmen
         raise ValueError("temporal raw float32 difference must remain finite")
     return TemporalPredictions(direct, intermediate, composed, difference, tau.clone(), sigma.clone(),
                                input_scale(raw_z))
+
+
+def partition_predictions(model: nn.Module, raw_z: Tensor, controls: ActionSegments, tau: Tensor, sigma: Tensor,
+                          levels: Tensor, grid: GridSpec) -> PartitionPredictions:
+    """S28b，同 losses.partition_predictions：引理 5.4 的 Φ_T(Z) 与 Φ_{Π_k}(Z)，只把 POJEPA 类型检查换成 _require_predictor。"""
+    _require_predictor(model)
+    return _partition_core(model, raw_z, controls, tau, sigma, levels, grid)
 
 
 def spatial_predictions(model: nn.Module, raw_z: Tensor, controls: ActionSegments,

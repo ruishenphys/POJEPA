@@ -588,20 +588,20 @@ def test_summarize_long_reports(tmp_path):
                     train_dataset="double_well-2000", registration_sha256="reg", cache_identity=dict(encode_report_sha256="enc"),
                     definitions=long_rollout.definitions(128), rows=rows,
                     means={n: offset+.01*1800.5 for n in names})
-    for c, off in (("po_jepa_full", .1), ("identity", .3)):
+    for c, off in (("po_jepa_full", .1), ("matched_transformer", .3)):
         for seed in (1703, 1704):
             path = tmp_path/c/f"{seed}.json"; path.parent.mkdir(exist_ok=True)
             path.write_text(json.dumps(report(c, seed, off)))
-    (tmp_path/"zz_dup.json").write_text(json.dumps(report("identity", 1703, 9.)))
+    (tmp_path/"zz_dup.json").write_text(json.dumps(report("matched_transformer", 1703, 9.)))
     out = s.long_reports(tmp_path)
     full = next(r for r in out["rows"] if r["condition"] == "po_jepa_full")
     assert full["seeds"] == 2 and full["times"] == [16., 24., 32., 48., 64.]
     assert full["composed"][0] == pytest.approx(.1+18.005)
-    cmp = next(c for c in out["comparisons"] if c["comparison"] == "po_jepa_full − identity")
+    cmp = next(c for c in out["comparisons"] if c["comparison"] == "po_jepa_full − matched_transformer")
     assert cmp["T"] == 64. and cmp["mean"] == pytest.approx(-.2) and all(x["full_better"] == 2 for x in cmp["per_seed"])
     assert len(out["duplicates"]) == 1
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
-    assert "## 长时程滚动" in md and "8 步滚动 T=64" in md and "po_jepa_full − identity" in md
+    assert "## 长时程滚动" in md and "8 步滚动 T=64" in md and "po_jepa_full − matched_transformer" in md
 
 
 def _long_report(condition, seed, offset, **change):
@@ -621,7 +621,7 @@ def test_summarize_long_refuses_unpairable_reports(tmp_path, what):
     Codex 反例：dataset、步数、种子、编号相同，encode_report_sha256 和 manifest 不同，原来照样输出 mean −0.2、1 条。"""
     s = _summarize()
     full = _long_report("po_jepa_full", 1703, .1)
-    bad = _long_report("identity", 1703, .3)
+    bad = _long_report("matched_transformer", 1703, .3)
     if what == "cache":
         bad["cache_identity"] = dict(encode_report_sha256="other")
     elif what == "manifest":
@@ -640,17 +640,17 @@ def test_summarize_long_refuses_unpairable_reports(tmp_path, what):
         bad["rows"] = bad["rows"]+bad["rows"][:1]
     elif what == "no_manifest":
         del bad["rows"][0]["manifest_sha256"]; del full["rows"][0]["manifest_sha256"]
-    good = _long_report("identity", 1704, .3)
+    good = _long_report("matched_transformer", 1704, .3)
     for name, r in (("f1", full), ("i1", bad), ("f2", _long_report("po_jepa_full", 1704, .1)), ("i2", good)):
         (tmp_path/f"{name}.json").write_text(json.dumps(r))
     out = s.long_reports(tmp_path)
-    assert not any(c["comparison"] == "po_jepa_full − identity" for c in out["comparisons"])
+    assert not any(c["comparison"] == "po_jepa_full − matched_transformer" for c in out["comparisons"])
     (inc,) = out["incomplete"]
-    assert inc["comparison"] == "po_jepa_full − identity" and [x["seed"] for x in inc["per_seed"]] == [1703] and inc["per_seed"][0]["problems"]
+    assert inc["comparison"] == "po_jepa_full − matched_transformer" and [x["seed"] for x in inc["per_seed"]] == [1703] and inc["per_seed"][0]["problems"]
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
     assert "⚠ 长时程" in md and "种子 1703" in md
     # 对照：不改时同一组报告给出正常比较
-    (tmp_path/"i1.json").write_text(json.dumps(_long_report("identity", 1703, .3)))
+    (tmp_path/"i1.json").write_text(json.dumps(_long_report("matched_transformer", 1703, .3)))
     if what == "no_manifest":
         (tmp_path/"f1.json").write_text(json.dumps(_long_report("po_jepa_full", 1703, .1)))
     out = s.long_reports(tmp_path)
@@ -668,7 +668,7 @@ def test_summarize_long_first_report_without_definitions(tmp_path, all_missing):
     """S25-fix1 修改（Codex 复审 P3-1）：按文件顺序第一份报告缺 definitions 时原来整个汇总 KeyError；
     现在取其余报告的定义，缺定义的那一对记进 incomplete；全都缺时这一组整体记进 incomplete。"""
     s = _summarize()
-    full, ref = _long_report("po_jepa_full", 1703, .1), _long_report("identity", 1703, .3)
+    full, ref = _long_report("po_jepa_full", 1703, .1), _long_report("matched_transformer", 1703, .3)
     del full["definitions"]
     if all_missing:
         del ref["definitions"]
@@ -676,7 +676,7 @@ def test_summarize_long_first_report_without_definitions(tmp_path, all_missing):
     out = s.long_reports(tmp_path)
     assert not out["comparisons"]
     (inc,) = out["incomplete"]
-    assert inc["comparison"] == ("全部比较" if all_missing else "po_jepa_full − identity")
+    assert inc["comparison"] == ("全部比较" if all_missing else "po_jepa_full − matched_transformer")
     assert any("definitions" in p for x in inc["per_seed"] for p in x["problems"])
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=out, missing=[], duplicates=[]))
     assert "⚠ 长时程" in md

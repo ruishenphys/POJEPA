@@ -72,9 +72,35 @@ def v7_updates() -> int:
         raise ValueError(f"{UPDATES_ENV} must be one of {V7_UPDATES}")
     return int(value)
 
+# S28b：v7 协议下选时间一致性切分（M1）和 P_out 初始化（M2）的变体；不设时就是原来的二等分 + Xavier。
+PARTITION_ENV = "PO_JEPA_TEMPORAL_PARTITION"
+READOUT_INIT_ENV = "PO_JEPA_READOUT_INIT"
+V7_VARIANT_DEFAULT = dict(temporal_partition="bisection", readout_init="xavier")
+
+def v7_variant() -> dict:
+    """S28b：当前 v7 变体 dict(temporal_partition, readout_init)，取自两个环境变量，不设取默认（二等分、Xavier）。
+
+    只在 v7 协议下生效（v6 设了就报错，免得以为生效了）。"""
+    partition = os.environ.get(PARTITION_ENV, "bisection")
+    init = os.environ.get(READOUT_INIT_ENV, "xavier")
+    if partition not in ("bisection", "dyadic"):
+        raise ValueError(f"{PARTITION_ENV} must be bisection or dyadic")
+    if init not in ("xavier", "zero"):
+        raise ValueError(f"{READOUT_INIT_ENV} must be xavier or zero")
+    variant = dict(temporal_partition=partition, readout_init=init)
+    if variant != V7_VARIANT_DEFAULT and not is_v7():
+        raise ValueError(f"{PARTITION_ENV}/{READOUT_INIT_ENV} only apply to the v7 protocol (PO_JEPA_PROTOCOL=v7)")
+    return variant
+
+def v7_variant_suffix() -> str:
+    """S28b：标定文件名里的变体后缀：默认为空，多段切分加 ~dyadic，零初始化加 ~zeroinit（两者都有时按这个顺序）。"""
+    variant = v7_variant()
+    return ("~dyadic" if variant["temporal_partition"] == "dyadic" else "")+("~zeroinit" if variant["readout_init"] == "zero" else "")
+
 def v7_calibration_path() -> Path:
-    """每个数据集（系统+条数）和训练步数各自一份标定：λ_time、λ_space、σ_z。"""
-    return ROOT/"configs/calibration"/f"{datasets.active().tag}-u{v7_updates()}.yaml"
+    """每个数据集（系统+条数）和训练步数各自一份标定：λ_time、λ_space、σ_z。
+    S28b：每个变体也各自一份（文件名加 v7_variant_suffix），多段切分和零初始化都要重新标定 λ，不沿用默认变体的值。"""
+    return ROOT/"configs/calibration"/f"{datasets.active().tag}-u{v7_updates()}{v7_variant_suffix()}.yaml"
 
 IMPORT_RECORD = "IMPORTED.json"   # tools/import_v7_calibration.py 写的导入记录，和标定文件同目录
 
@@ -104,6 +130,11 @@ def load_protocol() -> dict:
         merged = _merge_v4(merged, dict(calibration=v7["calibration"]))
         if "model" in v7:   # 2026-11-08 导师：动作驱动与非线性交互改在 token 空间（dynamics.forcing_space: token）
             merged = _merge_v4(merged, dict(model=v7["model"]))
+        variant = v7_variant()   # S28b：默认变体不改协议的任何一个值（合并后逐键和以前相同）
+        if variant != V7_VARIANT_DEFAULT:
+            merged = _merge_v4(merged, dict(loss=dict(temporal_partition=variant["temporal_partition"])))
+            if variant["readout_init"] != "xavier":
+                merged = _merge_v4(merged, dict(model=dict(projection=dict(readout_init=variant["readout_init"]))))
         path = v7_calibration_path()
         if path.exists():
             require_import_record_matches(path)
@@ -116,6 +147,8 @@ def load_protocol() -> dict:
         else:
             # 未标定：λ 保持 v4.yaml 的占位/旧值，正式命令会被 require_v7_calibration 拒绝
             merged = _merge_v4(merged, dict(v7_uncalibrated=True))
+    else:
+        v7_variant()   # S28b：v6 下设了变体环境变量直接报错
     return _apply_seed(merged)
 
 SEED_ENV = "PO_JEPA_SEED"
@@ -316,8 +349,12 @@ class TrainingObserver:
         self.stack.enter_context(patch.object(self.model, "prepare_query", self._query))
         self.stack.enter_context(patch.object(self.model.dynamics, "nonlinear", self._nonlinear))
         self.stack.callback(self.model.p_out.register_forward_hook(self._prediction).remove)
-        for name, symbol in (("jepa", "jepa_distance"), ("time", "temporal_consistency_loss"), ("space", "spatial_consistency_loss")):
+        for name, symbol in (("jepa", "jepa_distance"), ("space", "spatial_consistency_loss")):
             self.stack.enter_context(patch.object(training, symbol, self._loss(name, getattr(training, symbol))))
+        # S28b：时间项经 losses.time_consistency 在 losses 模块里查名字，二等分、多段切分两种损失都在那里包
+        from po_jepa import losses as po_losses
+        for symbol in ("temporal_consistency_loss", "partition_consistency_loss"):
+            self.stack.enter_context(patch.object(po_losses, symbol, self._loss("time", getattr(po_losses, symbol))))
         return self
 
     def __exit__(self, *error):
@@ -334,14 +371,17 @@ def diagnostic_step(model, optimizer, batch, config) -> dict:
     buffers = {name: b.detach().cpu().clone() for name, b in model.named_buffers()}
     with TrainingObserver(model) as observer:
         result = training.train_step(model, optimizer, batch, loss_config=config, completed_steps=0)
-    if len(observer.queries) != 5 or len(observer.predictions) != 5*readouts_per_phi(model) or not observer.nonlinear_calls:
+    from po_jepa.losses import temporal_phi_calls
+    temporal = temporal_phi_calls(config, batch.duration, batch.sample_ids, 0)   # S28b：二等分 3，多段切分随 k 变
+    calls = temporal+2
+    if len(observer.queries) != calls or len(observer.predictions) != calls*readouts_per_phi(model) or not observer.nonlinear_calls:
         raise ValueError("complete five-Phi/N routes were not observed")
     if observer.feedback_gradient is None or not all(v["backward_seen"] for v in observer.loss_routes.values()):
         raise ValueError("required feedback/loss gradient route missing")
     graph = model.spectrum.config
     fine = graph.max_modes if graph.fixed_modes else min(graph.max_modes, batch.raw_z.shape[1])
     coarse = graph.max_modes if graph.fixed_modes else min(graph.max_modes, batch.transfer.target.height*batch.transfer.target.width)
-    if [q["basis"]["shape"][-1] for q in observer.queries] != [fine]*4+[coarse]:
+    if [q["basis"]["shape"][-1] for q in observer.queries] != [fine]*(temporal+1)+[coarse]:
         raise ValueError("full fine/coarse spectral modes were not used")
     if any(q["basis"]["requires_grad"] or q["eigenvalues_cpu"]["requires_grad"] for q in observer.queries):
         raise ValueError("entire eig must remain stopped")
@@ -350,7 +390,7 @@ def diagnostic_step(model, optimizer, batch, config) -> dict:
     if any(b.requires_grad or b.grad is not None or not torch.equal(b.detach().cpu(), buffers[name])
            for name, b in model.named_buffers()):
         raise ValueError("fixed predictor buffers changed or acquired gradients")
-    return dict(evidence_role=batch.provenance["evidence_role"], phi_calls=5,
+    return dict(evidence_role=batch.provenance["evidence_role"], phi_calls=calls,
         query_records=observer.queries, raw_predictions=observer.predictions,
         raw_start=tensor_stats(batch.raw_z), raw_target=tensor_stats(batch.raw_target),
         first_nonlinear=observer.first_nonlinear, nonlinear_calls=observer.nonlinear_calls,

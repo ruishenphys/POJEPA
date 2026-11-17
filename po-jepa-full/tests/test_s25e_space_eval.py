@@ -712,18 +712,18 @@ def test_summarize_space_reports(tmp_path):
             path = tmp_path/c/f"{seed}.json"; path.parent.mkdir(exist_ok=True)
             path.write_text(json.dumps(report(c, seed, off, base)))
     (tmp_path/"zz_dup.json").write_text(json.dumps(report("po_jepa_full", 1703, 9.)))
-    half = report("identity", 1703, .5); half["rows"] = half["rows"][1:]; (tmp_path/"i1.json").write_text(json.dumps(half))
+    half = report("po_jepa_no_consistency", 1703, .5); half["rows"] = half["rows"][1:]; (tmp_path/"i1.json").write_text(json.dumps(half))
     small = report("vjepa2_ac_small", 1703, .7)
     for w in small["rows"]:
         w["manifest_sha256"] = "a"*64                           # 同编号窗口、不同缓存来源
     (tmp_path/"s1.json").write_text(json.dumps(small))
-    half = report("identity", 1704, .5); del half["means"]["gap:T=12"]; (tmp_path/"i2.json").write_text(json.dumps(half))
+    half = report("po_jepa_no_consistency", 1704, .5); del half["means"]["gap:T=12"]; (tmp_path/"i2.json").write_text(json.dumps(half))
     out = s.space_reports(tmp_path)
     full = next(r for r in out["rows"] if r["condition"] == "po_jepa_full")
     assert full["seeds"] == 2 and full["durations"] == [1, 2, 3, 4, 8, 12]
     assert full["direct"][0] == pytest.approx(.1+18.005) and full["base_direct"][3] == pytest.approx(.05)
     assert full["gap"][5] == pytest.approx(.1+18.005-.05)
-    ident = next(r for r in out["rows"] if r["condition"] == "identity")     # 一个种子缺这个键：不拿另一个种子顶替
+    ident = next(r for r in out["rows"] if r["condition"] == "po_jepa_no_consistency")     # 一个种子缺这个键：不拿另一个种子顶替
     assert ident["gap"][5] is None and ident["gap"][4] == pytest.approx(.5+18.005-.05)
     d = next(c for c in out["comparisons"] if c["comparison"] == "po_jepa_full − matched_transformer" and c["metric"] == "direct" and c["T"] == 8)
     g = next(c for c in out["comparisons"] if c["comparison"] == "po_jepa_full − matched_transformer" and c["metric"] == "gap" and c["T"] == 8)
@@ -731,11 +731,11 @@ def test_summarize_space_reports(tmp_path):
     assert g["mean"] == pytest.approx(-.2-.03) and g["seeds"] == 2
     assert len(out["duplicates"]) == 1
     assert full["gap_sd"][0] == pytest.approx(0., abs=1e-12) and full["direct_sd"][0] is not None
-    # 窗口集合不同（identity 1703 少一行）、缓存来源不同（vjepa2_ac_small）：不配对，记进 incomplete，不取交集。
-    # S25-fix3：和长时程、时间采样一样，任一种子不通过整个比较不出平均差（原来 identity 还用种子 1704 单独出）
+    # 窗口集合不同（po_jepa_no_consistency 1703 少一行）、缓存来源不同（vjepa2_ac_small）：不配对，记进 incomplete，不取交集。
+    # S25-fix3：和长时程、时间采样一样，任一种子不通过整个比较不出平均差（原来这一对还用种子 1704 单独出）
     assert sorted((m["comparison"], [x["seed"] for x in m["per_seed"]]) for m in out["incomplete"]) == [
-        ("po_jepa_full − identity", [1703]), ("po_jepa_full − vjepa2_ac_small", [1703])]
-    assert not any(c["comparison"] in ("po_jepa_full − identity", "po_jepa_full − vjepa2_ac_small") for c in out["comparisons"])
+        ("po_jepa_full − po_jepa_no_consistency", [1703]), ("po_jepa_full − vjepa2_ac_small", [1703])]
+    assert not any(c["comparison"] in ("po_jepa_full − po_jepa_no_consistency", "po_jepa_full − vjepa2_ac_small") for c in out["comparisons"])
     md = s._markdown(dict(jobs=0, problems=[], across_seeds=[], transfer=[], planning=[], long=dict(rows=[], comparisons=[]),
                           timing=dict(rows=[], comparisons=[]), space=out, missing=[], duplicates=[]))
     assert "## 空间采样" in md and "| double_well~resolution=384-2000 | 10000 | po_jepa_full | 2 |" in md and "| gap | 8 |" in md

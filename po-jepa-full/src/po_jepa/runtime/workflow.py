@@ -331,10 +331,12 @@ def sweep_rho(features,output,device):
     return result
 
 
-def _gradient_rows(model,sequence,features,device,loss):
-    """逐 batch 求 JEPA/时间/空间三项各自的梯度范数，不更新参数。"""
-    return [training.consistency_gradient_norms(model,data.load_training_batch(features,q,device=str(device)),loss_config=loss)
-            for q in sequence]
+def _gradient_rows(model,sequence,features,device,loss,first_step):
+    """逐 batch 求 JEPA/时间/空间三项各自的梯度范数，不更新参数。S28b：first_step 是 sequence[0] 在查询序列里的序号，
+    多段切分按这个序号抽 k（和正式训练第同一步抽到的 k 相同）。"""
+    return [training.consistency_gradient_norms(model,data.load_training_batch(features,q,device=str(device)),loss_config=loss,
+                                                step=first_step+i)
+            for i,q in enumerate(sequence)]
 
 
 def calibrate_weights(features,output,device):
@@ -363,24 +365,28 @@ def calibrate_weights(features,output,device):
     if pre+count>len(sequence):raise ValueError('pretrain_updates+batches exceeds the training sequence')
     model,loss=comparison.build_condition('po_jepa_no_consistency',device)
     model.train()
-    initial=_gradient_rows(model,sequence[:count],features,device,loss)
+    initial=_gradient_rows(model,sequence[:count],features,device,loss,0)
     optimizer=comparison.make_optimizer(model);history=[]
     for step in range(pre):
         batch=data.load_training_batch(features,sequence[step],device=str(device))
         result=training.train_step(model,optimizer,batch,loss_config=loss,completed_steps=step,condition='no_consistency')
         history.append(dict(step=result.completed_steps,grad_norm_before_clip=result.grad_norm,**result.loss_values))
         if result.completed_steps%50==0:print(f'calibrate pretrain {result.completed_steps}/{pre} jepa={result.loss_values["jepa"]:.4f}',flush=True)
-    rows=_gradient_rows(model,sequence[pre:pre+count],features,device,loss)
+    rows=_gradient_rows(model,sequence[pre:pre+count],features,device,loss,pre)
     def summary(items):
         return dict(median={k:statistics.median(r[k] for r in items) for k in items[0]},
                     mean={k:sum(r[k] for r in items)/len(items) for k in items[0]})
     after,before=summary(rows),summary(initial)
     median=after['median'];rho=cal['rho']
+    for key in ('grad_time','grad_space'):
+        if not median[key]>0:raise ValueError(f'median {key} = {median[key]!r}；λ 的分母为 0，不能标定（不除出 inf）')
+    def initial_weight(key):
+        # S28b：P_out 零初始化时起点 Φ_τ = Id，一致性梯度恰为 0，初始状态这一组（只记录）记 None，不除出 inf
+        return rho*before['median']['grad_jepa']/before['median'][key] if before['median'][key]>0 else None
     result=dict(rho=rho,batches=len(rows),statistic='median',method='v6_after_jepa_pretraining',
         pretrain_updates=pre,pretrain_history=history,per_batch=rows,median=median,mean=after['mean'],
         initial_state=dict(per_batch=initial,**before,
-            time_weight=rho*before['median']['grad_jepa']/before['median']['grad_time'],
-            space_weight=rho*before['median']['grad_jepa']/before['median']['grad_space']),
+            time_weight=initial_weight('grad_time'),space_weight=initial_weight('grad_space')),
         time_weight=rho*median['grad_jepa']/median['grad_time'],space_weight=rho*median['grad_jepa']/median['grad_space'],
         graph=dict(sigma_x=config['model']['graph']['sigma_x'],sigma_z=config['model']['graph']['sigma_z'],
                    max_modes=config['model']['graph']['max_modes']),

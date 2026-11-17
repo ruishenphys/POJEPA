@@ -788,9 +788,9 @@ def comparisons(ctx: Context, split: str, errors: Mapping, outcome: str | None =
     out = []
     cluster_of = ctx.clusters(split)
     for ref in ctx.conditions:
-        if ref == FULL:
+        if ref in (FULL, "identity"):   # S28b（C3，Jerry 2026-11-17）：identity 退出对比，只作数值自检
             continue
-        is_match, gap_pct = (None, None) if ref == "identity" else sa.matched(errors.get(FULL), errors.get(ref))
+        is_match, gap_pct = sa.matched(errors.get(FULL), errors.get(ref))
         for m in PAIRED_METRICS:
             row = dict(reference=ref, metric=m, matched=is_match, error_difference_percent=gap_pct)
             if not _comparable(ref, m):
@@ -984,10 +984,12 @@ def figures(summary: Mapping, curves: Mapping) -> dict[str, str]:
         for defect in ("tcd_ln", "scd_ln"):
             series = []
             for c in summary["conditions"]:
-                points = sorted((p["error"], 0. if c == "identity" else p[defect]) for p in s["scatter"][c].values()
-                                if p["error"] is not None and (c == "identity" or p[defect] is not None))
+                if c == "identity":   # S28b（C3）：identity 不作对比基线，不画进散点图
+                    continue
+                points = sorted((p["error"], p[defect]) for p in s["scatter"][c].values()
+                                if p["error"] is not None and p[defect] is not None)
                 if points:
-                    series.append((c if c != "identity" else "identity（纵轴 0）", [x for x, _ in points], [y for _, y in points]))
+                    series.append((c, [x for x, _ in points], [y for _, y in points]))
             files[f"{split}-scatter-{defect}.svg"] = plots.line_chart(
                 series, f"{split}：同分布误差—{defect}（每个种子一个点）", "同分布未来误差 e_c", defect)
         d8 = s["by_outcome"]["all"]["D8"]

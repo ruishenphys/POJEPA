@@ -317,19 +317,20 @@ def test_full_fake_run_outputs_every_table_and_figure(tmp_path):
     e = summary["precision"]["errors"]
     rows = {(r["reference"], r["metric"]): r for r in summary["splits"]["ood_test"]["by_outcome"]["all"]["D7"]}
     assert rows[("po_jepa_no_consistency", "future_g16")]["matched"] is True
-    assert rows[("fixed_fourier", "future_g16")]["matched"] is False and rows[("identity", "future_g16")]["matched"] is None
+    # S28b（C3）：identity 退出对比，D7 没有 full − identity
+    assert rows[("fixed_fourier", "future_g16")]["matched"] is False and not any(ref == "identity" for ref, _ in rows)
     assert rows[("vjepa2_ac", "tcd_normalized")]["status"] == "not_comparable"
     assert rows[("vjepa2_ac", "pd_in")]["status"] == "not_comparable"
     assert e["fixed_fourier"] == summary["splits"]["id_test"]["by_outcome"]["all"]["D1"]["fixed_fourier"]["future_g16"]["mean"]
-    # 配对差：full − identity 每个种子一份，回合内平均
-    r = rows[("identity", "future_g16")]
+    # 配对差：full − 不训练的对照（vjepa2_ac_zeroshot）每个种子一份，回合内平均
+    r = rows[("vjepa2_ac_zeroshot", "future_g16")]
     assert set(r["per_seed"]) == {str(s) for s in SEEDS}
     full = expected_macro("po_jepa_full", SEEDS[0], "ood_test", [("future:g=16", ids)])[0]
-    ref = expected_macro("identity", None, "ood_test", [("future:g=16", ids)])[0]
+    ref = expected_macro("vjepa2_ac_zeroshot", None, "ood_test", [("future:g=16", ids)])[0]
     assert r["per_seed"][str(SEEDS[0])]["mean"] == pytest.approx(full - ref, abs=1e-14)   # 每条回合窗口数相同
     assert r["ci"]["clusters"] == 3 and r["seeds_full_lower"] == 2
     ri = {(x["reference"], x["metric"]): x for x in summary["splits"]["id_test"]["by_outcome"]["all"]["D7"]}
-    assert ri[("identity", "future_g16")]["ci"]["clusters"] == 2 and ri[("identity", "future_g16")]["ci"]["episodes"] == 5
+    assert ri[("vjepa2_ac_zeroshot", "future_g16")]["ci"]["clusters"] == 2 and ri[("vjepa2_ac_zeroshot", "future_g16")]["ci"]["episodes"] == 5
     # D8：ε̂ 和有效斜率
     d8 = summary["splits"]["id_test"]["by_outcome"]["all"]["D8"]["po_jepa_full"]
     s0 = SEEDS[0]

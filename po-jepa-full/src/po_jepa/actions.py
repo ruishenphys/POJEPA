@@ -346,6 +346,26 @@ def split_action_segments(controls: ActionSegments, *, tau: Tensor,
                            _exact_split_slice(controls, start=tau, duration=sigma))
 
 
+def select_action_rows(controls: ActionSegments, rows: list[int]) -> ActionSegments:
+    """S28b：按给定行号（升序、不重复、非空）取一批控制的子集，时间、端点、来源原样不变，动作值经 index_select 保留梯度。
+
+    补齐宽度沿用原批（只多 padding，不改有效段）；结果再过一遍 _canonical。多段切分按 k 分组时用。
+    """
+    _canonical(controls)
+    batch = controls.duration.numel()
+    if (type(rows) is not list or not rows or any(type(r) is not int for r in rows)
+            or rows != sorted(set(rows)) or rows[0] < 0 or rows[-1] >= batch):
+        raise ValueError("rows must be a nonempty strictly increasing list of valid batch indices")
+    index = torch.tensor(rows, dtype=torch.int64)
+    result = ActionSegments(controls.starts.index_select(0, index), controls.ends.index_select(0, index),
+                            controls.u_values.index_select(0, index.to(controls.u_values.device)),
+                            controls.n_segments.index_select(0, index), controls.segment_valid.index_select(0, index),
+                            controls.source_origin_seconds.index_select(0, index), controls.duration.index_select(0, index),
+                            controls.control_spec, tuple(controls.source_ids[r] for r in rows))
+    _canonical(result)
+    return result
+
+
 def concatenate_action_segments(first: ActionSegments,
                                 second: ActionSegments) -> ActionSegments:
     """按原稿u1⊕u2保留先后顺序；只接受同源且物理时间邻接的两段。

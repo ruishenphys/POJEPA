@@ -159,12 +159,13 @@ def jepa_only(condition: str, config: DroidConfig, sigma_z: float, device) -> tu
     return model, dataclasses.replace(loss, time_weight=0., space_weight=0.), info
 
 
-def gradient_norms(condition: str, model, batch, loss) -> dict:
+def gradient_norms(condition: str, model, batch, loss, step: int | None = None) -> dict:
     """三项梯度范数（键 jepa、time、space、grad_jepa、grad_time、grad_space）：transformer_consistency 用通用梯度范数
-    （`addon.calibration.generic_gradient_norms`），PO-JEPA 类 `training.consistency_gradient_norms`。"""
+    （`addon.calibration.generic_gradient_norms`），PO-JEPA 类 `training.consistency_gradient_norms`。
+    S28b：step 是这批的步序号（多段切分按它抽 k；DROID 配置现在固定二等分，用不到）。"""
     if condition == "transformer_consistency":
-        return addon_calibration.generic_gradient_norms(model, batch, loss_config=loss)
-    return training.consistency_gradient_norms(model, batch, loss_config=loss)
+        return addon_calibration.generic_gradient_norms(model, batch, loss_config=loss, step=step)
+    return training.consistency_gradient_norms(model, batch, loss_config=loss, step=step)
 
 
 def pretrain_step(condition: str, model, optimizer, batch, loss, completed: int):
@@ -203,7 +204,7 @@ def calibrate_lambda(condition: str, *, config: DroidConfig, data, sigma_z: floa
     initial = []
     for step, batch in _batches(data, config, 0, count, device, workers):
         window_sha.append(wn.list_sha256(batch.sample_ids))
-        initial.append(gradient_norms(condition, model, batch, loss))
+        initial.append(gradient_norms(condition, model, batch, loss, step))
         del batch
     history, measured = [], []
     for step, batch in _batches(data, config, 0, pre + count, device, workers):
@@ -221,7 +222,7 @@ def calibrate_lambda(condition: str, *, config: DroidConfig, data, sigma_z: floa
                 print(f"calibrate/lambda-{condition} pretrain {result.completed_steps}/{pre} "
                       f"jepa={result.loss_values['jepa']:.4f}", flush=True)
         else:
-            measured.append(gradient_norms(condition, model, batch, loss))
+            measured.append(gradient_norms(condition, model, batch, loss, step))
         del batch
     if len(window_sha) != pre + count or len(measured) != count:
         raise RuntimeError("calibration did not see every batch")

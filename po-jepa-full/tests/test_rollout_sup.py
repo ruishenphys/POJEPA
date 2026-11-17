@@ -225,7 +225,7 @@ def test_calibrate_addon_measures_rollout_not_temporal_consistency(monkeypatch):
     """calibrate-addon 给 po_jepa_rollout_sup 量的是 L_roll 的梯度（time 一格），预训练走 no_consistency 的单步（08 §6）。"""
     from po_jepa.runtime.addon import calibrate
     model, batch, config = rollout_case()
-    norms = calibrate._gradient_norms("po_jepa_rollout_sup", model, batch, config)
+    norms = calibrate._gradient_norms("po_jepa_rollout_sup", model, batch, config, 0)
     assert norms == calibration.rollout_gradient_norms(model, batch, loss_config=config)
     assert norms["time"] != training.consistency_gradient_norms(model, batch, loss_config=config)["time"]
     labels = []

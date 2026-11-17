@@ -259,7 +259,8 @@ def test_main_writes_complete_summary(tree):
     assert 9.8 < r["error_difference_percent"] < 9.9
     assert r["mean"] == pytest.approx(-.1*1.01, rel=1e-9) and r["seeds_full_lower"] == 2
     assert r["ci"]["low"] == pytest.approx(-.1*1.01, rel=.02) and r["ci"]["reps"] == 2000
-    assert rows[("identity", "future")]["matched"] is None and rows[("vjepa2_ac", "scd_normalized")]["status"] == "not_comparable"
+    # S28b（C3）：identity 退出对比，不再有 full − identity 的配对行
+    assert ("identity", "future") not in rows and rows[("vjepa2_ac", "scd_normalized")]["status"] == "not_comparable"
     p = scene["partitions"]["po_jepa_full"]
     assert p["epsilon_hat"]["mean"] == pytest.approx(.25)                    # median(.2, .25, .25, .4)；留出时长 3、12 不进 ε̂
     row = next(x for x in p["partitions"] if x["partition"] == "3+5")

@@ -27,6 +27,7 @@ loss:
   lr_decay_updates: 2000         # 预热+衰减的总长度 = training.updates_per_condition；0 表示恒定 1e-3
   lr_warmup_updates: 100         # 前 100 次（5%）学习率从 1e-5 线性升到 1e-3，之后余弦衰减
   grad_clip_norm: 1.0            # 全局梯度范数裁剪（optimizer.step 前）；0 表示不裁剪。v4 第一次运行第 1009 步的梯度尖峰触发了塌缩
+  temporal_partition: bisection  # S28b：时间一致性切分；bisection = 式15 二等分（默认），dyadic = 引理 5.4 的 2^k 等分。v7 下由环境变量 PO_JEPA_TEMPORAL_PARTITION 覆盖
 calibration:
   rho: 0.05                      # lambda_c = rho * median|grad L_JEPA| / median|grad L_c|，即加权一致性梯度约为 JEPA 梯度的 5%
   pretrain_updates: 300          # v6：先只用 JEPA 按正式训练的同一初始化/查询/学习率训练 300 步，越过初始化瞬态后再量梯度

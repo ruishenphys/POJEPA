@@ -32,7 +32,9 @@ def test_loss_config_label_matrix(label, weights):
     config = label_config(WEIGHTS[weights])
     if (label, weights) in ACCEPT:
         native = training._loss_config(config, label)
-        assert native == {k: v if isinstance(v, str) else float(v) for k, v in asdict(config).items()}
+        # S28b：默认的二等分不进快照（旧检查点的快照逐键不变）
+        assert native == {k: v if isinstance(v, str) else float(v) for k, v in asdict(config).items()
+                          if k != "temporal_partition"}
         assert all(type(v) is float or type(v) is str for v in native.values())
     else:
         with pytest.raises(ValueError) as error:

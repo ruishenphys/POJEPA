@@ -33,7 +33,8 @@ V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer"
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman")
 CONDITIONS = V7_CONDITIONS+ADDON_CONDITIONS
 TRAINED = tuple(c for c in CONDITIONS if c != "identity")
-REFERENCES = tuple(c for c in CONDITIONS if c != "po_jepa_full")
+# S28b（C3，Jerry 2026-11-17）：identity 退出对比：不作配对比较的对照、不画进散点图；它的行照算（数值自检、归一化参照）
+REFERENCES = tuple(c for c in CONDITIONS if c not in ("po_jepa_full", "identity"))
 AC = ("vjepa2_ac_small", "vjepa2_ac")
 PO_CLASS = ("po_jepa_full", "po_jepa_no_consistency", "po_jepa_time_only", "po_jepa_space_only", "fixed_fourier")
 ABLATION = ("po_jepa_full", "po_jepa_time_only", "po_jepa_space_only", "po_jepa_no_consistency")
@@ -642,10 +643,12 @@ def figures(summary, curves):
         for defect in ("tcd_ln", "scd_ln"):
             series = []
             for c in CONDITIONS:
-                points = sorted((p["error"], 0. if c == "identity" else p[defect]) for p in s["scatter"][c].values()
-                                if p["error"] is not None and (c == "identity" or p[defect] is not None))
+                if c == "identity":   # S28b（C3）：identity 不作对比基线，不画进散点图
+                    continue
+                points = sorted((p["error"], p[defect]) for p in s["scatter"][c].values()
+                                if p["error"] is not None and p[defect] is not None)
                 if points:
-                    series.append((c if c != "identity" else "identity（纵轴 0）", [x for x, _ in points], [y for _, y in points]))
+                    series.append((c, [x for x, _ in points], [y for _, y in points]))
             files[f"{scene}-scatter-{defect}.svg"] = plots.line_chart(
                 series, f"{scene}：同分布误差—{defect}（每个种子一个点）", "同分布未来误差 e_c", defect)
         series = []

@@ -33,7 +33,9 @@ V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer"
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
                     "po_jepa_rollout_sup")   # 08 §6：有真值两段滚动的对照（2026-11-12 加）
 CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
-REFERENCES = CONDITIONS[1:]
+# S28b（C3，Jerry 2026-11-17）：identity 退出对比，不再当配对比较的对照；它照算，只在单独一节报（数值自检、归一化参照）
+REFERENCES = tuple(c for c in CONDITIONS[1:] if c != "identity")
+SELF_CHECK = ("identity",)
 # 08 §1.3：同一数据集、同一种子下补跑条件的初始权重必须和这个 v7 条件相同（koopman 没有对照）
 INITIAL_SAME_AS = dict(po_jepa_time_only="po_jepa_full", po_jepa_space_only="po_jepa_full", fixed_fourier="po_jepa_full",
                        transformer_consistency="matched_transformer", po_jepa_rollout_sup="po_jepa_full")
@@ -245,7 +247,7 @@ def equal_step_rows(groups, equal_jobs, problems):
     """同步数对照（补充）：po_jepa_full − 截到 full 步数的对照，按网格配对；与主表的 full − 对照并列。"""
     rows = []
     for j in equal_jobs:
-        key = (j["job"]["dataset"], j["job"]["updates"], j["job"]["seed"])
+        key = (_label(j["job"]), j["job"]["updates"], j["job"]["seed"])   # S28b：变体后缀和主表分组同一写法
         full = groups.get(key, {}).get("po_jepa_full")
         c = j["job"]["condition"]
         if full is None:
@@ -262,9 +264,17 @@ def equal_step_rows(groups, equal_jobs, problems):
     return rows
 
 
+def _variant_suffix(job):
+    """S28b：非默认变体（job.json 的 variant：多段切分、零初始化）加在数据集名后，和标定文件名同一写法；默认变体为空。"""
+    variant = job.get("variant") or {}
+    return (("~dyadic" if variant.get("temporal_partition") == "dyadic" else "")
+            + ("~zeroinit" if variant.get("readout_init") == "zero" else ""))
+
+
 def _label(job):
-    """普通任务：数据集；分布外评测：训练数据集 → 测试数据集。"""
-    return job["dataset"] if job.get("kind") != "transfer" else f"{job['train_dataset']} → {job['dataset']}"
+    """普通任务：数据集；分布外评测：训练数据集 → 测试数据集。S28b：非默认变体两边都带变体后缀，不和默认变体混成一组。"""
+    suffix = _variant_suffix(job)
+    return job["dataset"]+suffix if job.get("kind") != "transfer" else f"{job['train_dataset']}{suffix} → {job['dataset']}{suffix}"
 
 
 def transfer_drops(groups):
@@ -578,18 +588,26 @@ def _markdown(s):
     lines += ["## 各条件（跨种子平均）", "", "| 数据集 | 步数 | 条件 | 种子 | 未来误差 | 种子间 SD | delta_act | TCD_norm | SCD_norm |",
               "|---|---|---|---|---|---|---|---|---|"]
     for r in s["across_seeds"]:
-        if "condition" in r:
+        if "condition" in r and r["condition"] not in SELF_CHECK:
             lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {r['seeds']} | {_f(r['future_mean'])} | "
                          f"{_f(r['future_seed_std'])} | {_f(r['delta_act_mean'])} | {_f(r['tcd_normalized_mean'])} | {_f(r['scd_normalized_mean'])} |")
     lines += ["", "## 按网格拆开（跨种子平均；16×16 有 JEPA 监督，12×12、8×8 没有）", "",
               "| 数据集 | 步数 | 条件 | 16×16 | 12×12 | 8×8 | 16×16 多步滚动 | 同窗口直接预测 | 实际训练步数 | 早停的种子 |",
               "|---|---|---|---|---|---|---|---|---|---|"]
     for r in s["across_seeds"]:
-        if "condition" in r:
+        if "condition" in r and r["condition"] not in SELF_CHECK:
             g = r["future_by_grid"]
             lines.append(f"| {r['dataset']} | {r['updates']} | {r['condition']} | {_f(g['16'])} | {_f(g['12'])} | {_f(g['8'])} | "
                          f"{_f(r['rollout_future_mean'])} | {_f(r['rollout_direct_mean'])} | "
                          f"{', '.join(str(u) for u in r['completed_updates'])} | {r['stopped_early']}/{r['seeds']} |")
+    checks = [r for r in s["across_seeds"] if r.get("condition") in SELF_CHECK]
+    if checks:   # S28b（C3）：identity 只作数值自检和归一化参照，不进上面两张表和配对比较
+        lines += ["", "## 数值自检：identity（不作对比基线，只用来核对数据和归一化）", "",
+                  "| 数据集 | 步数 | 种子 | 未来误差 | 16×16 | 12×12 | 8×8 | 16×16 多步滚动 |", "|---|---|---|---|---|---|---|---|"]
+        for r in checks:
+            g = r["future_by_grid"]
+            lines.append(f"| {r['dataset']} | {r['updates']} | {r['seeds']} | {_f(r['future_mean'])} | {_f(g['16'])} | {_f(g['12'])} | "
+                         f"{_f(g['8'])} | {_f(r['rollout_future_mean'])} |")
     lines += ["", "## 配对比较按网格（full − 对照，跨种子平均；负数 = full 更好）", "",
               "| 数据集 | 步数 | 比较 | 16×16 | 12×12 | 8×8 | 16×16 多步滚动 |", "|---|---|---|---|---|---|---|"]
     for r in s["across_seeds"]:

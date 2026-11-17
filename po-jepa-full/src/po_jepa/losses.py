@@ -5,6 +5,7 @@ JEPA 距离局部对两侧 E 轴作无 affine LN，再按固定 p=1 求 MAE；ra
 """
 
 from dataclasses import dataclass
+import hashlib
 import math
 from numbers import Real
 
@@ -12,9 +13,17 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .actions import ActionSegments, split_action_segments, concatenate_action_segments
+from .actions import (ActionSegments, split_action_segments, concatenate_action_segments,
+                      _exact_split_slice, select_action_rows)
 from .geometry import GridSpec, SpatialTransfer, apply_spatial_transfer
 from .model import POJEPA
+
+# S28b（M1，导师 2026-11-11 定方向，Jerry 2026-11-17 定抽法）：时间一致性的切分方式。
+# bisection = 原式15 的二等分（τ = σ = T/2）；dyadic = 引理 5.4 的 2^k 等分，每个样本抽一个 k。
+TEMPORAL_PARTITIONS = ("bisection", "dyadic")
+DYADIC_LEVELS = (1, 2, 3)
+# 段长小于积分器步长 0.25 周期的 k 不抽（Jerry 2026-11-17）；T = 1 只抽 k = 1, 2。
+DYADIC_MIN_SEGMENT_CYCLES = 0.25
 
 
 @dataclass(frozen=True)
@@ -45,11 +54,16 @@ class LossConfig:
     lr_decay_updates: int = 0
     # v5：前 W 次更新学习率从 1e-3/W 线性升到 1e-3（第 s 次用 1e-3*(s+1)/W），之后再做余弦衰减；0 表示不预热。
     lr_warmup_updates: int = 0
+    # S28b：时间一致性的切分。"bisection"（默认）= 式15 二等分；"dyadic" = 每样本一个 k 的 2^k 等分，
+    # 分母换成引理 5.4 的 c(Π_k)² + ε，c(Π_k) = T²(1 − 2^{−k})/2（见 partition_consistency_loss）。
+    temporal_partition: str = "bisection"
 
     def __post_init__(self) -> None:
         """拒绝非有限值、伪标量及偏离固定 p/LN 选择的配置。"""
         if self.consistency_metric not in ("raw_sum", "ln_mean", "input_scale"):
             raise ValueError("consistency_metric must be 'raw_sum', 'ln_mean' or 'input_scale'")
+        if type(self.temporal_partition) is not str or self.temporal_partition not in TEMPORAL_PARTITIONS:
+            raise ValueError("temporal_partition must be 'bisection' or 'dyadic'")
         if type(self.consistency_warmup_updates) is not int or self.consistency_warmup_updates < 0:
             raise ValueError("consistency_warmup_updates must be a nonnegative integer")
         if type(self.lr_decay_updates) is not int or self.lr_decay_updates < 0:
@@ -357,6 +371,203 @@ def temporal_consistency_loss(predictions: TemporalPredictions, *, config: LossC
     if not torch.isfinite(per_sample).all() or not torch.isfinite(mean):
         raise ValueError("temporal reduction must remain finite float64")
     return ReducedLoss(per_sample, mean)
+
+
+def dyadic_level_options(duration_cycles: float) -> tuple[int, ...]:
+    """S28b：时长 T（控制周期）允许抽的 k：DYADIC_LEVELS 里段长 T/2^k ≥ 0.25 周期的那些（T=1 → (1, 2)，T≥2 → (1, 2, 3)）。"""
+    if isinstance(duration_cycles, bool) or not isinstance(duration_cycles, Real):
+        raise TypeError("duration_cycles must be a real scalar")
+    value = float(duration_cycles)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("duration_cycles must be finite and strictly positive")
+    return tuple(k for k in DYADIC_LEVELS if value/2**k >= DYADIC_MIN_SEGMENT_CYCLES)
+
+
+def dyadic_levels(duration: Tensor, sample_ids: tuple[str, ...], *, step: int) -> Tensor:
+    """S28b：每个样本从允许的 k 里均匀抽一个（Jerry 2026-11-17），返回 CPU int64 [B]。
+
+    抽法是确定的哈希，不读写任何随机状态：k_b = options_b[int(SHA256("po-jepa-dyadic-v1|step|b|id")[:8]) mod |options_b|]。
+    同一步、同一批（各条件共用同一查询序列）抽到的 k 相同；续训从 completed_steps 接上同一串 k，检查点不用另存状态。
+    duration 是 CPU float64 [B] 正周期（训练批里等于 τ+σ），sample_ids 每行一个非空字符串，step 是非负 int。
+    """
+    if type(step) is not int or step < 0:
+        raise ValueError("step must be a nonnegative native int")
+    if type(sample_ids) is not tuple or not sample_ids or any(type(s) is not str or not s.strip() for s in sample_ids):
+        raise ValueError("sample_ids must be a nonempty tuple of nonempty strings")
+    _temporal_time_contract(duration, "duration", len(sample_ids))
+    levels = []
+    for row, (value, sample) in enumerate(zip(duration.tolist(), sample_ids)):
+        options = dyadic_level_options(value)
+        if not options:
+            raise ValueError(f"duration {value} has no dyadic level with segments of at least {DYADIC_MIN_SEGMENT_CYCLES} cycles")
+        digest = hashlib.sha256(f"po-jepa-dyadic-v1|{step}|{row}|{sample}".encode("utf-8")).digest()
+        levels.append(options[int.from_bytes(digest[:8], "big") % len(options)])
+    return torch.tensor(levels, dtype=torch.int64)
+
+
+def dyadic_coefficient(duration: Tensor, levels: Tensor) -> Tensor:
+    """引理 5.4 的 c(Π_k) = Σ_{i≥2} t_{i−1}τ_i，2^k 等分时 = T²(1 − 2^{−k})/2；CPU float64 [B]。
+
+    k = 1 时 = T²/4，和二等分分母里的 τσ = (T/2)(T/2) 逐位相同（只差 2 的幂次缩放）。
+    """
+    factor = torch.tensor([(1.-2.**-int(k))/2. for k in levels.tolist()], dtype=torch.float64)
+    return duration.square()*factor
+
+
+@dataclass(frozen=True)
+class PartitionPredictions:
+    """S28b：引理 5.4 左边的两支，direct = Φ_T(Z; u1⊕u2)（和二等分同一次长支，JEPA 项照旧用它），
+    composed = Φ_{Π_k}(Z; u)（2^k 段逐段完整 Φ，每段输入是上一段的 raw 预测），difference = direct − composed。
+
+    三个 raw 字段为模型 float32 [B,N,E]，保留两支梯度；duration 是 CPU float64 [B] 的 T，levels 是 CPU int64 [B] 的 k。
+    """
+
+    direct: Tensor
+    composed: Tensor
+    difference: Tensor
+    duration: Tensor
+    levels: Tensor
+    input_scale: Tensor | None = None
+
+
+def _levels_contract(levels: Tensor, duration: Tensor) -> None:
+    """levels 是 CPU int64 [B]、无梯度，每行的 k 在 dyadic_level_options(T) 里。"""
+    if (not isinstance(levels, Tensor) or levels.is_nested or levels.layout != torch.strided
+            or levels.device.type != "cpu" or levels.dtype != torch.int64 or levels.shape != duration.shape
+            or levels.requires_grad):
+        raise ValueError("levels must be CPU int64 [B] without gradient")
+    for k, value in zip(levels.tolist(), duration.tolist()):
+        if k not in dyadic_level_options(value):
+            raise ValueError(f"level k={k} is not allowed for duration {value}")
+
+
+def _partition_core(model, raw_z: Tensor, controls: ActionSegments, tau: Tensor, sigma: Tensor,
+                    levels: Tensor, grid: GridSpec) -> PartitionPredictions:
+    """POJEPA 与通用模型共用的引理 5.4 两支（调用者先核模型类型）。
+
+    direct 和 temporal_predictions 的长支逐行相同（同样把 u 在 τ 处切开再拼成 u1⊕u2）。composed 按 k 分组：
+    第 g 组 2^k 段，第 i 段的动作是原控制 [i·h, (i+1)·h) 的精确交集（h = T/2^k，与 split_action_segments 同一切法），
+    输入是上一段的 raw 输出，不 LN、不 detach、不读真实中间帧。整批同一个 k 时不分组，所以全是 k = 1 时和二等分逐位相同。
+    """
+    if not isinstance(controls, ActionSegments):
+        raise TypeError("controls must be ActionSegments")
+    if not isinstance(grid, GridSpec):
+        raise TypeError("grid must be a GridSpec")
+    _temporal_raw_contract(raw_z, "raw_z")
+    grid.__post_init__()
+    batch = raw_z.shape[0]
+    _temporal_time_contract(tau, "tau", batch)
+    _temporal_time_contract(sigma, "sigma", batch)
+    if not torch.equal(tau, sigma):
+        raise ValueError("dyadic partition requires the equal-halves query tau == sigma == T/2")
+    total = tau+sigma
+    _levels_contract(levels, total)
+    pair = split_action_segments(controls, tau=tau, sigma=sigma)
+    long_controls = concatenate_action_segments(pair.first, pair.second)
+    direct = model(raw_z, long_controls, total, grid)
+    composed = None
+    for k in sorted(set(levels.tolist())):
+        rows = [b for b, level in enumerate(levels.tolist()) if level == k]
+        whole = len(rows) == batch
+        index = torch.tensor(rows, dtype=torch.int64)
+        state = raw_z if whole else raw_z.index_select(0, index.to(raw_z.device))
+        path = controls if whole else select_action_rows(controls, rows)
+        length = (total if whole else total.index_select(0, index))/2**k
+        for i in range(2**k):
+            segment = _exact_split_slice(path, start=length*i, duration=length)
+            state = model(state, segment, length.clone(), grid)
+        if whole:
+            composed = state
+        else:
+            base = torch.zeros_like(direct) if composed is None else composed
+            composed = base.index_copy(0, index.to(raw_z.device), state)
+    difference = direct-composed
+    if not torch.isfinite(difference).all():
+        raise ValueError("partition raw float32 difference must remain finite")
+    return PartitionPredictions(direct, composed, difference, total.clone(), levels.clone(), input_scale(raw_z))
+
+
+def partition_predictions(model: POJEPA, raw_z: Tensor, controls: ActionSegments, tau: Tensor, sigma: Tensor,
+                          levels: Tensor, grid: GridSpec) -> PartitionPredictions:
+    """S28b：引理 5.4 / 式 (partition_rollout) 的 Φ_T(Z) 与 Φ_{Π_k}(Z)，每次更新 1 + Σ_{不同 k} 2^k 次完整 Φ。"""
+    if not isinstance(model, POJEPA):
+        raise TypeError("model must be a POJEPA")
+    return _partition_core(model, raw_z, controls, tau, sigma, levels, grid)
+
+
+def partition_consistency_loss(predictions: PartitionPredictions, *, config: LossConfig) -> ReducedLoss:
+    """S28b：L_time = mean_B[ δ(Φ_T(Z), Φ_{Π_k}(Z)) / (c(Π_k)² + ε) ]，c(Π_k) = T²(1 − 2^{−k})/2。
+
+    分子和 temporal_consistency_loss 同一个 δ（_consistency_difference + _consistency_reduce，input_scale 度量下是
+    mean_(N,E)(D/s)²），只把分母 (τσ)² + ε 换成 c(Π_k)² + ε；k = 1 时两者逐位相同。结果 [B]/零维为同设备 float64。
+    """
+    if not isinstance(predictions, PartitionPredictions):
+        raise TypeError("predictions must be PartitionPredictions")
+    if not isinstance(config, LossConfig):
+        raise TypeError("config must be a LossConfig")
+    config.__post_init__()
+    for name in ("direct", "composed", "difference"):
+        value = getattr(predictions, name)
+        _temporal_raw_contract(value, name)
+        if value.shape != predictions.direct.shape or value.device != predictions.direct.device:
+            raise ValueError("partition raw fields must share the same shape and actual device")
+    difference = predictions.difference
+    _temporal_time_contract(predictions.duration, "duration", difference.shape[0])
+    _levels_contract(predictions.levels, predictions.duration)
+    epsilon = float(config.time_epsilon)
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("time_epsilon precision must remain finite and strictly positive in float64")
+    d64 = _consistency_difference(predictions.direct, predictions.composed, difference, config, predictions.input_scale)
+    numerator = _consistency_reduce(d64, config)
+    coefficient = dyadic_coefficient(predictions.duration, predictions.levels).to(device=d64.device)
+    denominator = coefficient.square()+epsilon
+    if not torch.isfinite(numerator).all() or not torch.isfinite(denominator).all() or torch.any(denominator <= 0):
+        raise ValueError("partition numerator and positive denominator must remain finite float64")
+    per_sample = numerator/denominator
+    mean = per_sample.mean()
+    if not torch.isfinite(per_sample).all() or not torch.isfinite(mean):
+        raise ValueError("partition reduction must remain finite float64")
+    return ReducedLoss(per_sample, mean)
+
+
+def temporal_phi_calls(config: LossConfig, duration: Tensor, sample_ids: tuple[str, ...], step: int | None) -> int:
+    """S28b：time_consistency 一次调用的完整 Φ 次数（读出计数核对用）。
+
+    二等分 3（direct、intermediate、composed）；多段切分 1 + Σ_{这批抽到的不同 k} 2^k（direct 一次，每组 2^k 段）。
+    """
+    if not isinstance(config, LossConfig):
+        raise TypeError("config must be a LossConfig")
+    if config.temporal_partition == "bisection":
+        return 3
+    if step is None:
+        raise ValueError("dyadic temporal partition needs the explicit update index step")
+    return 1+sum(2**k for k in set(dyadic_levels(duration, sample_ids, step=step).tolist()))
+
+
+def time_consistency(model, raw_z: Tensor, controls: ActionSegments, tau: Tensor, sigma: Tensor, grid: GridSpec,
+                     *, config: LossConfig, step: int | None, sample_ids: tuple[str, ...], generic: bool = False):
+    """S28b：按 config.temporal_partition 选时间一致性，返回 (predictions, ReducedLoss)；predictions.direct 是 JEPA 项的长支。
+
+    bisection：temporal_predictions + temporal_consistency_loss（原式15，3 次 Φ，step 不用）。
+    dyadic：dyadic_levels(τ+σ, sample_ids, step) 抽 k，partition_predictions + partition_consistency_loss。
+    generic=True 时用 generic_consistency 的同名函数（transformer_consistency，只把 POJEPA 类型检查换成通用合同）。
+    """
+    if not isinstance(config, LossConfig):
+        raise TypeError("config must be a LossConfig")
+    config.__post_init__()
+    if generic:
+        from . import generic_consistency as owner
+    else:
+        import sys
+        owner = sys.modules[__name__]
+    if config.temporal_partition == "bisection":
+        predictions = owner.temporal_predictions(model, raw_z, controls, tau, sigma, grid)
+        return predictions, temporal_consistency_loss(predictions, config=config)
+    if step is None:
+        raise ValueError("dyadic temporal partition needs the explicit update index step")
+    levels = dyadic_levels(tau+sigma, sample_ids, step=step)
+    predictions = owner.partition_predictions(model, raw_z, controls, tau, sigma, levels, grid)
+    return predictions, partition_consistency_loss(predictions, config=config)
 
 
 @dataclass(frozen=True)

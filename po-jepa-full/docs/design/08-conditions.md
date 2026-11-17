@@ -19,6 +19,8 @@
 | koopman | 补跑 | KoopmanPredictor，K = 103 | 0 | 0 | no_consistency | 1 | 2 | 227,840 |
 | po_jepa_rollout_sup | 补跑（§6，2026-11-12） | 与 full 完全相同 | 时间项换成 L_roll，权重 λ_r 补跑标定 | v7 full 的 λ_s | rollout_sup | 5 | 10 | 227,617 |
 
+S28b：上表的 Φ / p_out 次数是二等分（默认）时的值；多段切分变体下时间一致性改成 1 + Σ_{这批抽到的不同 k} 2^k 次 Φ（`losses.temporal_phi_calls`），PO 类每次更新 (那个数 + 2) 次 Φ，transformer_consistency 1 + 那个数 + 2 次前向；po_jepa_rollout_sup 固定二等分。说明见 `docs/segments/S28b.md`。
+
 参数量是 v7 协议（`PO_JEPA_PROTOCOL=v7`，v7 提交 0ac45fe，`configs/train/v7.yaml` 设 `model.dynamics.forcing_space: token`）下用代码数的：PO-JEPA 是 token 写法，227,617（含 `p_out.bias` 的 1,408）；fixed_fourier 和它同结构，也是 227,617。v6 协议（不设 `PO_JEPA_PROTOCOL=v7`）下 PO-JEPA 仍是模态写法 215,778。
 
 “v7 标定”指 v7 的 calibrate 任务写出的 `configs/calibration/<场景>-<条数>-u<步数>.yaml`，补跑时原样导入（16 §3.1）；“补跑标定”见 16 §3.2。σ_z 所有 PO-JEPA 类条件都用导入的 v7 值（fixed_fourier 不建图，用不到 σ_z，但它的 buffer 里存的是同一个值，保证初始权重和 full 相同）。
@@ -36,6 +38,7 @@ DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个
 - po_jepa_time_only、po_jepa_space_only、fixed_fourier、po_jepa_rollout_sup 的 `initial_model_sha256`（`v7jobs._model_hash`）必须等于 v7 那次 po_jepa_full 的值。fixed_fourier 也能相等，因为 `FourierSpectrum` 不加参数和 buffer，构造时消耗的随机数和 `GraphSpectrum` 相同。
 - transformer_consistency 的初始哈希必须等于 v7 那次 matched_transformer 的值。
 - koopman 没有可对照的 v7 条件，只登记自己的值。
+- S28b：P_out 零初始化（`PO_JEPA_READOUT_INIT=zero`）和多段切分（`PO_JEPA_TEMPORAL_PARTITION=dyadic`）是协议级变体，所有 PO 类条件同时生效；零初始化先照常抽 Xavier 再清零，随机数消耗不变，所以上面的关系在**同一变体内**照样成立（零初始化变体的哈希和 Xavier 变体不同，不跨变体比）。
 
 ## 2. 单项一致性消融（po_jepa_time_only、po_jepa_space_only）
 

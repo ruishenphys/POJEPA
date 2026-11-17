@@ -34,7 +34,7 @@ from po_jepa.actions import ActionSegments, split_action_segments, validate_acti
 from po_jepa.geometry import SpatialTransfer
 
 from po_jepa.losses import (LossConfig, _temporal_raw_contract, _temporal_time_contract,
-    jepa_distance, temporal_predictions, temporal_consistency_loss,
+    jepa_distance, temporal_predictions, temporal_consistency_loss, time_consistency,
     spatial_predictions, spatial_consistency_loss, weighted_total_loss)
 
 from po_jepa.model import POJEPA
@@ -151,6 +151,12 @@ def _loss_config(config: LossConfig, condition: str) -> dict:
         raise TypeError("loss_config must be LossConfig")
     config.__post_init__()
     native = {name: value if isinstance(value, str) else float(value) for name, value in asdict(config).items()}
+    # S28b：默认的二等分不进快照，旧检查点（v7、v7.1、S28a 及以前）的 loss_config 快照逐键不变、照样能读；
+    # 多段切分写进快照（检查点标签），二等分和多段切分的检查点不会互相读错。
+    if native["temporal_partition"] == "bisection":
+        del native["temporal_partition"]
+    elif condition == "rollout_sup":
+        raise ValueError("condition rollout_sup keeps its two-segment supervised rollout; temporal_partition must be bisection")
     for name, scalar in native.items():
         if isinstance(scalar, str):
             continue
@@ -305,9 +311,10 @@ def train_step(model: POJEPA, optimizer: torch.optim.AdamW, batch: TrainingBatch
         raise ValueError("caller must explicitly model.train() with gradient mode enabled outside inference")
     _batch(batch, model)
     optimizer.zero_grad(set_to_none=True)
-    temporal = temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    # S28b：时间一致性按 loss_config.temporal_partition 选二等分或多段切分（k 由 completed_steps 和样本 ID 定）；JEPA 仍用长支 direct。
+    temporal, time = time_consistency(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                                      config=loss_config, step=completed_steps, sample_ids=batch.sample_ids)
     jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config)
-    time = temporal_consistency_loss(temporal, config=loss_config)
     spatial = spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
     space = spatial_consistency_loss(spatial, config=loss_config)
     total = weighted_total_loss(jepa, time, space, config=loss_config,
@@ -365,16 +372,19 @@ def clip_gradients(parameters: list, max_norm: float) -> float:
         return float(torch.nn.utils.clip_grad_norm_(parameters, max_norm, error_if_nonfinite=True))
     return math.sqrt(sum(float(p.grad.detach().double().square().sum()) for p in parameters))
 
-def consistency_gradient_norms(model: POJEPA, batch: TrainingBatch, *, loss_config: LossConfig) -> dict:
+def consistency_gradient_norms(model: POJEPA, batch: TrainingBatch, *, loss_config: LossConfig,
+                               step: int | None = None) -> dict:
     """v4 式 lambda 标定：同一批次、与 train_step 相同的五次 Phi，分别求三项对全部参数的梯度范数。
 
     不更新参数、不写 optimizer；仅用于训练前在初始化状态下标定 lambda_t/lambda_s。
+    S28b：step 是这批在查询序列里的序号（= train_step 的 completed_steps）；多段切分时必须给，用来抽和训练同一串 k。
     """
     parameters = [p for _, p in _parameters(model)]
     _batch(batch, model)
-    temporal = temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    temporal, time = time_consistency(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                                      config=loss_config, step=step, sample_ids=batch.sample_ids)
+    time = time.mean
     jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config).mean
-    time = temporal_consistency_loss(temporal, config=loss_config).mean
     spatial = spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
     space = spatial_consistency_loss(spatial, config=loss_config).mean
     result = dict(jepa=jepa.item(), time=time.item(), space=space.item())
@@ -399,10 +409,15 @@ def _native_config(value):
 def _model_config(model: POJEPA) -> dict:
     """保存当前projection/graph/dynamics/integrator原生配置，固定buffer另逐值核查。"""
     from po_jepa.model import ProjectionConfig
-    projection = ProjectionConfig(model.encoder_dim, model.dynamic_dim, readout=model.readout)
+    projection = ProjectionConfig(model.encoder_dim, model.dynamic_dim, readout=model.readout,
+                                  readout_init=getattr(model, "readout_init", "xavier"))
     for config in (model.spectrum.config, model.dynamics.config, model.integrator):
         config.__post_init__()
-    return _native_config(dict(projection=asdict(projection), graph=asdict(model.spectrum.config),
+    snapshot = asdict(projection)
+    # S28b：默认的 Xavier 不进快照（旧检查点的 model_config 逐键不变）；零初始化写进去，两种检查点不会互相读错
+    if snapshot["readout_init"] == "xavier":
+        del snapshot["readout_init"]
+    return _native_config(dict(projection=snapshot, graph=asdict(model.spectrum.config),
         dynamics=asdict(model.dynamics.config), integrator=asdict(model.integrator)))
 
 def _optimizer_config(optimizer: torch.optim.AdamW) -> dict:

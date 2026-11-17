@@ -107,13 +107,14 @@ def _jepa_only(condition, device):
     raise ValueError(f"only {', '.join(calibration.CALIBRATED_CONDITIONS)} use the add-on calibration")
 
 
-def _gradient_norms(condition, model, batch, loss) -> dict:
-    """三项梯度范数，键 jepa、time、space、grad_jepa、grad_time、grad_space（16 §3.2 第 5 步）。"""
+def _gradient_norms(condition, model, batch, loss, step) -> dict:
+    """三项梯度范数，键 jepa、time、space、grad_jepa、grad_time、grad_space（16 §3.2 第 5 步）。
+    S28b：step 是这批在查询序列里的序号，多段切分按它抽 k。"""
     if condition == "transformer_consistency":
-        return calibration.generic_gradient_norms(model, batch, loss_config=loss)
+        return calibration.generic_gradient_norms(model, batch, loss_config=loss, step=step)
     if condition == "po_jepa_rollout_sup":   # time 一格是 L_roll（08 §6）
         return calibration.rollout_gradient_norms(model, batch, loss_config=loss)
-    return training.consistency_gradient_norms(model, batch, loss_config=loss)
+    return training.consistency_gradient_norms(model, batch, loss_config=loss, step=step)
 
 
 def _pretrain_step(condition, model, optimizer, batch, loss, completed):
@@ -147,10 +148,11 @@ def calibrate_condition(condition, features, device) -> dict:
     model, loss = _jepa_only(condition, device)
     model.train()
 
-    def rows(queries):
-        return [_gradient_norms(condition, model, data.load_training_batch(features, q, device=str(device)), loss) for q in queries]
+    def rows(queries, first_step):
+        return [_gradient_norms(condition, model, data.load_training_batch(features, q, device=str(device)), loss, first_step+i)
+                for i, q in enumerate(queries)]
 
-    initial = rows(sequence[:count])
+    initial = rows(sequence[:count], 0)
     optimizer = comparison.make_optimizer(model)
     history = []
     for step in range(pre):
@@ -159,7 +161,7 @@ def calibrate_condition(condition, features, device) -> dict:
         history.append(dict(step=result.completed_steps, grad_norm_before_clip=result.grad_norm, **result.loss_values))
         if result.completed_steps % 50 == 0:
             print(f'calibrate-addon {condition} pretrain {result.completed_steps}/{pre} jepa={result.loss_values["jepa"]:.4f}', flush=True)
-    measured = rows(sequence[pre:pre+count])
+    measured = rows(sequence[pre:pre+count], pre)
     after, before = _summary(measured), _summary(initial)
     median = after["median"]
     weights, initial_weights = {}, {}

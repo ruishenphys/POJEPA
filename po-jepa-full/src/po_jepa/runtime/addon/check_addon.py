@@ -57,7 +57,8 @@ def _diagnostic(condition, features, device, queries, registration, sequence):
     koopman = condition == "koopman"
     record = dict(loss_label=conditions.LOSS_LABELS[condition], time_weight=loss.time_weight, space_weight=loss.space_weight,
                   parameters=comparison.parameter_counts(model), koopman_modes=model.config.modes if koopman else None,
-                  initial_model_sha256=initial, readouts=dict(observed=len(scales), expected=conditions.expected_readouts(condition, model)),
+                  initial_model_sha256=initial, readouts=dict(observed=len(scales), expected=conditions.expected_readouts(
+                      condition, model, loss_config=loss, batch=batch, step=0)),
                   losses=result.loss_values, grad_max_abs=result.grad_max_abs, grad_norm=result.grad_norm,
                   gradients=parameters, memory=memory)
     return initial, record

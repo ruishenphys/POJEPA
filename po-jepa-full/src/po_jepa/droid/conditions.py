@@ -339,9 +339,9 @@ def consistency_share(condition: str, model, batch, loss_config: LossConfig, com
     """09 §4.6：本步批上的三项梯度范数和 share = λ·w(s)·|∇L_c|/|∇L_JEPA|（v7 `comparison.consistency_share` 的公式和键；
     transformer_consistency 用通用梯度范数）。不改参数、优化器和随机状态。"""
     if condition == "transformer_consistency":
-        norms = addon_calibration.generic_gradient_norms(model, batch, loss_config=loss_config)
+        norms = addon_calibration.generic_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     elif condition in PO_CONDITIONS:
-        norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config)
+        norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     else:
         raise ValueError(f"{condition} has no consistency terms to monitor")
     scale = training.consistency_warmup_scale(loss_config, completed)

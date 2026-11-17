@@ -1,6 +1,6 @@
 """图1的逐 token 投影与完整 Z→Z 预测器。
 
-P_in/P_out 为 1408↔64 线性投影，采用 Xavier uniform 与零偏置。
+P_in/P_out 为 1408↔64 线性投影，采用 Xavier uniform 与零偏置（S28b：readout_init="zero" 时 P_out 权重清零）。
 每次完整 Phi 重建图谱和上下文；零时长也经谱投影与读出，不强制恒等。
 """
 
@@ -29,11 +29,18 @@ class ProjectionConfig:
     # v4：readout="residual" 时 Z_hat=Z+P_out(Psi C_tau)-P_out(Psi C_0)，零时长严格恒等；
     # "direct" 保持一轮 Z_hat=P_out(Psi C_tau)。
     readout: str = "direct"
+    # S28b（M2）：P_out 的初始化。"xavier"（默认）= Xavier uniform；"zero" = 先照常抽 Xavier（随机数消耗不变，
+    # 其余参数和 Xavier 版逐位相同）再把权重清零，残差读出的起点因此恰为 Φ_τ = Id。只允许残差读出。
+    readout_init: str = "xavier"
 
     def __post_init__(self) -> None:
         """分配参数前拒绝布尔数、非整数和未约定宽度。"""
         if self.readout not in ("direct", "residual"):
             raise ValueError("readout must be 'direct' or 'residual'")
+        if type(self.readout_init) is not str or self.readout_init not in ("xavier", "zero"):
+            raise ValueError("readout_init must be 'xavier' or 'zero'")
+        if self.readout_init == "zero" and self.readout != "residual":
+            raise ValueError("readout_init 'zero' requires the residual readout (a zero direct readout predicts 0)")
         if type(self.encoder_dim) is not int or self.encoder_dim <= 0:
             raise ValueError("encoder_dim must be a positive integer")
         if type(self.dynamic_dim) is not int or self.dynamic_dim != 64:
@@ -90,6 +97,7 @@ class POJEPA(nn.Module):
         self.encoder_dim = projection.encoder_dim
         self.dynamic_dim = projection.dynamic_dim
         self.readout = projection.readout
+        self.readout_init = projection.readout_init
         self.spectrum = spectrum
         self.dynamics = dynamics
         self.integrator = integrator
@@ -101,6 +109,10 @@ class POJEPA(nn.Module):
         for layer in (self.p_in, self.p_out):
             nn.init.xavier_uniform_(layer.weight, gain=1.)
             nn.init.zeros_(layer.bias)
+        if self.readout_init == "zero":
+            # S28b（M2）：Xavier 已经抽过（随机数消耗和 Xavier 版相同），再清零：Ẑ = Z + P_out(ΨC_τ) − P_out(ΨC_0) 起点恰为 Z
+            with torch.no_grad():
+                self.p_out.weight.zero_()
 
     def _validate_components(self) -> None:
         """生产预测前核对真实谱、动力学与积分组件。"""

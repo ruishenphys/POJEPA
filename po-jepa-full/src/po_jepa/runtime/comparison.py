@@ -49,7 +49,7 @@ from po_jepa.koopman import KoopmanPredictor
 
 from po_jepa.losses import (LossConfig, input_scale, TemporalPredictions, SpatialPredictions, jepa_distance,
                             temporal_predictions, spatial_predictions, _temporal_time_contract,
-                            _temporal_raw_contract)
+                            _temporal_raw_contract, temporal_phi_calls)
 
 from po_jepa.metrics import SampleMetric, temporal_composition_defect, spatial_commutation_defect
 
@@ -169,6 +169,8 @@ def preregister():
                      early_stopping=early_stopping_config(), checkpoint_retention=checkpoint_retention_config(),
                      ac_parameters=counts, ac_baselines={c: ac_baseline.describe(c) for c in AC_CONDITIONS},
                      ac_small_parameter_match=parameter_match(matching["po_parameters"], counts["vjepa2_ac_small"]))
+        if check.v7_variant() != check.V7_VARIANT_DEFAULT:   # S28b：非默认变体写进预登记（默认变体的预登记逐键不变）
+            extra["variant"] = check.v7_variant()
     return dict(**extra, schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
         model_seed=check.model_seed(),
         parameter_match=matching, query_sequence_sha256=sequence_sha(sequence),
@@ -622,7 +624,10 @@ def _observed_update(condition, model, optimizer, batch, config, completed):
         result = condition_step(condition, model, optimizer, batch, config, completed)
     finally:
         handle.remove()
-    if (result.completed_steps != completed+1 or len(scales) != (1 if condition == "matched_transformer" else 5*check.readouts_per_phi(model))
+    # S28b：PO 类 = (时间一致性的 Φ 次数 + 空间 2 次) × 每次 Φ 的读出数；二等分时是 5 × readouts_per_phi
+    expected = 1 if condition == "matched_transformer" else (
+        (temporal_phi_calls(config, batch.duration, batch.sample_ids, completed)+2)*check.readouts_per_phi(model))
+    if (result.completed_steps != completed+1 or len(scales) != expected
         or set(result.loss_values) != learning.LOSS_NAMES
         or not math.isfinite(result.grad_max_abs) or result.grad_max_abs < 0
         or any(value is not None and not math.isfinite(value) for value in result.loss_values.values())):
@@ -739,7 +744,8 @@ def consistency_share(condition, model, batch, loss_config, completed):
     interval = check.load_protocol()["monitoring"]["consistency_interval"]
     if condition == "matched_transformer" or completed % interval:
         return None
-    norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config)
+    # S28b：这批是第 completed-1 次更新用的，多段切分按同一步序号抽 k（和训练那一步的 k 相同）
+    norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     scale = training.consistency_warmup_scale(loss_config, completed)
     weights = dict(time=loss_config.time_weight, space=loss_config.space_weight)
     return dict(**norms, warmup_scale=scale,

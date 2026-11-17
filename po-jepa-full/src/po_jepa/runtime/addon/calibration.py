@@ -81,19 +81,21 @@ def require_addon_calibration() -> None:
         load_addon_weights(condition)
 
 
-def generic_gradient_norms(model, batch, *, loss_config) -> dict:
+def generic_gradient_norms(model, batch, *, loss_config, step=None) -> dict:
     """08 §3、16 §3.2：transformer_consistency 的三项梯度范数，键和 training.consistency_gradient_norms 相同。
 
     同一批、和 addon.conditions.transformer_consistency_step 相同的 6 次前向（JEPA 1 次、时间 3 次、空间 2 次），
     三项分别用 torch.autograd.grad 对全部 Transformer 参数求导；不写 .grad、不改参数和优化器、不用随机数。
+    S28b：时间项走 losses.time_consistency（generic=True），多段切分时 step 必须给（同 training.consistency_gradient_norms）。
     """
     from .. import comparison
     parameters = [p for _, p in comparison._tf_parameters(model)]
     comparison._tf_batch(batch, model)
     prediction = model(batch.raw_z, batch.controls, batch.duration, batch.transfer.source)
     jepa = jepa_distance(prediction, batch.raw_target, config=loss_config).mean
-    temporal = temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
-    time = temporal_consistency_loss(temporal, config=loss_config).mean
+    _, time = po_losses.time_consistency(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                                         config=loss_config, step=step, sample_ids=batch.sample_ids, generic=True)
+    time = time.mean
     spatial = spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
     space = spatial_consistency_loss(spatial, config=loss_config).mean
     result = dict(jepa=jepa.item(), time=time.item(), space=space.item())

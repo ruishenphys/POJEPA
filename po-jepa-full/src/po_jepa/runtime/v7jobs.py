@@ -23,6 +23,12 @@ def _light_preflight(features, output, device):
     return dict(hardware=hardware, cache_identity=assets)
 
 
+def with_variant(job: dict) -> dict:
+    """S28b：非默认变体（多段切分、零初始化）记进 job.json 的 variant 键，汇总按它分组；默认变体的 job.json 逐键不变。"""
+    variant = checks.v7_variant()
+    return job if variant == checks.V7_VARIANT_DEFAULT else dict(job, variant=variant)
+
+
 def _model_hash(model) -> str:
     digest = hashlib.sha256()
     for name, value in sorted(model.state_dict().items()):
@@ -62,6 +68,7 @@ def run_job(features, output, device, condition, *, resume_from=None, training_r
     job = dict(condition=condition, dataset=data.datasets.active().tag, seed=checks.model_seed(),
                updates=checks.v7_updates(), resume_from=str(resume_from) if resume_from else None,
                training_run=str(training_run) if training_run else None)
+    job = with_variant(job)
     cache._write_json(output/"job.json", job)
     loss = comparison.LossConfig(**{f.name: config["loss"][f.name] for f in fields(comparison.LossConfig)})
     selected, initial_hash, train_report, root = None, None, None, None
@@ -195,6 +202,7 @@ def transfer_job(features, output, device, condition, *, training_run, test_vari
     job = dict(kind="transfer", condition=condition, dataset=test_spec.tag, train_dataset=base.tag,
                test_variant=test_spec.variant, seed=checks.model_seed(), updates=checks.v7_updates(),
                training_run=str(training_run) if training_run else None)
+    job = with_variant(job)
     cache._write_json(output/"job.json", job)
     old_spec = data.datasets._set_for_tests(test_spec)
     try:
@@ -278,6 +286,7 @@ def equal_step_job(features, output, device, condition, *, training_run, limit_r
     selected = equal_step_selection(report["validations"], min(limit, report["completed_updates"]))
     job = dict(kind="equal_step", condition=condition, dataset=data.datasets.active().tag, seed=checks.model_seed(),
                updates=checks.v7_updates(), training_run=str(training_run), limit_run=str(limit_run))
+    job = with_variant(job)
     cache._write_json(output/"job.json", job)
     model, loss = comparison.build_condition(condition, device)
     optimizer = comparison.make_optimizer(model)

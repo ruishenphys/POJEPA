@@ -32,7 +32,7 @@ from po_jepa.fourier import FourierSpectrum, build_fixed_fourier
 from po_jepa.generic_consistency import spatial_predictions, temporal_predictions
 from po_jepa.koopman import KoopmanConfig, KoopmanPredictor, build_koopman, choose_modes, parameter_count
 from po_jepa.losses import (LossConfig, jepa_distance, spatial_consistency_loss, temporal_consistency_loss,
-                            weighted_total_loss)
+                            temporal_phi_calls, time_consistency, weighted_total_loss)
 from po_jepa.losses import temporal_predictions as po_temporal_predictions, spatial_predictions as po_spatial_predictions
 from po_jepa.model import POJEPA
 from po_jepa.rollout_supervision import rollout_supervision_loss
@@ -112,7 +112,9 @@ def build(condition, device):
     if condition == "fixed_fourier":
         model = build_fixed_fourier(config["model"], check.model_seed(), device)
     elif condition == "po_jepa_rollout_sup":   # 08 §6：只换 λ_r，λ_s 留协议（基础标定）的值，和 po_jepa_full 相同
-        return check.build_full_model(config, device), replace(loss, time_weight=weights["time_weight"])
+        # S28b：时间那格是有真值的两段滚动 L_roll（11-12 定义），不跟多段切分开关走，固定二等分
+        return check.build_full_model(config, device), replace(loss, time_weight=weights["time_weight"],
+                                                               temporal_partition="bisection")
     else:
         model = _registered_transformer(device)
     return model, replace(loss, time_weight=weights["time_weight"], space_weight=weights["space_weight"])
@@ -177,8 +179,9 @@ def transformer_consistency_step(model, optimizer, batch, loss_config, completed
     optimizer.zero_grad(set_to_none=True)
     prediction = model(batch.raw_z, batch.controls, batch.duration, batch.transfer.source)
     jepa = jepa_distance(prediction, batch.raw_target, config=loss_config)
-    temporal = temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
-    time = temporal_consistency_loss(temporal, config=loss_config)
+    # S28b：和 PO-JEPA 同一个时间一致性开关、同一串 k（多段切分时 direct 不进 JEPA 项，JEPA 仍是上面那次原动作前向）
+    _, time = time_consistency(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                               config=loss_config, step=completed_steps, sample_ids=batch.sample_ids, generic=True)
     spatial = spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
     space = spatial_consistency_loss(spatial, config=loss_config)
     total = weighted_total_loss(jepa, time, space, config=loss_config,
@@ -255,15 +258,18 @@ def condition_step(condition, model, optimizer, batch, loss_config, completed_st
                                completed_steps=completed_steps, condition=LOSS_LABELS[condition])
 
 
-def expected_readouts(condition, model) -> int:
+def expected_readouts(condition, model, *, loss_config=None, batch=None, step=None) -> int:
     """07 §2.4：每次更新 p_out 被调用的次数。PO 类（含 po_jepa_rollout_sup）5 × readouts_per_phi（残差读出 10），
-    transformer_consistency 6，koopman 2。"""
+    transformer_consistency 6，koopman 2。
+    S28b：多段切分时时间一致性的 Φ 次数随这批抽到的 k 变（losses.temporal_phi_calls），要给 loss_config、batch、step；
+    不给 loss_config 或是二等分时数值同上。"""
     _require(condition)
-    if condition == "transformer_consistency":
-        return 6
     if condition == "koopman":
         return 2
-    return 5*check.readouts_per_phi(model)
+    temporal = 3 if loss_config is None else temporal_phi_calls(loss_config, batch.duration, batch.sample_ids, step)
+    if condition == "transformer_consistency":
+        return 1+temporal+2
+    return (temporal+2)*check.readouts_per_phi(model)
 
 
 def observed_update(condition, model, optimizer, batch, config, completed):
@@ -276,7 +282,8 @@ def observed_update(condition, model, optimizer, batch, config, completed):
         result = comparison.condition_step(condition, model, optimizer, batch, config, completed)
     finally:
         handle.remove()
-    if (result.completed_steps != completed+1 or len(scales) != expected_readouts(condition, model)
+    if (result.completed_steps != completed+1
+        or len(scales) != expected_readouts(condition, model, loss_config=config, batch=batch, step=completed)
         or set(result.loss_values) != learning.LOSS_NAMES
         or not math.isfinite(result.grad_max_abs) or result.grad_max_abs < 0
         or any(value is not None and not math.isfinite(value) for value in result.loss_values.values())):
@@ -293,11 +300,11 @@ def consistency_share(condition, model, batch, loss_config, completed):
     if condition == "koopman" or completed % interval:
         return None
     if condition == "transformer_consistency":
-        norms = calibration.generic_gradient_norms(model, batch, loss_config=loss_config)
+        norms = calibration.generic_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     elif condition == "po_jepa_rollout_sup":
         norms = calibration.rollout_gradient_norms(model, batch, loss_config=loss_config)
-    else:
-        norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config)
+    else:   # S28b：这批是第 completed-1 次更新用的，多段切分按同一步序号抽 k（和训练那一步的 k 相同）
+        norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     scale = training.consistency_warmup_scale(loss_config, completed)
     weights = dict(time=loss_config.time_weight, space=loss_config.space_weight)
     return dict(**norms, warmup_scale=scale,
