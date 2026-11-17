@@ -55,6 +55,7 @@ python <工作目录>/pack_results.py pack po-jepa-droid/full --output droid-ful
 - 最后两行应该是 `verified N files: every rebuilt file matches its sha256 and size` 和 `wrote ....pack.sqlite: ... MB`。把 `.pack.sqlite` 发给 Jerry，不用再压缩。
 - 被打断时只会留下 `.pack.sqlite.partial`，重跑同一条命令即可。报错就把屏幕输出发给 Jerry。
 - 不想打包的部分用 `--exclude '<模式>'`（可以写多次；`*` 也匹配 `/`，和 `zip -x` 一样）。
+- 文件名里带 `\`、`:` 或控制字符的文件在 Windows 上没法还原，打包时会报错并给出文件名；改名或用 `--exclude` 去掉即可。用 2026-11-17 早先取的旧版工具打的包，新版照样能核对和解包。
 
 ## 三、Jerry 这边解包（Windows 也一样）
 

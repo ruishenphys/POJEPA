@@ -1,7 +1,6 @@
 """tools/pack_results.py: every packed file is rebuilt byte for byte, repeated blocks are stored once."""
 
 import hashlib
-import importlib.util
 import json
 import math
 import os
@@ -15,13 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    name = "pack_results_under_test"
-    if name not in sys.modules:
-        spec = importlib.util.spec_from_file_location(name, ROOT/"tools/pack_results.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-    return sys.modules[name]
+    """Imported under its real name, so that worker processes started with spawn (Windows) can import it."""
+    if str(ROOT/"tools") not in sys.path:
+        sys.path.insert(0, str(ROOT/"tools"))
+    import pack_results
+    assert Path(pack_results.__file__).resolve() == ROOT/"tools/pack_results.py"
+    return pack_results
 
 
 def _repo_json_bytes(value):
@@ -222,3 +220,124 @@ def test_exact_format_recognises_the_repository_writers():
         assert tool._dump(found[0], found[1]) == data
     assert math.isinf(tool.exact_format(json.dumps(value).encode())[0]["d"])
     assert tool.exact_format(b"[1, 2]\n\n") is None and tool.exact_format(b"3") is None
+
+
+def test_spawned_worker_processes_work(tmp_path, monkeypatch):
+    """Windows starts workers with spawn: they must import the tool by name and reach the same result."""
+    tool = _tool()
+    monkeypatch.chdir(tmp_path)
+    root = _tree(tmp_path)
+    tool.pack(["results"], tmp_path/"s.sqlite", exclude=list(tool.DEFAULT_EXCLUDES), workers=2, log=lambda m: None,
+              start_method="spawn")
+    pack = tool.Pack(tmp_path/"s.sqlite")
+    for path, data in _originals(root, tmp_path).items():
+        assert pack.rebuild(path) == data
+
+
+def _pack_with_stored_path(tool, tmp_path, stored):
+    """A valid pack whose only record carries the given stored path (as a hand-made pack could)."""
+    (tmp_path/"src").mkdir(exist_ok=True)
+    (tmp_path/"src/a.txt").write_bytes(b"payload")
+    out = tmp_path/f"p{len(list(tmp_path.glob('p*.sqlite')))}.sqlite"
+    tool.pack(["src"], out, exclude=[], workers=1, log=lambda m: None)
+    _rewrite(out, "file_chunks", lambda t: t.replace('"src/a.txt"', json.dumps(stored)))
+    return out
+
+
+@pytest.mark.parametrize("stored", ["..\\escape.txt", "a\\..\\..\\escape.txt", "\\\\server\\share\\x.txt",
+                                    "C:escape.txt", "C:/escape.txt", "d/C:x.txt", "/abs.txt", "../up.txt",
+                                    "a/../../up.txt", "a//b.txt", "./a.txt", "a/\x00.txt", ""])
+def test_extract_refuses_paths_that_could_leave_the_output_folder(tmp_path, monkeypatch, stored):
+    tool = _tool()
+    monkeypatch.chdir(tmp_path)
+    out = _pack_with_stored_path(tool, tmp_path, stored)
+    with pytest.raises(ValueError, match="unsafe or non-portable"):
+        tool.extract(out, tmp_path/"unpacked", log=lambda m: None)
+    assert not [p for p in tmp_path.rglob("*") if p.is_file() and p.read_bytes() == b"payload" and "src" not in p.parts]
+
+
+def test_pack_refuses_file_names_that_cannot_be_rebuilt_everywhere(tmp_path, monkeypatch):
+    tool = _tool()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path/"d").mkdir()
+    (tmp_path/"d/a\\b.json").write_text("{}")
+    with pytest.raises(ValueError, match="rename it or leave it out"):
+        tool.pack(["d"], tmp_path/"x.sqlite", exclude=[], workers=1, log=lambda m: None)
+    assert tool.pack(["d"], tmp_path/"y.sqlite", exclude=["*\\*"], workers=1, log=lambda m: None)["files"] == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt", reason="needs POSIX symlinks")
+def test_extract_does_not_follow_a_linked_folder_out_of_the_output(packed):
+    tool, base, root, out, _ = packed
+    target, elsewhere = base/"unpacked", base/"elsewhere"
+    (target/"results/scene").mkdir(parents=True)
+    elsewhere.mkdir()
+    (target/"results/scene/job").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside"):
+        tool.extract(out, target, include=["*/updates/0001.json"], log=lambda m: None)
+    assert not any(elsewhere.rglob("*"))
+
+
+def test_extract_leaves_an_existing_partial_file_alone(packed):
+    tool, base, root, out, _ = packed
+    folder = base/"unpacked/results/scene/job/updates"
+    folder.mkdir(parents=True)
+    (folder/"0001.json.partial").write_bytes(b"someone else's file")
+    assert tool.extract(out, base/"unpacked", include=["*/updates/0001.json"], log=lambda m: None) == 1
+    assert (folder/"0001.json.partial").read_bytes() == b"someone else's file"
+    assert sorted(p.name for p in folder.iterdir()) == ["0001.json", "0001.json.partial"]
+    assert (folder/"0001.json").read_bytes() == (root/"scene/job/updates/0001.json").read_bytes()
+    if os.name != "nt":
+        mask = os.umask(0); os.umask(mask)
+        assert (folder/"0001.json").stat().st_mode & 0o777 == 0o666 & ~mask
+
+
+def test_a_reference_with_a_wrong_length_is_refused_even_after_the_same_offset_was_read(packed):
+    """The parsed-block cache must not let a second reference with another length skip the range check."""
+    tool, base, root, out, _ = packed
+    pack = tool.Pack(out)
+    first = next(r for r in pack.records() if r[0].endswith("rows/00003.json"))
+    offset, length = json.loads(json.dumps(first[6]).split('"$pack_ref": ', 1)[1].split("}", 1)[0])
+    pack.build(first)
+    with pytest.raises(ValueError, match="outside the stored blocks"):
+        pack._block(offset, int(pack.meta["blob_bytes"]))
+    with pytest.raises(ValueError, match="outside the stored blocks"):
+        pack._block(offset, True)
+    with pytest.raises(ValueError):
+        pack._block(offset, length-1)
+
+
+def test_very_deep_json_is_kept_raw_and_rebuilt(tmp_path, monkeypatch):
+    tool = _tool()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path/"d").mkdir()
+    deep = ("["*400+json.dumps("x"*1300)+"]"*400).encode()
+    ok = ("["*tool.MAX_DEPTH+json.dumps("x"*1300)+"]"*tool.MAX_DEPTH).encode()
+    (tmp_path/"d/deep.json").write_bytes(deep)
+    (tmp_path/"d/ok.json").write_bytes(ok)
+    tool.pack(["d"], tmp_path/"p.sqlite", exclude=[], workers=1, log=lambda m: None)
+    pack = tool.Pack(tmp_path/"p.sqlite")
+    assert {p: k for p, _, _, k in pack.paths()} == {"d/deep.json": "raw", "d/ok.json": "json"}
+    assert pack.rebuild("d/deep.json") == deep and pack.rebuild("d/ok.json") == ok
+    assert tool.extract(tmp_path/"p.sqlite", tmp_path/"u", include=["*/ok.json"], log=lambda m: None) == 1
+
+
+def test_verify_checks_the_stored_pieces_against_the_pack_record(packed):
+    tool, base, root, out, _ = packed
+    db = sqlite3.connect(out)
+    db.execute("INSERT INTO raw VALUES (?, 0, ?)", ("f"*64, b"unused"))
+    db.commit(); db.close()
+    with pytest.raises(ValueError, match="raw contents"):
+        tool.verify_pack(out, log=lambda m: None)
+    db = sqlite3.connect(out)
+    db.execute("DELETE FROM raw WHERE sha256 = ?", ("f"*64,))
+    db.execute("UPDATE meta SET value = CAST(value AS INTEGER)+1 WHERE key = 'blocks'")
+    db.commit(); db.close()
+    with pytest.raises(ValueError, match="blocks reached"):
+        tool.verify_pack(out, log=lambda m: None)
+    db = sqlite3.connect(out)
+    db.execute("UPDATE meta SET value = CAST(value AS INTEGER)-1 WHERE key = 'blocks'")
+    db.execute("INSERT INTO blob_chunks SELECT MAX(n)+1, data FROM blob_chunks")
+    db.commit(); db.close()
+    with pytest.raises(ValueError, match="block pieces differ"):
+        tool.verify_pack(out, log=lambda m: None)
