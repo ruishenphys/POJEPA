@@ -57,7 +57,12 @@ def _parse(argv=None):
         s.add_argument("--output", type=Path, required=True, help="结果 JSON（必须不存在）")
         s.add_argument("--device", default="cuda:0")
         s.add_argument("--ac-checkpoint", type=Path, help="条件是 vjepa2_ac 时需要")
+        s.add_argument("--cross-version", action="store_true",
+                       help="S28c：--job 是别的代码版本训练的（例如 v7 分支的 v7.1 正式运行），按 addon.v7load 读选中检查点"
+                            "（核任务和训练目录的完成证据、选点、查询序列、配置快照和 8 个数据字段，不核源码 SHA）")
     sub.choices["rollout"].add_argument("--horizon", type=int, default=LONG_HORIZON, choices=(64, 128))
+    sub.choices["rollout"].add_argument("--base-features", type=Path,
+                                        help="S28c，只和 --cross-version 一起用：训练数据集的主实验缓存（v7load 核检查点的数据来源要读它）")
     return p.parse_args(argv)
 
 
@@ -202,22 +207,53 @@ def _load_job(a):
     if truth.get("kind") != "state_readout_truth" or truth.get("dataset") != base.tag:
         raise SystemExit(f"--truth 不是 {base.tag} 的真值文件")
     device = torch.device(a.device)
-    model, loss, selected, registration = v7jobs.load_for_evaluation(
-        job["condition"], None if job["condition"] == "identity" else job_dir, device)
+    if a.cross_version:
+        model, loss, selected, registration = _load_cross_version(a, job_dir, job, device)
+    else:
+        if getattr(a, "base_features", None) is not None:
+            raise SystemExit("--base-features 只和 --cross-version 一起用")
+        model, loss, selected, registration = v7jobs.load_for_evaluation(
+            job["condition"], None if job["condition"] == "identity" else job_dir, device)
     return job_dir, job, base, probe.to(device), probe_meta, truth, model, loss, selected, registration, device
+
+
+def _load_cross_version(a, job_dir, job, device):
+    """S28c：别的代码版本训练的任务（v7 分支的 v7.1 正式运行）。按 addon.v7load.load_v7_selected 读（D4 的读法，10 §4.2）：
+    模型按当前代码现建，核配置快照和检查点来源里的数据字段，源码 SHA 只记录。返回值和 v7jobs.load_for_evaluation 同形，
+    registration 换成 dict(cross_version=v7load 的记录)：这份任务的预登记是旧代码的，不和当前预登记比。"""
+    from po_jepa.runtime import comparison
+    from po_jepa.runtime.addon import v7load
+    features = a.base_features if a.command == "rollout" else a.features
+    if features is None:
+        raise SystemExit("rollout --cross-version 要 --base-features（训练数据集的主实验缓存，v7load 核数据来源）")
+    model, loss = comparison.build_condition(job["condition"], device)
+    try:
+        record = v7load.load_v7_selected(job_dir, job["condition"], model, loss_config=loss, features=features, device=device)
+    except ValueError as error:
+        raise SystemExit(f"{job_dir}：跨版本读检查点没通过（{error}）")
+    best = record["best"]
+    selected = None if best is None else dict(step=best["step"], checkpoint_sha256=best["checkpoint_sha256"])
+    return model, loss, selected, dict(cross_version=record)
 
 
 def _report(kind, a, job_dir, job, base, probe_meta, truth, selected, registration, extra):
     from po_jepa import variants
-    from po_jepa.runtime import cache
     return dict(kind=kind, train_dataset=base.tag, condition=job["condition"], seed=job["seed"], updates=job["updates"],
                 job_dir=str(job_dir), units=truth["units"],
                 tubelet="dup" if base.system in variants.SECOND_ORDER else None,
                 best=None if selected is None else dict(step=selected["step"], checkpoint_sha256=selected.get("checkpoint_sha256")),
-                registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest(),
+                **_registration_fields(registration),
                 probe=dict(path=str(a.probe), kind=probe_meta["fit"]["kind"], weight_sha256=probe_meta["weight_sha256"],
                            cv_r2=probe_meta["fit"]["cv_r2"], variance=probe_meta["fit"]["variance"]),
                 truth_sha256=hashlib.sha256(a.truth.read_bytes()).hexdigest(), **extra, scientific_conclusions_verified=False)
+
+
+def _registration_fields(registration):
+    """同版本任务记当前预登记的 SHA（和以前相同）；跨版本（S28c）没有可比的预登记，记 None，另记 v7load 的读取记录。"""
+    from po_jepa.runtime import cache
+    if "cross_version" in registration:
+        return dict(registration_sha256=None, cross_version=registration["cross_version"])
+    return dict(registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest())
 
 
 def _eval_mode(model):

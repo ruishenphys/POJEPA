@@ -139,6 +139,11 @@ def _job_env(job_dir):
             job_dir = (job_dir/sub).resolve(); break
     job = json.loads((job_dir/"job.json").read_text())
     os.environ.update(PO_JEPA_PROTOCOL="v7", PO_JEPA_SEED=str(job["seed"]), PO_JEPA_UPDATES=str(job["updates"]))
+    # S28c：S28b 的变体（多段切分、零初始化）记在 job.json 的 variant 键里（默认变体没有这个键），评测工具要按训练时的变体
+    # 建模型和预登记，否则多段切分/零初始化的任务目录读不进来；默认变体显式设回默认值，不受外面残留的环境变量影响
+    variant = job.get("variant") or {}
+    os.environ.update(PO_JEPA_TEMPORAL_PARTITION=variant.get("temporal_partition", "bisection"),
+                      PO_JEPA_READOUT_INIT=variant.get("readout_init", "xavier"))
     scene, _, count = job["dataset"].rpartition("-")
     os.environ["PO_JEPA_DATASET"] = f"{scene}:{count}"
     return job_dir, job
