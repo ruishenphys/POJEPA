@@ -306,8 +306,8 @@ def test_runner_defaults_and_lists():
     text = (ROOT/"tools/run_jobs.py").read_text(encoding="utf-8")
     assert 'logs = a.logs or workdir.parent.parent/"logs-addon"/a.jobs.stem' in text
     assert 'raise SystemExit("请在 full-model/po-jepa-full 目录里运行")' in text
-    assert ('elif sub in ("calibrate", "calibrate-addon", "check", "check-addon", "transfer", "evaluate", "d4", "spectral-gap"):'
-            in text)
+    assert ('elif sub in ("calibrate", "calibrate-addon", "check", "check-addon", "transfer", "evaluate", "d4", "spectral-gap", "equal-step"):'
+            in text)   # S28a：v7.1 的同步数对照 equal-step 同样按完成标志跳过
     expected = dict(vjepa2_ac=0, vjepa2_ac_small=1, po_jepa_full=1, po_jepa_no_consistency=1, matched_transformer=1,
                     po_jepa_time_only=1, po_jepa_space_only=1, transformer_consistency=1, fixed_fourier=1, koopman=2, identity=2)
     for condition, value in expected.items():

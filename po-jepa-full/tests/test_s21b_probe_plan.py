@@ -330,9 +330,11 @@ def test_v8_full_stage_has_all_scenes_and_probes():
 
 
 def test_v7_job_table_is_untouched():
-    """v7 正式实验和仿真补跑都读 make_v7_jobs：S21b 不改它。核文件的 SHA-256（42f6d1f、87d09d9 上的同一份），不只核数量。"""
+    """v7 正式实验和仿真补跑都读 make_v7_jobs：S21b 不改它。核文件的 SHA-256，不只核数量。
+    S28a 起是 v7.1 的那一份（v7 分支 748ca22、0493ea2 上逐字节相同：加了 D2 同步数对照、D 段起写进 full/v7.1/；
+    补跑读的 BASE_SCENES、CONDITIONS、SEEDS、TEST_VARIANTS、merged、split_scene 没变）；S28a 以前是 e9a7ac90…（42f6d1f、87d09d9）。"""
     import hashlib
     v7 = _tool("make_v7_jobs")
     assert hashlib.sha256((ROOT/"tools/make_v7_jobs.py").read_bytes()).hexdigest() == \
-        "e9a7ac907d8e2785634c5dd8b1adf812d2cf55fe17fa622494ec01abdee4e5d7"
+        "aea7de2b28c5010ee50637f07b6f06b628e673f1ac9ff30eafdda75e8d0b03a4"
     assert len(v7.BASE_SCENES) == 5 and "push" not in v7.TEST_VARIANTS and sum(map(len, v7.TEST_VARIANTS.values())) == 30
