@@ -31,6 +31,10 @@ def main(argv=None):
     parser.add_argument('--test-variant',help='v7 transfer：测试集的调节项（--system/--variant/--trajectories 写训练用的基础数据集）')
     parser.add_argument('--base-calibration',choices=('v7-import','local'),help='S26a，只用于 calibrate-addon/check-addon：基础标定的来源；默认 v7-import（导入的 v7 标定），v8 任务表的补跑用 local（本目录 run.py calibrate 写的）')
     parser.add_argument('--limit-run',type=Path,help='v7.1 equal-step：po_jepa_full 的任务目录；--training-run 的条件截到它实际训练的步数再评测')
+    # S28c：S28b 的两个变体开关改成命令行参数（tools/run_jobs.py 按 argv 执行，任务行前面不能加环境变量）；不写时沿用环境变量（S28b 写法），
+    # 写了就以参数为准，和已设的环境变量不同时报错，不让两处说法打架
+    parser.add_argument('--temporal-partition',choices=('bisection','dyadic'),help='S28b M1：时间一致性切分（默认二等分）；设 PO_JEPA_TEMPORAL_PARTITION')
+    parser.add_argument('--readout-init',choices=('xavier','zero'),help='S28b M2：P_out 初始化（默认 Xavier）；设 PO_JEPA_READOUT_INIT')
     args=parser.parse_args(argv)
     # 子进程的工作目录是代码根目录，相对路径须先按调用者当前目录解析成绝对路径。
     if not Path(args.features_root).resolve().is_dir():parser.error(f'--features-root不存在：{Path(args.features_root).resolve()}')
@@ -67,6 +71,11 @@ def main(argv=None):
     env['PO_JEPA_PROTOCOL']='v7'
     env['PO_JEPA_DATASET']=f"{args.system}{'~'+args.variant if args.variant else ''}:{args.trajectories}"
     env['PO_JEPA_UPDATES']=str(args.updates)
+    for flag,name,value in (('--temporal-partition','PO_JEPA_TEMPORAL_PARTITION',args.temporal_partition),
+                            ('--readout-init','PO_JEPA_READOUT_INIT',args.readout_init)):
+        if value is None:continue
+        if env.get(name,value)!=value:parser.error(f'{flag} {value} 和环境变量 {name}={env[name]} 不一致：去掉其中一个')
+        env[name]=value
     if args.ac_checkpoint:env['PO_JEPA_AC_CHECKPOINT']=str(args.ac_checkpoint.resolve())
     child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.addon.entry' if args.command in ADDON_ENTRY else 'po_jepa.runtime.cli',args.command,
         '--features-root',str(Path(args.features_root).resolve()),'--device',args.device,'--output',str(args.output.resolve()/'run')]

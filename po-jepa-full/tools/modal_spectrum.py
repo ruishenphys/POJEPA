@@ -25,6 +25,8 @@ def _parse(argv=None):
     p.add_argument("--features", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True, help="结果 JSON（必须不存在）")
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--cross-version", action="store_true",
+                   help="S28c：--job 是别的代码版本训练的（v7 分支的 v7.1 正式运行），按 addon.v7load 读选中检查点（不核源码 SHA）")
     return p.parse_args(argv)
 
 
@@ -50,7 +52,18 @@ def main(argv=None):
         raise SystemExit(f"{job['condition']} 不是 PO-JEPA 条件：没有阻尼旋转块")
     device = torch.device(a.device)
     started = time.perf_counter()
-    model, loss, selected, registration = v7jobs.load_for_evaluation(job["condition"], job_dir, device)
+    if a.cross_version:   # S28c：和 tools/state_readout.py --cross-version 同一个读法
+        from po_jepa.runtime.addon import v7load
+        model, loss = comparison.build_condition(job["condition"], device)
+        try:
+            record = v7load.load_v7_selected(job_dir, job["condition"], model, loss_config=loss, features=a.features, device=device)
+        except ValueError as error:
+            raise SystemExit(f"{job_dir}：跨版本读检查点没通过（{error}）")
+        selected = dict(step=record["best"]["step"], checkpoint_sha256=record["best"]["checkpoint_sha256"])
+        identity_fields = dict(registration_sha256=None, cross_version=record)
+    else:
+        model, loss, selected, registration = v7jobs.load_for_evaluation(job["condition"], job_dir, device)
+        identity_fields = dict(registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest())
     if not isinstance(model, comparison.POJEPA):
         raise SystemExit(f"{job['condition']} 的模型不是 POJEPA")
     approved = data.approved_cache_metadata(a.features, splits=("test",))
@@ -87,7 +100,7 @@ def main(argv=None):
     report = dict(kind="modal_spectrum", dataset=spec.tag, condition=job["condition"], seed=job["seed"], updates=job["updates"],
                   job_dir=str(job_dir), tubelet="dup" if spec.system in variants.SECOND_ORDER else None,
                   best=None if selected is None else dict(step=selected["step"], checkpoint_sha256=selected.get("checkpoint_sha256")),
-                  registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest(),
+                  **identity_fields,
                   cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]), starts=rows,
                   comparison=modal_spectrum.compare(spec.system, spec.knobs, samples),
                   init_reference=modal_spectrum.compare(spec.system, spec.knobs, reference), exploratory=True,
