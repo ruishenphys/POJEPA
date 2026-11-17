@@ -349,8 +349,10 @@ def test_resume_copies_tolerate_copystat_permission(monkeypatch, tmp_path):
     monkeypatch.setattr(shutil, "copystat", denied)
     resume._copy_tree(src, tmp_path/"dst")
     assert (tmp_path/"dst"/"validations"/"0002"/"m.json").read_bytes() == b"[1]"
-    resume._copy_file(src/"a.json", tmp_path/"a.json")
+    assert resume._copy_file(src/"a.json", tmp_path/"a.json") == tmp_path/"a.json"
     assert (tmp_path/"a.json").read_bytes() == b"{}"
+    with pytest.raises(IsADirectoryError):
+        resume._copy_file(src/"a.json", tmp_path/"dst")                  # 只接受文件路径（审核 P3-1）
     with pytest.raises(FileExistsError):
         resume._copy_tree(src, tmp_path/"dst")                           # 目标已存在：和 shutil.copytree 一样拒绝
     resume._copy_tree(src, tmp_path/"dst", dirs_exist_ok=True)

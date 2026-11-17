@@ -28,7 +28,7 @@
    - vpt@ε = 最大的 t，使得 t 以前（含 t）所有曲线点 nmse ≤ ε（tick；第一个点就超过时是 0），ε ∈ VPT_THRESHOLDS；
      floor_vpt@ε 同理（探针本身能撑多久：floor_vpt < H 的地方，vpt 不能解释成模型的问题）。分辨率是 8 个 tick。
 5. 反事实（tools/state_readout.py counterfactual）：主实验测试窗口（每条测试轨迹的登记起点 × 时长 1、2、4、8），
-   donor 是 delta_act 的同一个（测试集下一条轨迹、同起点同时长的动作）。ẑ_A = Φ(z, u)，ẑ_B = Φ(z, u_donor)，
+   donor 是 delta_act 的同一个（datasets.donor_id：测试集内下一条登记起点相同的轨迹，test ≤ 20 条时就是下一条、2000 条时是编号 +5；同起点同时长的动作）。ẑ_A = Φ(z, u)，ẑ_B = Φ(z, u_donor)，
    Δ̂ = R(ẑ_B) − R(ẑ_A)；真值 Δ = target(s_B) − target(s_A)，s_B 是从同一个真实起点状态、同一份噪声换成 donor 动作的
    重新仿真（probe_actions.counterfactual_end）。每个窗口记 ‖Δ‖、‖Δ̂‖、‖Δ̂ − Δ‖、cos(Δ̂, Δ)，以及 ẑ_A 的读出误差和
    探针在真实终点上的读出误差；汇总 explained = 1 − Σ‖Δ̂ − Δ‖²/Σ‖Δ‖²（identity 恰好是 0）、

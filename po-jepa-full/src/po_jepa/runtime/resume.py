@@ -18,9 +18,13 @@ def _copystat(src, dst):
 
 
 def _copy_file(src, dst):
-    """shutil.copy2 的替代：内容照复制，元数据复制失败（PermissionError）不阻断。"""
+    """本模块里 copy2（文件到文件）调用的替代：内容照复制，元数据复制失败（PermissionError）不阻断。
+    只接受目标文件路径（不像 copy2 那样接受目标目录），返回目标路径。"""
+    if Path(dst).is_dir():
+        raise IsADirectoryError(f"_copy_file needs a file path, got directory {dst}")
     shutil.copyfile(src, dst)
     _copystat(src, dst)
+    return dst
 
 
 def _copy_tree(src, dst, *, dirs_exist_ok=False):
