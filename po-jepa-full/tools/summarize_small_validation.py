@@ -9,6 +9,14 @@
 输出 summary.json 和 SUMMARY.md。所有判定是 Claude 提的阈值（方案 §5.4 写明 Jerry 可改），代码里集中在 RULES；
 判定只读测试集上已登记的评测行（run.py 写的 evaluation/<条件>/rows），不重算模型，不看训练曲线。
 
+准入（S28c-fix1，Codex S28c P1-1/P1-2/P2-4/P2-5）：一个任务进判定之前要“有效”——
+- 任务身份对：数据集 <场景>-<条数>、步数预算、种子、条件、变体是这一阶段的（C-1：200 条 × 2000 步；C-2 和 v7.1：2000 条 × 10000 步）；
+- 评测行完整：键集合正好等于 evaluation/<条件>/registration.json 登记的查询（非空），没有重复键、没有失败行、值全部有限；
+- 判定要用的指标都算得出来。
+无效任务列进 invalid（带原因），不进指标表、不参与多数票：C-1 有任何无效格就不给推荐；C-2 对应的条款因缺场景判未通过。
+C-2 里一个结果根混了几个变体时不出判定。第 5 条的读出另核来源：训练数据集、horizon、曲线时间点、探针权重 SHA、真值 SHA
+在比较的几份读出之间一致，读出记的检查点 SHA 等于对应训练任务选中的检查点；不一致的读出不进比较。
+
 指标（每个任务，只取 status = ok 的单点行和网格对行；“均值”是行的算术平均，和 summarize_v7 的 condition_means 同一口径）：
 - direct16：16×16 单点 future_jepa_distance 的均值（6 个时长）；heldout16：16×16、留出时长 T ∈ {3, 12} 的均值（外推时长）；
 - grid12、grid8：12×12、8×8 单点的均值（换网格）；
@@ -56,6 +64,11 @@ OOD_METRICS = ("grid8", "grid12", "rollout16@12", "heldout16")
 VPT_KEY = "vpt@0.1"
 # 判定阈值（方案 §5.4：Claude 提的，Jerry 可改）
 RULES = dict(direct_tolerance=.005, not_worse_tolerance=.005, majority=2, all_scenes=3, ff_metric_wins=3)
+C1_DATA = dict(n=200, updates=2000)         # 和 make_small_validation_jobs.C1、C2 一致（测试核对）
+C2_DATA = dict(n=2000, updates=10000)       # v7.1 正式运行同一规模
+LONG_HORIZON = 128
+C1_METRICS = ("direct16", "rollout16@8", "rollout16@12")
+TRAINED_METRICS = ("direct16", "heldout16", "grid12", "grid8", "rollout16@8", "rollout16@12")
 
 
 # —— 读任务 ——
@@ -73,18 +86,72 @@ def job_folders(root):
 
 
 def load_job(folder):
-    """job.json、report.json 和全部评测行；status 不是 ok 的行单独计数（不进均值），不静默丢掉。"""
+    """job.json、report.json、登记的查询（evaluation/<条件>/registration.json）和全部评测行。
+    status 不是 ok 的行单独计数（不进均值）；同一查询键出现第二次记为重复，保留第一行，不静默覆盖。"""
     folder = Path(folder)
     job = json.loads((folder/"job.json").read_text(encoding="utf-8"))
     report = json.loads((folder/"report.json").read_text(encoding="utf-8"))
-    rows, failed = {}, 0
-    for path in sorted((folder/"evaluation"/job["condition"]/"rows").glob("*.json")):
+    evaluation = folder/"evaluation"/job["condition"]
+    expected = None
+    if (evaluation/"registration.json").exists():
+        queries = json.loads((evaluation/"registration.json").read_text(encoding="utf-8")).get("queries") or []
+        expected = [_key(q) for q in queries]
+    rows, failed, duplicates, seen = {}, 0, 0, set()
+    for path in sorted((evaluation/"rows").glob("*.json")):
         r = json.loads(path.read_text(encoding="utf-8"))
+        k = _key(r["query"])
+        if k in seen:
+            duplicates += 1; continue
+        seen.add(k)
         if r["status"] == "ok":
-            rows[_key(r["query"])] = r
+            rows[k] = r
         else:
             failed += 1
-    return dict(folder=str(folder), job=job, report=report, rows=rows, failed_rows=failed)
+    return dict(folder=str(folder), job=job, report=report, rows=rows, failed_rows=failed, duplicate_rows=duplicates,
+                expected_keys=expected)
+
+
+def row_problems(j) -> list:
+    """评测行的完整性：登记的查询非空、行键正好覆盖它们、没有重复键、没有失败行、值全部有限。空表示完整。"""
+    out = []
+    expected = j["expected_keys"]
+    if not expected:
+        out.append("没有登记的评测查询（evaluation/<条件>/registration.json 缺失或为空）")
+    elif len(set(expected)) != len(expected):
+        out.append("登记的评测查询有重复")
+    elif set(j["rows"]) != set(expected) and not j["failed_rows"]:
+        out.append(f"评测行没有覆盖登记的查询：登记 {len(set(expected))}，成功 {len(j['rows'])}，"
+                   f"缺 {len(set(expected)-set(j['rows']))}，多 {len(set(j['rows'])-set(expected))}")
+    if j["duplicate_rows"]:
+        out.append(f"{j['duplicate_rows']} 行的查询键重复")
+    if j["failed_rows"]:
+        out.append(f"{j['failed_rows']} 行评测失败")
+    if not all(_finite(r["values"]) for r in j["rows"].values()):
+        out.append("评测值有非有限数")
+    return out
+
+
+def job_identity_problems(job, *, scene, data, condition=None, variant=None) -> list:
+    """任务身份：数据集、步数预算、种子、条件、变体是不是这一阶段的。"""
+    out = []
+    if job.get("dataset") != f"{scene}-{data['n']}":
+        out.append(f"数据集 {job.get('dataset')} 不是 {scene}-{data['n']}")
+    if job.get("updates") != data["updates"]:
+        out.append(f"步数预算 {job.get('updates')} 不是 {data['updates']}")
+    if job.get("seed") != SEED:
+        out.append(f"种子 {job.get('seed')} 不是 {SEED}")
+    if condition is not None and job.get("condition") != condition:
+        out.append(f"条件 {job.get('condition')} 不是 {condition}")
+    if variant is not None and variant_of(job) != variant:
+        out.append(f"变体 {variant_label(variant_of(job))} 不是 {variant_label(variant)}")
+    if job.get("kind"):
+        out.append(f"是 {job['kind']} 任务")
+    return out
+
+
+def metric_problems(m, keys) -> list:
+    missing = [k for k in keys if m.get(k) is None]
+    return [f"算不出 {', '.join(missing)}"] if missing else []
 
 
 def finished_attempt(path):
@@ -172,13 +239,17 @@ def identity_check(new, old) -> dict:
     """逐行逐值核对两份 identity 评测：键集合相同、每行 values 字典完全相等（JSON 读出的浮点逐位比较）。"""
     if new is None or old is None:
         return dict(identical=False, reason="缺 identity 任务")
+    for name, j in (("本次", new), ("v7.1", old)):
+        bad = row_problems(j)
+        if bad:
+            return dict(identical=False, reason=f"{name} identity 的评测行不完整：{'；'.join(bad)}")
+    if set(new["expected_keys"]) != set(old["expected_keys"]):
+        return dict(identical=False, reason="本次和 v7.1 登记的评测查询不同")
     a, b = new["rows"], old["rows"]
     if set(a) != set(b):
         return dict(identical=False, reason=f"评测行集合不同：本次 {len(a)} 行，v7.1 {len(b)} 行，"
                                            f"只在本次 {len(set(a)-set(b))} 行，只在 v7.1 {len(set(b)-set(a))} 行")
     differ = [k for k in sorted(a, key=str) if a[k]["values"] != b[k]["values"]]
-    if new["failed_rows"] or old["failed_rows"]:
-        return dict(identical=False, reason=f"有失败的评测行（本次 {new['failed_rows']}，v7.1 {old['failed_rows']}）")
     if differ:
         k = differ[0]
         keys = sorted(set(a[k]["values"]) | set(b[k]["values"]))
@@ -190,7 +261,7 @@ def identity_check(new, old) -> dict:
 # —— C-1 ——
 
 def c1_summary(root) -> dict:
-    cells, problems = {}, []
+    cells, problems, invalid, queries = {}, [], [], {}
     for folder in job_folders(root):
         j = load_job(folder)
         job = j["job"]
@@ -201,26 +272,34 @@ def c1_summary(root) -> dict:
         expected = Path(root)/variant_label(variant)
         if not folder.resolve().is_relative_to(expected.resolve()):
             problems.append(f"{folder}：job.json 的变体是 {variant_label(variant)}，目录不在 {expected} 下")
-        if job["seed"] != SEED:
-            problems.append(f"{folder}：种子 {job['seed']} 不是 {SEED}")
+        if key in cells or any(x["key"] == list(key) for x in invalid):
+            problems.append(f"{folder}：{key} 重复")
             continue
-        if key in cells:
-            problems.append(f"{folder}：{key} 重复，保留 {cells[key]['folder']}")
-            continue
-        cells[key] = dict(folder=str(folder), updates=job["updates"], dataset=job["dataset"], **metrics(j))
-    missing = [dict(partition=p, init=i, scene=s) for p in PARTITIONS for i in INITS for s in SCENES if (p, i, s) not in cells]
+        m = metrics(j)
+        bad = (job_identity_problems(job, scene=key[2], data=C1_DATA, condition="po_jepa_full") + row_problems(j)
+               + metric_problems(m, C1_METRICS))
+        if bad:
+            invalid.append(dict(key=list(key), folder=str(folder), reasons=bad)); continue
+        queries.setdefault(key[2], set()).add(frozenset(j["expected_keys"]))
+        cells[key] = dict(folder=str(folder), updates=job["updates"], dataset=job["dataset"], **m)
+    for s, sets in queries.items():
+        if len(sets) > 1:
+            problems.append(f"{s}：四个变体登记的评测查询不同")
+    invalid_keys = {tuple(x["key"]) for x in invalid}
+    missing = [dict(partition=p, init=i, scene=s) for p in PARTITIONS for i in INITS for s in SCENES
+               if (p, i, s) not in cells and (p, i, s) not in invalid_keys]
     m1 = {init: m1_compare(cells, init) for init in INITS}
     decision = None
-    if not missing:
+    if not missing and not invalid and all(len(v) == 1 for v in queries.values()):
         partition = "dyadic" if m1["zero"]["adopt"] else "bisection"
         m2 = m2_compare(cells, partition)
         decision = dict(temporal_partition=partition, readout_init="zero" if m2["adopt"] else "xavier", m1=m1["zero"], m2=m2,
                         command=f"python tools/make_small_validation_jobs.py --stage c2 --temporal-partition {partition} "
                                 f"--readout-init {'zero' if m2['adopt'] else 'xavier'} > jobs-sv-c2.txt")
-    nonfinite = [k for k, c in cells.items() if not c["finite"] or c["windows"]["failed"]]
-    problems += [f"{list(k)}：评测行有非有限值或失败行" for k in nonfinite]
+    problems += [f"{x['key']}（{x['folder']}）无效，不进判定：{'；'.join(x['reasons'])}" for x in invalid]
     return dict(stage="c1", rules=RULES, cells=[dict(partition=p, init=i, scene=s, **c) for (p, i, s), c in sorted(cells.items())],
-                m1_by_init=m1, decision=decision, missing=missing, problems=problems, scientific_conclusions_verified=False)
+                m1_by_init=m1, decision=decision, missing=missing, invalid=invalid, problems=problems,
+                scientific_conclusions_verified=False)
 
 
 def m1_compare(cells, init) -> dict:
@@ -254,52 +333,78 @@ def m2_compare(cells, partition) -> dict:
 
 # —— C-2 ——
 
+C2_NEW_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "transformer_consistency", "fixed_fourier", "po_jepa_rollout_sup", "identity")
+
+
 def c2_summary(root, v7_root, readout=None, v7_readout=None) -> dict:
-    problems, new = [], defaultdict(dict)
-    variants = set()
+    problems, invalid, found, variants = [], [], defaultdict(dict), set()
     for folder in job_folders(root):
         j = load_job(folder)
         job = j["job"]
         if job.get("kind"):
             continue
-        if job["seed"] != SEED:
-            problems.append(f"{folder}：种子 {job['seed']} 不是 {SEED}"); continue
         variants.add(variant_label(variant_of(job)))
         s, c = scene_of(job), job["condition"]
-        if c in new[s]:
-            problems.append(f"{folder}：{s}/{c} 重复，保留 {new[s][c]['folder']}"); continue
-        new[s][c] = j
+        if c in found[s]:
+            problems.append(f"{folder}：{s}/{c} 重复，保留 {found[s][c]['folder']}"); continue
+        found[s][c] = j
     if len(variants) > 1:
-        problems.append(f"{root} 里混了几个变体：{sorted(variants)}（每个变体一个结果根）")
-    scenes = {}
+        problems.append(f"{root} 里混了几个变体：{sorted(variants)}（每个变体一个结果根），不出判定")
+    new, scenes, checkpoints = defaultdict(dict), {}, {}
     for s in SCENES:
+        for c, j in found[s].items():
+            m = metrics(j)
+            bad = (job_identity_problems(j["job"], scene=s, data=C2_DATA) + row_problems(j)
+                   + (metric_problems(m, TRAINED_METRICS) if c != "identity" else []))
+            if bad:
+                invalid.append(dict(scene=s, condition=c, folder=j["folder"], reasons=bad)); continue
+            new[s][c] = j
         old = {}
         for c in (*REUSED_FROM_V71, V71_BASELINE, "identity"):
             folder = finished_attempt(Path(v7_root)/s/f"seed{SEED}"/c)
-            if folder is not None:
-                j = load_job(folder)
-                if (j["job"]["condition"], j["job"]["dataset"], j["job"]["seed"]) != (c, f"{s}-2000", SEED) or j["job"].get("kind"):
-                    problems.append(f"{folder}：不是 {s}-2000 种子 {SEED} 的 {c} 任务"); continue
-                old[c] = j
+            if folder is None:
+                continue
+            j = load_job(folder)
+            bad = job_identity_problems(j["job"], scene=s, data=C2_DATA, condition=c, variant=DEFAULT_VARIANT)
+            if not bad and c != "identity":
+                bad = row_problems(j) + metric_problems(metrics(j), ("direct16",))
+            if bad:
+                invalid.append(dict(scene=s, condition=f"v7.1 {c}", folder=str(folder), reasons=bad)); continue
+            old[c] = j
         gate = identity_check(new[s].get("identity"), old.get("identity"))
+        if gate["identical"]:
+            sets = {frozenset(j["expected_keys"]) for j in (*new[s].values(), *old.values())}
+            if len(sets) > 1:
+                gate = dict(identical=False, reason="各条件登记的评测查询不同")
         m = {c: metrics(j) for c, j in new[s].items()}
+        if not gate["identical"]:
+            sets = {frozenset(j["expected_keys"]) for j in new[s].values()}
+            if len(sets) > 1:
+                problems.append(f"{s}：本次各条件登记的评测查询不同")
         v71 = {c: metrics(j) for c, j in old.items()} if gate["identical"] else {}
-        for c, x in m.items():
-            if not x["finite"] or x["windows"]["failed"]:
-                problems.append(f"{s}/{c}：评测行有非有限值或失败行")
         updates = {c: new[s][c]["job"]["updates"] for c in new[s]}
         if len(set(updates.values())) > 1:
             problems.append(f"{s}：各条件的训练步数预算不同 {updates}")
+        checkpoints[s] = dict(new={c: _selected_sha(j) for c, j in new[s].items()},
+                              v71={c: _selected_sha(j) for c, j in old.items()} if gate["identical"] else {})
         scenes[s] = dict(identity_gate=gate, new=m, v71=v71)
-    criteria = acceptance(scenes, readout_rows(readout) if readout else {}, readout_rows(v7_readout) if v7_readout else {})
-    missing = [dict(scene=s, condition=c) for s in SCENES for c in
-               ("po_jepa_full", "po_jepa_no_consistency", "transformer_consistency", "fixed_fourier", "po_jepa_rollout_sup", "identity")
-               if c not in new[s]]
+    problems += [f"{x['scene']}/{x['condition']}（{x['folder']}）无效，不进判定：{'；'.join(x['reasons'])}" for x in invalid]
+    criteria = None
+    if len(variants) <= 1:
+        criteria = acceptance(scenes, readout_rows(readout) if readout else {}, readout_rows(v7_readout) if v7_readout else {},
+                              checkpoints, problems)
+    invalid_keys = {(x["scene"], x["condition"]) for x in invalid}
+    missing = [dict(scene=s, condition=c) for s in SCENES for c in C2_NEW_CONDITIONS
+               if c not in found[s] and (s, c) not in invalid_keys]
     return dict(stage="c2", variant=sorted(variants), rules=RULES, scenes=scenes, criteria=criteria, missing=missing,
-                problems=problems, scientific_conclusions_verified=False)
+                invalid=invalid, problems=problems, scientific_conclusions_verified=False)
 
 
-def acceptance(scenes, readout, v7_readout) -> dict:
+def _selected_sha(j):
+    return (j["report"].get("best") or {}).get("checkpoint_sha256")
+
+
+def acceptance(scenes, readout, v7_readout, checkpoints=None, problems=None) -> dict:
     out = {}
     rows2, rows3, rows4tc, rows4ff, rows6 = [], [], [], [], []
     for s in SCENES:
@@ -334,20 +439,31 @@ def acceptance(scenes, readout, v7_readout) -> dict:
                               vs_fixed_fourier=dict(scenes=rows4ff, pass_=len(rows4ff) == 3 and
                                                     sum(r["pass_"] for r in rows4ff) >= RULES["majority"]))
     out["4_structure"]["pass_"] = out["4_structure"]["vs_transformer_consistency"]["pass_"] and out["4_structure"]["vs_fixed_fourier"]["pass_"]
-    out["5_physics"] = physics(scenes, readout, v7_readout)
+    out["5_physics"] = physics(scenes, readout, v7_readout, checkpoints or {}, problems if problems is not None else [])
     out["6_zero_init"] = dict(scenes=rows6, pass_=len(rows6) == 3 and sum(r["pass_"] for r in rows6) >= RULES["majority"],
                               note="TF = v7.1 的 matched_transformer；v7.1 的 full 是 Xavier + 二等分")
     return out
 
 
-def physics(scenes, readout, v7_readout) -> dict:
-    """第 5 条：本次 R 段（readout）和 b-v7.1（v7_readout）的读出、反事实。"""
+def physics(scenes, readout, v7_readout, checkpoints, problems) -> dict:
+    """第 5 条：本次 R 段（readout）和 b-v7.1（v7_readout）的读出、反事实。读出先核来源（文件头“准入”），不一致的不进比较。"""
     vs_nc, vs_tf, cf = [], [], []
     for s in SCENES:
-        full, nc = readout.get((s, SEED, "po_jepa_full")), readout.get((s, SEED, "po_jepa_no_consistency"))
         gate = scenes[s]["identity_gate"]["identical"]
-        tf = v7_readout.get((s, SEED, "matched_transformer")) if gate else None
-        old = v7_readout.get((s, SEED, V71_BASELINE)) if gate else None
+        ck = checkpoints.get(s) or dict(new={}, v71={})
+        full = _readout_entry(readout, s, "po_jepa_full", ck["new"], "本次", problems)
+        nc = _readout_entry(readout, s, "po_jepa_no_consistency", ck["new"], "本次", problems)
+        tf = _readout_entry(v7_readout, s, "matched_transformer", ck["v71"], "v7.1", problems) if gate else None
+        old = _readout_entry(v7_readout, s, V71_BASELINE, ck["v71"], "v7.1", problems) if gate else None
+        for kind, group in (("rollout", (full, nc, tf)), ("counterfactual", (full, old))):
+            present = [g[kind] for g in group if g and g.get(kind)]
+            for field in ("probe_weight_sha256", "truth_sha256", "train_dataset") + (("horizon", "curve_times") if kind == "rollout" else ()):
+                if len({json.dumps(x.get(field)) for x in present}) > 1:
+                    problems.append(f"{s}：比较的 {kind} 读出 {field} 不一致，第 5 条这一项不比")
+                    for g in group:
+                        if g:
+                            g.pop(kind, None)
+                    break
         if full and full.get("rollout") and nc and nc.get("rollout"):
             a, b = full["rollout"], nc["rollout"]
             vs_nc.append(dict(scene=s, nmse_rel=rel(a["nmse_mean"], b["nmse_mean"]), vpt=(a[VPT_KEY], b[VPT_KEY]),
@@ -368,6 +484,33 @@ def physics(scenes, readout, v7_readout) -> dict:
                        and all(r["pass_"] for r in cf)))
 
 
+def _readout_entry(rows, scene, condition, selected, label, problems):
+    """取一份读出，核它的训练数据集、horizon 和检查点（等于对应训练任务选中的那个）；不对就记问题并丢掉这一项。"""
+    entry = rows.get((scene, SEED, condition))
+    if not entry:
+        return None
+    entry = {k: dict(v) for k, v in entry.items()}
+    for kind in ("rollout", "counterfactual"):
+        r = entry.get(kind)
+        if not r:
+            continue
+        bad = []
+        if r.get("train_dataset") != f"{scene}-{C2_DATA['n']}":
+            bad.append(f"训练数据集 {r.get('train_dataset')}")
+        if kind == "rollout" and r.get("horizon") != LONG_HORIZON:
+            bad.append(f"horizon {r.get('horizon')}")
+        if r.get("updates") != C2_DATA["updates"]:
+            bad.append(f"步数预算 {r.get('updates')}")
+        if condition not in selected:
+            bad.append("没有对应的有效训练任务")
+        elif selected[condition] is None or r.get("checkpoint_sha256") != selected[condition]:
+            bad.append("检查点不是训练任务选中的那个")
+        if bad:
+            problems.append(f"{scene}/{label} {condition} 的 {kind} 读出来源不对（{'，'.join(bad)}），不进第 5 条")
+            entry.pop(kind)
+    return entry
+
+
 # —— B 层读出 ——
 
 def readout_rows(root) -> dict:
@@ -381,14 +524,18 @@ def readout_rows(root) -> dict:
             expected = dict(rollout="state_readout_rollout", counterfactual="state_readout_counterfactual", modal="modal_spectrum")[kind]
             if r.get("kind") != expected or r.get("condition") != key[2] or r.get("seed") != key[1]:
                 raise SystemExit(f"{path} 不是 {key} 的 {expected} 结果")
+            source = dict(train_dataset=r.get("train_dataset"), updates=r.get("updates"),
+                          checkpoint_sha256=(r.get("best") or {}).get("checkpoint_sha256"),
+                          probe_weight_sha256=(r.get("probe") or {}).get("weight_sha256"), truth_sha256=r.get("truth_sha256"))
             if kind == "rollout":
                 curve = [v for k, v in r["means"].items() if k.startswith("nmse:")]
                 floor = [v for k, v in r["means"].items() if k.startswith("floor_nmse:")]
                 out[key]["rollout"] = dict({k: v for k, v in r["means"].items() if "@" in k}, nmse_mean=_mean(curve),
                                            floor_nmse_mean=_mean(floor), probe_cv_r2=r["probe"]["cv_r2"],
-                                           trajectories=r["counts"]["trajectories"], cross_version="cross_version" in r)
+                                           trajectories=r["counts"]["trajectories"], cross_version="cross_version" in r,
+                                           horizon=r.get("horizon"), curve_times=r.get("curve_times"), **source)
             elif kind == "counterfactual":
-                out[key]["counterfactual"] = dict(r["overall"], cross_version="cross_version" in r)
+                out[key]["counterfactual"] = dict(r["overall"], cross_version="cross_version" in r, **source)
             else:
                 c = r["comparison"]
                 main = "near_true" if "near_true" in c else "non_oscillatory"
@@ -401,6 +548,13 @@ def readout_rows(root) -> dict:
 
 def readout_summary(root, actions=None) -> dict:
     rows = readout_rows(root)
+    problems = []
+    for s in sorted({k[0] for k in rows}):
+        for kind, fields in (("rollout", ("probe_weight_sha256", "truth_sha256", "horizon", "curve_times")),
+                             ("counterfactual", ("probe_weight_sha256", "truth_sha256"))):
+            present = [v[kind] for k, v in rows.items() if k[0] == s and kind in v]
+            problems += [f"{s}：{kind} 读出的 {f} 不一致（同一场景应当用同一探针、同一真值）"
+                         for f in fields if len({json.dumps(x.get(f)) for x in present}) > 1]
     across = []
     for s, c in sorted({(k[0], k[2]) for k in rows}):
         seeds = sorted(k[1] for k in rows if k[0] == s and k[2] == c)
@@ -425,7 +579,7 @@ def readout_summary(root, actions=None) -> dict:
             r = json.loads(path.read_text(encoding="utf-8"))
             probe_actions[r["dataset"]] = dict(overall=r["overall"], by_duration=r["by_duration"])
     return dict(stage="readout", rows=[dict(scene=k[0], seed=k[1], condition=k[2], **v) for k, v in sorted(rows.items())],
-                across_seeds=across, probe_actions=probe_actions, scientific_conclusions_verified=False)
+                across_seeds=across, probe_actions=probe_actions, problems=problems, scientific_conclusions_verified=False)
 
 
 # —— 输出 ——
@@ -472,7 +626,9 @@ def markdown(summary) -> str:
         d = summary["decision"]
         lines += ["", "## 推荐的 C-2 变体", ""]
         if d is None:
-            lines.append("缺格，不给推荐：" + ", ".join(f"{m['partition']}-{m['init']}/{m['scene']}" for m in summary["missing"]))
+            lines.append("缺格或有无效格，不给推荐：" + ", ".join(
+                [f"{m['partition']}-{m['init']}/{m['scene']} 缺" for m in summary["missing"]]
+                + ["-".join(x["key"][:2]) + "/" + x["key"][2] + " 无效" for x in summary.get("invalid", [])]) + "（见下面的问题）")
         else:
             lines += [f"- M2 零初始化（在 {d['m2']['partition']} 下）：" + "；".join(
                           f"{r['scene']} direct16 {_pct(r['direct_rel'])}" for r in d["m2"]["scenes"]) + f" → 采用：{_f(d['m2']['adopt'])}",
@@ -492,6 +648,10 @@ def markdown(summary) -> str:
                         "direct16", "heldout16", "grid12", "grid8", "rollout16@8", "rollout16@12", "tcd", "scd", "delta_act",
                         "completed_updates")) + " |")
         c = summary["criteria"]
+        if c is None:
+            lines += ["", "## 判定", "", "不出判定（见下面的问题）。"]
+            c = {}
+    if summary["stage"] == "c2" and summary["criteria"] is not None:
         t = c["2_time_consistency"]
         lines += ["", f"## 第 2 条 时间一致性起作用：{_verdict(t['pass_'])}", "",
                   "| 场景 | rollout@8 更好 | rollout@12 更好 | tcd 更低 | direct16 相对 | 通过 |", "|---|---|---|---|---|---|"]
@@ -520,7 +680,7 @@ def markdown(summary) -> str:
         lines += ["", f"## 第 6 条 零初始化不伤：{_verdict(z['pass_'])}", "", f"（{z['note']}）", ""]
         lines += [f"- {r['scene']}：(full − TF)/TF 本次 {_pct(r['gap_new'])}，v7.1 {_pct(r['gap_v71'])}，{_f(r['pass_'])}" for r in z["scenes"]]
         lines += ["", "第 1 条（理论一致）见 A 层测试；第 7 条（工程）看下面的问题、缺失和各任务的早停记录。"]
-    else:
+    if summary["stage"] == "readout":
         lines += ["## 长时程读出与反事实（种子平均）", "",
                   "| 场景 | 条件 | 种子 | nmse 均值 | 探针下限 | VPT@0.1 | 探针 VPT@0.1 | 反事实 ‖Δ‖ | ‖Δ̂‖ | explained | gain | cos |",
                   "|---|---|---|---|---|---|---|---|---|---|---|---|"]
