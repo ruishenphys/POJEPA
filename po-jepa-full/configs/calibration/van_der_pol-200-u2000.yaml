@@ -1,0 +1,6 @@
+# v7 标定（run.py calibrate 自动写入，勿手改）：van_der_pol-200，2000 步
+rho: 1.0
+sigma_z: 12.519305319692696
+source: JEPA 预训练 300 步后标定；run
+space_weight: 7.583449144008039
+time_weight: 0.0801081536242246

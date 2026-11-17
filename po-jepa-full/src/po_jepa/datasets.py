@@ -145,9 +145,20 @@ def test_start_ticks(trajectory_id: int, spec: DatasetSpec | None = None) -> tup
 
 
 def donor_id(trajectory_id: int, spec: DatasetSpec | None = None) -> int:
-    """test 内下一条轨迹（循环）。"""
+    """test 内下一条登记了相同测试起点的轨迹（循环）。
+
+    v6 规模（test ≤ 20 条，每条 5 个起点）就是下一条轨迹；更大数据集每条只登记 2 个起点、按编号轮换
+    （test_start_ticks），紧邻的下一条起点不同，delta_act 的 donor 窗口会被评测的登记检查拒绝，所以取下一条起点相同的
+    （test 条数是 5 的倍数时就是编号 +5）。评测的 delta_act、state_readout 和 probe_actions 共用这一个映射
+    （v7.1 机哥本机补丁 code-changes-v7.1-local-fixes.patch 第 1 处，原来只改在 evaluation.donor_id，这里改在源头）。
+    """
     spec = active() if spec is None else spec
     r = spec.split_range("test")
     if trajectory_id not in r:
         raise ValueError("donor recipient must belong to test")
-    return r.start+(trajectory_id-r.start+1) % len(r)
+    ticks = test_start_ticks(trajectory_id, spec)
+    for k in range(1, len(r)):
+        candidate = r.start+(trajectory_id-r.start+k) % len(r)
+        if test_start_ticks(candidate, spec) == ticks:
+            return candidate
+    raise ValueError("no test donor shares the recipient's registered start ticks")

@@ -119,6 +119,21 @@ def current_data_fields(features, step, device):
     return {k: batch.provenance[k] for k in DATA_FIELDS}
 
 
+def stopped_by_rule(train_report, budget):
+    """训练是不是按规则结束的：v7.1 以前的报告没有 early_stopping 字段，必须跑满预算；v7.1 起的报告记了早停规则，
+    规则必须和当前协议（configs/train/v7.yaml）相同，并从验证序列重算（跑满且中途没有触发，或恰好停在第一个触发点）。"""
+    recorded = train_report.get("early_stopping")
+    if recorded is None:
+        return train_report["completed_updates"] == budget
+    if type(recorded) is not dict or recorded.get("rule") != comparison.early_stopping_config():
+        return False
+    try:
+        return comparison.verify_stopping(train_report["validations"], train_report["completed_updates"], budget,
+                                          recorded["rule"]) == recorded
+    except ValueError:
+        return False
+
+
 def load_v7_selected(job_dir, condition, model, *, loss_config, features, device):
     """10 §4.2：把 job_dir 这个已完成任务的选中检查点读进 model（调用者用 comparison.build_condition 现建），
     返回记进 source.json 的记录。任何一项不符报 ValueError；source_files_sha256 只记录。identity 没有检查点，
@@ -138,7 +153,7 @@ def load_v7_selected(job_dir, condition, model, *, loss_config, features, device
         raise ValueError("training report best differs from the job report best")
     verify_selection(root, train_report)
     sequence, _ = learning.make_query_sequence(checks.load_protocol())
-    if (train_report["completed_updates"] != len(sequence)
+    if (not stopped_by_rule(train_report, len(sequence))
             or train_report["query_sequence_sha256"] != comparison.sequence_sha(sequence)):
         raise ValueError("training budget or query sequence differs from the current protocol")
     best = train_report["best"]

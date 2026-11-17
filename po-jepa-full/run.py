@@ -12,7 +12,7 @@ def main(argv=None):
     """只启动当前解释器的唯一运行实现；help没有缓存、权重或GPU访问。"""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command',choices=('check','train','evaluate','run','resume','calibrate','sweep','transfer',
-                        'calibrate-addon','check-addon','d4','spectral-gap'))
+                        'calibrate-addon','check-addon','d4','spectral-gap','equal-step'))
     parser.add_argument('--features-root',required=True)
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--output',type=Path,required=True)
@@ -30,6 +30,7 @@ def main(argv=None):
     parser.add_argument('--ac-checkpoint',type=Path,help='v7：vjepa2_ac 需要的官方权重 vjepa2-ac-vitg.pt')
     parser.add_argument('--test-variant',help='v7 transfer：测试集的调节项（--system/--variant/--trajectories 写训练用的基础数据集）')
     parser.add_argument('--base-calibration',choices=('v7-import','local'),help='S26a，只用于 calibrate-addon/check-addon：基础标定的来源；默认 v7-import（导入的 v7 标定），v8 任务表的补跑用 local（本目录 run.py calibrate 写的）')
+    parser.add_argument('--limit-run',type=Path,help='v7.1 equal-step：po_jepa_full 的任务目录；--training-run 的条件截到它实际训练的步数再评测')
     args=parser.parse_args(argv)
     # 子进程的工作目录是代码根目录，相对路径须先按调用者当前目录解析成绝对路径。
     if not Path(args.features_root).resolve().is_dir():parser.error(f'--features-root不存在：{Path(args.features_root).resolve()}')
@@ -43,6 +44,9 @@ def main(argv=None):
     if args.base_calibration and args.command not in ADDON_ENTRY:parser.error('--base-calibration 只用于 calibrate-addon、check-addon')
     if args.command=='transfer' and (args.condition is None or not args.test_variant):parser.error('transfer 需要 --condition 和 --test-variant')
     if args.command=='transfer' and args.condition!='identity' and args.training_run is None:parser.error('transfer 需要 --training-run（基础场景上的任务目录）')
+    if args.command=='equal-step' and (args.condition is None or args.training_run is None or args.limit_run is None):
+        parser.error('equal-step 需要 --condition、--training-run（该条件的任务目录）和 --limit-run（po_jepa_full 的任务目录）')
+    if args.command!='equal-step' and args.limit_run is not None:parser.error('--limit-run 仅用于 equal-step')
     if args.command in ('run','resume','evaluate') and args.condition is None:parser.error('v7 的 run/resume/evaluate 需要 --condition')
     if args.command=='train':parser.error('v7 用 run --condition <条件>，每个条件单独提交')
     if args.condition=='vjepa2_ac' and (args.ac_checkpoint is None or not args.ac_checkpoint.resolve().is_file()):
@@ -73,6 +77,7 @@ def main(argv=None):
     if args.training_run:child+=['--training-run',str(args.training_run.resolve())]
     if args.resume_from:child+=['--resume-from',str(args.resume_from.resolve())]
     if args.command in ('d4','spectral-gap'):child[child.index('po_jepa.runtime.cli')]='po_jepa.runtime.addon.eval_cli'   # S18：这两个命令的子进程入口
+    if args.limit_run:child+=['--limit-run',str(args.limit_run.resolve())]
     command=[sys.executable,'-B','-X','utf8',str(root/'tools/capture.py'),'--cwd',str(root),
         '--output',str(args.output.resolve()/'console'),'--',*child]
     return subprocess.run(command,check=False,env=env).returncode

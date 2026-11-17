@@ -9,12 +9,21 @@ schedules:
     loss: {lr_decay_updates: 2000, lr_warmup_updates: 100, consistency_warmup_updates: 200}
     validation: {interval_updates: 200}
     monitoring: {early_check_updates: 400}
+    # 2026-11-10 Jerry 定（保守早停）：步数按 10000 档等比例缩小；试跑已跑完，这里只为两档规则一致
+    early_stopping: {min_updates: 1000, patience_validations: 4}
+    checkpoints: {keep_neighbors: 2, prune_conditions: [vjepa2_ac_small, vjepa2_ac]}
   10000:
     training: {updates_per_condition: 10000}
     # 与 v6 同比例：学习率预热 5%、一致性预热 10%、早检在一致性预热结束后 20%
     loss: {lr_decay_updates: 10000, lr_warmup_updates: 500, consistency_warmup_updates: 1000}
     validation: {interval_updates: 500}     # 收敛曲线 20 个验证点（每次约 1 分钟）
     monitoring: {early_check_updates: 1400, consistency_interval: 50}
+    # 2026-11-10 Jerry 定（保守早停）：第 min_updates 步之后，若最好验证点之后已连续 patience_validations 次验证
+    # 都没有刷新最好值（严格更小，与选点同一指标、同一规则），就在这次验证后停止。选点规则不变；学习率日程仍按 10000 步，不重新拉伸。
+    early_stopping: {min_updates: 5000, patience_validations: 4}
+    # 检查点精简只对 prune_conditions（V-JEPA 2-AC，每个 3–4 GB）做：只保留最好验证点前后各 keep_neighbors 个，加最近一个（续训用），
+    # 其余在每次验证后删除。PO-JEPA、Transformer 每个只有几 MB，全部保留（同步数对照要用）。选点规则不变。
+    checkpoints: {keep_neighbors: 2, prune_conditions: [vjepa2_ac_small, vjepa2_ac]}
 # v6 sweep 中 rho 0.05/0.2/1.0 对验证误差几乎没有影响，选中 1.0；v7 固定 rho=1.0，不再 sweep，每个系统只标定一次
 calibration:
   rho: 1.0

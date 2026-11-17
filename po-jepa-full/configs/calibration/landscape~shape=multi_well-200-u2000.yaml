@@ -1,0 +1,6 @@
+# v7 标定（run.py calibrate 自动写入，勿手改）：landscape~shape=multi_well-200，2000 步
+rho: 1.0
+sigma_z: 12.579050432269579
+source: JEPA 预训练 300 步后标定；run
+space_weight: 84.53189105064986
+time_weight: 108.54088246891061

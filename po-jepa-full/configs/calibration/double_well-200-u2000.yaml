@@ -1,0 +1,6 @@
+# v7 标定（run.py calibrate 自动写入，勿手改）：double_well-200，2000 步
+rho: 1.0
+sigma_z: 12.461623758865318
+source: JEPA 预训练 300 步后标定；run
+space_weight: 18.68423315488113
+time_weight: 2.74117533304132

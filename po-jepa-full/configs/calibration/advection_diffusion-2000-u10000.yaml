@@ -1,0 +1,6 @@
+# v7 标定（run.py calibrate 自动写入，勿手改）：advection_diffusion-2000，10000 步
+rho: 1.0
+sigma_z: 13.686722560504876
+source: JEPA 预训练 300 步后标定；run
+space_weight: 1.0556985983759943
+time_weight: 0.47237565445996826

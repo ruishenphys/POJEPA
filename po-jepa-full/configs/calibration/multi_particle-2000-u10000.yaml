@@ -1,0 +1,6 @@
+# v7 标定（run.py calibrate 自动写入，勿手改）：multi_particle-2000，10000 步
+rho: 1.0
+sigma_z: 12.75635935465386
+source: JEPA 预训练 300 步后标定；run
+space_weight: 25.60161332868355
+time_weight: 1.3455902712665435

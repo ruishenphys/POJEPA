@@ -166,9 +166,9 @@
       "sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "3efbcb1da5402c929297191fa4cd42527f5b0e2874a038a696a67b0a6d9d78ac",
+      "candidate_sha256": "a3a4d4f59854cf16b2820f20da9ef494716b512699419073fedc7d4676e9aa89",
       "comment_cleanup_baseline_sha256": "64f015e4186c5e13687e56f3c55b449217018d76a97ab663235f9860d803f3bb",
-      "executable_ast_sha256": "c215ae0d0f030e5674ee416d65f8436bdcc18ebdbaea59b696fe30437be002ca",
+      "executable_ast_sha256": "a1dc89d9d8b4df69698ecfb1d63cf3b4e30d9b78905242c669a08897a065c914",
       "prior_operation": "existing_v3_runtime",
       "cleanup_history": [
         {
@@ -217,10 +217,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "871da710d1b18f2530ad13e22ffcd6e2da248792f4a53dcbc94728ab22876597",
+      "candidate_sha256": "b552791a55ba35995803f8520a334f23eacc3b82bf54afba902bf10ac2e840ef",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "c09d950627ebc18703390c6d8c4153f97f718b27558a42d67ed018095ebe9852",
+      "executable_ast_sha256": "5dfd5b89a6aed00d7a011b2ace22f7121716c218347008e4f037eb130d560bb1",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "v7_previous_candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b"
@@ -291,9 +291,9 @@
         "summarize_records"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "4bf6face965c633e69ed9df88f488af549bc28f6d7c428d2035c274f882c0e8f",
+      "candidate_sha256": "6feda50b3e460290ff8d7c7b8051fcc78a18bec31bcb8198f471850f4583ee09",
       "comment_cleanup_baseline_sha256": "d3d39eb924d97ab9f3be719d0d24f74235296bcb704d0428c42da552d1e4bdae",
-      "executable_ast_sha256": "47571d8c0d60fc453ff80a845ec0d7b90c538d031143ad6c77f62dc83f785086",
+      "executable_ast_sha256": "a1021b8dd22e4f822d162c02b6c21f6da754bce3a38543aa585b283ac733ea29",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "6a0c67f40a5ba28bdb553d0222ac7251ef58b374a700f4e9338227b2103178a5",
       "v7_previous_candidate_sha256": "6a0c67f40a5ba28bdb553d0222ac7251ef58b374a700f4e9338227b2103178a5"
@@ -331,9 +331,10 @@
       "sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "existing_v3_runtime",
-      "candidate_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
+      "candidate_sha256": "73739a74b1459a17bfc56f29239716ba9dfeb6df8606e9ad1d167d10e265332d",
       "comment_cleanup_baseline_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
-      "executable_ast_sha256": "d5a1313124470467057a36a45c6cf2cacb0e88fd126f5cd1ad99bb24eca11557"
+      "executable_ast_sha256": "abf37a4e76e65227888b4ad06143c9b8e0281a264ba6b7ec0a30d2da825c87d2",
+      "v7_previous_candidate_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5"
     },
     {
       "source": "first_round/scripts/train_simulation.py",
@@ -383,9 +384,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "e4ef1bc5663261749bc40d29b85bfab9f419d989e7ca6fab7a490a443443dff1",
+      "candidate_sha256": "6849d61bc955424a0bacfad121c92b8e41735e417c84cd5b81c0a64c666f20ec",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "ba446e523800f7109bd77c2ad0c88e1a6079f78cd258b10c18aed1cc5acc9933",
+      "executable_ast_sha256": "666e074130cfaa27e5cac6e2c1a26a0d75b3f2afdb54e920a59eef352f7cda99",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "v7_previous_candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df"
@@ -497,6 +498,7 @@
       "src/po_jepa/runtime/evaluation.py",
       "src/po_jepa/runtime/learning.py",
       "src/po_jepa/runtime/resources.py",
+      "src/po_jepa/runtime/resume.py",
       "src/po_jepa/runtime/training.py",
       "src/po_jepa/runtime/workflow.py",
       "src/po_jepa/simulation.py",

@@ -7,6 +7,35 @@ import torch
 from . import cache, comparison, evaluation, learning
 
 
+def _copystat(src, dst):
+    """复制时间戳和权限位；结果盘是 ntfs-3g/fuseblk 时非属主改时间会 PermissionError（v7.1 机哥本机补丁第 2 处）。
+    这些只是元数据，续训和完整复用核的是账本、预登记和 SHA，不看时间戳，所以只忽略 PermissionError。
+    机哥的补丁是全局替换 shutil.copystat；这里只用于本模块的复制，不改别的模块的 shutil 行为。"""
+    try:
+        shutil.copystat(src, dst)
+    except PermissionError:
+        pass
+
+
+def _copy_file(src, dst):
+    """shutil.copy2 的替代：内容照复制，元数据复制失败（PermissionError）不阻断。"""
+    shutil.copyfile(src, dst)
+    _copystat(src, dst)
+
+
+def _copy_tree(src, dst, *, dirs_exist_ok=False):
+    """shutil.copytree 的替代（逐层建目录、_copy_file 复制文件，目录的元数据同样容忍 PermissionError）。
+    shutil.copytree 在非 Windows 上会把目录 copystat 的失败收集起来最后抛 shutil.Error，所以不能只换 copy_function。"""
+    src, dst = Path(src), Path(dst)
+    dst.mkdir(parents=True, exist_ok=dirs_exist_ok)
+    for entry in sorted(src.iterdir()):
+        if entry.is_dir():
+            _copy_tree(entry, dst/entry.name, dirs_exist_ok=dirs_exist_ok)
+        else:
+            _copy_file(entry, dst/entry.name)
+    _copystat(src, dst)
+
+
 def read(path):
     """复用严格JSON读取，拒绝重复字段及非有限值。"""
     from .workflow import read as strict_read
@@ -29,21 +58,27 @@ def copy_completed_condition(source, output, registration, sequence, state):
     if Path(output).resolve().is_relative_to(Path(source).resolve()):
         raise ValueError('resume output must be outside the old condition directory')
     report=read(source/'report.json')
-    verify_ledger(source,sequence,state,registration,report['completed_updates'])
+    verify_ledger(source,sequence,state,registration,report['completed_updates'],final=True)
     if ((source/'FAILED.json').exists() or report['condition']!=source.name
-        or report['completed_updates']!=len(sequence) or report['evidence_role']!='real_frozen_features'
+        or comparison.verify_stopping(report['validations'],report['completed_updates'],len(sequence),
+                                      registration.get('early_stopping'))!=report.get('early_stopping')
+        or report['evidence_role']!='real_frozen_features'
         or report['query_sequence_sha256']!=registration['query_sequence_sha256']
         or report['preregistration_sha256']!=hashlib.sha256(cache._json_bytes(registration)).hexdigest()
         or read(source/'registration.json')['preregistration']!=registration
         or read(source/'COMPLETE.json')['report_sha256']!=cache.file_sha(source/'report.json')):
         raise ValueError('resume completed condition has inconsistent evidence')
     verify_selection(source,report)
+    keep=comparison.kept_checkpoint_steps(report['validations'],registration.get('checkpoint_retention'),source.name)
     for row in report['validations']:
         if row['checkpoint']!=f"checkpoints/step-{row['step']:04d}.pt":
             raise ValueError('resume completed checkpoint path differs')
-        if cache.file_sha(source/row['checkpoint'])!=row['checkpoint_sha256']:
+        present=(source/row['checkpoint']).exists()
+        if row['step'] in keep and (not present or cache.file_sha(source/row['checkpoint'])!=row['checkpoint_sha256']):
             raise ValueError('resume completed checkpoint SHA differs')
-    shutil.copytree(source,output)
+        if row['step'] not in keep and present:
+            raise ValueError('completed run kept a checkpoint the retention rule deletes')
+    _copy_tree(source,output)
     return report
 
 
@@ -57,7 +92,7 @@ def verify_sequence(source,sequence,state,registration):
         raise ValueError('resume actual query sequence/generator differs')
 
 
-def verify_updates(source,sequence,completed):
+def verify_updates(source,sequence,completed,final=None):
     """核每次成功更新的查询和游标；完整条件须恰好有预算内全部记录。
 
     账本是训练过程留下的逐步记录，不能只凭报告中的总步数判定完整。
@@ -67,7 +102,8 @@ def verify_updates(source,sequence,completed):
     if completed>len(sequence): raise ValueError('update cursor outside registered budget')
     folder=Path(source)/'updates'
     names={f'{number:04d}.json' for number in range(1,completed+1)}
-    if completed==len(sequence) and {p.name for p in folder.glob('*.json')}!=names:
+    final=completed==len(sequence) if final is None else final   # 完成的训练（含早停）账本恰好是 1..completed
+    if final and {p.name for p in folder.glob('*.json')}!=names:
         raise ValueError('complete update ledger file inventory differs')
     for number in range(1,completed+1):
         update=read(folder/f'{number:04d}.json')
@@ -78,10 +114,10 @@ def verify_updates(source,sequence,completed):
             raise ValueError('resume update query/cursor differs')
 
 
-def verify_ledger(source,sequence,state,registration,completed):
-    """评价、完整复用和中断恢复共用的证据核验，不加载模型或改变训练状态。"""
+def verify_ledger(source,sequence,state,registration,completed,final=None):
+    """评价、完整复用和中断恢复共用的证据核验，不加载模型或改变训练状态。final=True：已完成的训练。"""
     verify_sequence(Path(source),sequence,state,registration)
-    verify_updates(source,sequence,completed)
+    verify_updates(source,sequence,completed,final)
 
 
 def _prefix(source, sequence, state, registration, interval):
@@ -98,9 +134,19 @@ def _prefix(source, sequence, state, registration, interval):
         raise ValueError('resume validation prefix differs')
     best=min(selections,key=lambda row:(row['mean'],row['step']))
     verify_selection(source,dict(completed_updates=step,validations=selections,best=best))
+    rule=registration.get('early_stopping')
+    for k in range(1,len(selections)):
+        if comparison.early_stop_decision(selections[:k],len(sequence),rule)['stop']:
+            raise ValueError('resume source trained past an early-stop point')
+    # 训练还可能继续的前缀按训练中的保留集核（最好点 ±k 加最近 k 个）；最后一个验证点已经是终点（跑满或触发早停）时，
+    # 源目录可能已经压缩成最终保留集，按最终保留集核（v7-P2-1）
+    final=selections[-1]['step']==len(sequence) or comparison.early_stop_decision(selections,len(sequence),rule)['stop']
+    keep=comparison.kept_checkpoint_steps(selections,registration.get('checkpoint_retention'),source.name,final)
     for row in selections:
         expected=f"checkpoints/step-{row['step']:04d}.pt"
-        if row['checkpoint']!=expected or cache.file_sha(source/expected)!=row['checkpoint_sha256']:
+        if row['checkpoint']!=expected:
+            raise ValueError('resume checkpoint path/SHA differs')
+        if row['step'] in keep and cache.file_sha(source/expected)!=row['checkpoint_sha256']:
             raise ValueError('resume checkpoint path/SHA differs')
     verify_updates(source,sequence,step)
     return step,selections,best
@@ -109,16 +155,17 @@ def _prefix(source, sequence, state, registration, interval):
 def _copy_prefix(source,output,step,rows):
     """只复制可接续前缀；旧失败和超出保存点的更新仍留在原目录，绝不删除。"""
     for name in ('query-sequence.json','registration.json'):
-        shutil.copy2(source/name,output/name)
+        _copy_file(source/name,output/name)
     if (source/'source-collections').is_dir():
-        shutil.copytree(source/'source-collections',output/'source-collections',dirs_exist_ok=True)
+        _copy_tree(source/'source-collections',output/'source-collections',dirs_exist_ok=True)
     for number in range(1,step+1):
-        shutil.copy2(source/'updates'/f'{number:04d}.json',output/'updates'/f'{number:04d}.json')
+        _copy_file(source/'updates'/f'{number:04d}.json',output/'updates'/f'{number:04d}.json')
     for row in rows:
-        shutil.copy2(source/row['checkpoint'],output/row['checkpoint'])
+        if (source/row['checkpoint']).exists():   # 保留规则删掉的检查点不复制（_prefix 已核保留集都在且 SHA 一致）
+            _copy_file(source/row['checkpoint'],output/row['checkpoint'])
         name=f"{row['step']:04d}"
-        shutil.copytree(source/'validations'/name,output/'validations'/name)
-        shutil.copy2(source/'validations'/f'selection-{name}.json',output/'validations'/f'selection-{name}.json')
+        _copy_tree(source/'validations'/name,output/'validations'/name)
+        _copy_file(source/'validations'/f'selection-{name}.json',output/'validations'/f'selection-{name}.json')
 
 
 def prepare_condition(source, output, condition, model, optimizer, sequence, state,
