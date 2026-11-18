@@ -121,7 +121,7 @@ CUDA_VISIBLE_DEVICES=1 python tools/tubelet_probe.py encode --trajectories 200 -
   --upstream-root $WORK/vjepa2 --checkpoint $WORK/checkpoints/vjepa2-vitg-fpc64-256.pth \
   --device cuda:0 --shard 1/2 > $OUT-encode1.log 2>&1 &
 wait
-tail -n 2 $OUT-encode0.log $OUT-encode1.log        # both should end with "[tubelet shard i/2] 完成" ("done")
+tail -n 2 $OUT-encode0.log $OUT-encode1.log        # both should end with the "[tubelet shard i/2]" line that marks the shard as done
 
 # Fit the probe (a few minutes on a GPU)
 CUDA_VISIBLE_DEVICES=0 python tools/tubelet_probe.py fit --trajectories 200 --output $OUT --device cuda:0 | tee $OUT-fit.txt
