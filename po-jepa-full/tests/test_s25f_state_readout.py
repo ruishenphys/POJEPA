@@ -459,11 +459,13 @@ def test_readout_tools_set_job_env_before_importing_po_jepa(readout_inputs, tmp_
     数据集必须是 job.json 的 double_well-40：探针核对通过，停在后面的真值文件检查上。"""
     probe, _ = readout_inputs
     (tmp_path/"bad_truth.json").write_text(json.dumps(dict(kind="other")))
+    env = _clean_env()
+    env["PYTHONIOENCODING"] = "utf-8"                    # 中文报错：子进程按 UTF-8 写、父进程按 UTF-8 读（Windows 默认 cp1252/cp936）
     for command in ("rollout", "counterfactual"):
         r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/state_readout.py"), command, "--job", str(_job(tmp_path/command)),
                             "--probe", str(probe), "--truth", str(tmp_path/"bad_truth.json"), "--features", str(tmp_path),
                             "--device", "cpu", "--output", str(tmp_path/f"{command}.json")],
-                           env=_clean_env(), capture_output=True, text=True)
+                           env=env, capture_output=True, text=True, encoding="utf-8")
         assert r.returncode != 0 and "fitted on" not in r.stderr, r.stderr
         assert f"--truth 不是 {BASE.tag} 的真值文件" in r.stderr, r.stderr
         assert not (tmp_path/f"{command}.json").exists()
