@@ -188,9 +188,10 @@ def cmd_truth(a):
 
 
 def _load_job(a):
-    """rollout、counterfactual 共用：数据集取自任务目录，载入模型（核法同 transfer、long_rollout），读探针和真值。"""
-    import plan_v7
-    job_dir, job = plan_v7._job_env(a.job)
+    """rollout、counterfactual 共用：数据集取自任务目录，载入模型（核法同 transfer、long_rollout），读探针和真值。
+
+    任务环境（数据集、种子、变体）由 main() 在导入 po_jepa 之前用 plan_v7._job_env 设好，结果在 a.job_dir、a.job_record。"""
+    job_dir, job = a.job_dir, a.job_record
     if a.ac_checkpoint:
         os.environ["PO_JEPA_AC_CHECKPOINT"] = str(a.ac_checkpoint.resolve())
     if a.output.exists():
@@ -199,6 +200,10 @@ def _load_job(a):
     from po_jepa import datasets
     from po_jepa.runtime import state_readout, v7jobs
     base = datasets.active()
+    scene, _, count = job["dataset"].rpartition("-")
+    if base.tag != datasets.parse(f"{scene}:{count}").tag:
+        # G4 R3：po_jepa.datasets 在设好任务环境之前就导入了，会停在默认的 double_well-200 上
+        raise SystemExit(f"进程里的数据集是 {base.tag}，--job 的数据集是 {job['dataset']}：任务环境没在导入 po_jepa 之前设好")
     _refuse_sampling(base, "读出")
     if job.get("kind"):
         raise SystemExit(f"--job 是 {job['kind']} 任务，要 run.py run 的任务目录")
@@ -358,11 +363,17 @@ def cmd_counterfactual(a):
 def main(argv=None):
     a = _parse(argv)
     sys.path.insert(0, str(ROOT/"src")); sys.path.insert(0, str(ROOT/"tools"))
+    # 数据集环境变量必须在第一次导入 po_jepa 之前设好：po_jepa.datasets 只在导入时读一次 PO_JEPA_DATASET，
+    # 之后再设不起作用（G4 R3：rollout、counterfactual 原来在 cmd_* 里先导入、后设任务环境，数据集停在默认的 double_well-200）
     if a.command in ("fit", "truth"):
         os.environ["PO_JEPA_DATASET"] = f"{a.system}{'~'+a.variant if a.variant else ''}:{a.trajectories}"
-        from po_jepa import datasets
-        if datasets.active().tag != datasets.parse(os.environ["PO_JEPA_DATASET"]).tag:
-            datasets._set_for_tests(datasets.parse(os.environ["PO_JEPA_DATASET"]))
+    else:
+        import plan_v7                                       # 顶层不导入 po_jepa
+        a.job_dir, a.job_record = plan_v7._job_env(a.job)    # 设 PO_JEPA_DATASET/SEED/UPDATES/PROTOCOL 和变体
+    from po_jepa import datasets
+    # 同一进程里已经导入过（测试里多次调用 main）时按本次的环境变量重设
+    if datasets.active().tag != datasets.parse(os.environ["PO_JEPA_DATASET"]).tag:
+        datasets._set_for_tests(datasets.parse(os.environ["PO_JEPA_DATASET"]))
     {"fit": cmd_fit, "truth": cmd_truth, "rollout": cmd_rollout, "counterfactual": cmd_counterfactual}[a.command](a)
     return 0
 
