@@ -138,6 +138,27 @@ def run_job(features, output, device, condition, *, resume_from=None, training_r
     return report
 
 
+def _linked_training_root(job, job0, condition, registration, read):
+    """job 自己的 training/<条件> 没完成时（续训任务复用了旧训练、只评测任务指向旧任务），沿 job.json 的
+    training_run / resume_from 找完成的训练，最多跟 8 层，和 addon.v7load.training_dir 同一走法（S28c-fix1）。
+    每一层的条件和预登记都要和当前一致。"""
+    folder, record = job, job0
+    for _ in range(9):
+        root = folder/"training"/condition
+        if (root/"COMPLETE.json").exists():
+            return root
+        link = record.get("training_run") or record.get("resume_from")
+        if not link:
+            return root                       # 没有完成的训练：由调用方按原来的方式报错
+        folder = _job_dir(link)
+        record = read(folder/"job.json")
+        if record.get("condition") != condition:
+            raise ValueError(f"{folder} 是另一个条件的任务")
+        if read(folder/"preregistration.json") != registration:
+            raise ValueError(f"{folder} 的预登记与当前代码/配置不一致")
+    raise ValueError(f"{job} 的 training_run / resume_from 链超过 8 层")
+
+
 def load_for_evaluation(condition, training_run, device):
     """只评测不训练的任务（transfer、S25c 长时程滚动）共用的载入：按当前数据集（训练用的基础场景）现建模型，
     核 training_run 的条件/数据集/种子和预登记（源码、配置、查询序列）与当前一致，载入验证集选中的 checkpoint。
@@ -155,9 +176,7 @@ def load_for_evaluation(condition, training_run, device):
             raise ValueError("training run 的条件/数据集/种子与本次参数不一致")
         if read(old/"preregistration.json") != registration:
             raise ValueError("training run 的预登记与当前代码/配置不一致")
-        root = old/"training"/condition
-        if not (root/"COMPLETE.json").exists() and job0.get("training_run"):
-            root = _job_dir(job0["training_run"])/"training"/condition
+        root = _linked_training_root(old, job0, condition, registration, read)
         train_report = read(root/"report.json")
         verify_selection(root, train_report)
         selected = train_report["best"]
@@ -253,9 +272,7 @@ def _finished_training(job, condition, registration, sequence, state):
         raise ValueError(f"{job} 的条件/数据集/种子与本次参数不一致")
     if read(job/"preregistration.json") != registration or not (job/"COMPLETE.json").exists():
         raise ValueError(f"{job} 没有完成，或预登记与当前代码/配置不一致")
-    root = job/"training"/condition
-    if not (root/"COMPLETE.json").exists() and job0.get("training_run"):
-        root = _job_dir(job0["training_run"])/"training"/condition
+    root = _linked_training_root(job, job0, condition, registration, read)
     report = read(root/"report.json")
     if not (root/"COMPLETE.json").exists() or (root/"FAILED.json").exists():
         raise ValueError(f"{root} 训练没有完成")
