@@ -33,9 +33,9 @@ from po_jepa.generic_consistency import spatial_predictions, temporal_prediction
 from po_jepa.koopman import KoopmanConfig, KoopmanPredictor, build_koopman, choose_modes, parameter_count
 from po_jepa.losses import (LossConfig, jepa_distance, spatial_consistency_loss, temporal_consistency_loss,
                             temporal_phi_calls, time_consistency, weighted_total_loss)
-from po_jepa.losses import temporal_predictions as po_temporal_predictions, spatial_predictions as po_spatial_predictions
+from po_jepa.losses import spatial_predictions as po_spatial_predictions
 from po_jepa.model import POJEPA
-from po_jepa.rollout_supervision import rollout_supervision_loss
+from po_jepa.rollout_supervision import rollout_predictions, rollout_supervision_loss
 from po_jepa.spectral import GraphSpectrum
 
 # 08 §6（2026-11-12 Jerry 定）：po_jepa_rollout_sup 排在最后，前 5 个的顺序不变
@@ -112,9 +112,8 @@ def build(condition, device):
     if condition == "fixed_fourier":
         model = build_fixed_fourier(config["model"], check.model_seed(), device)
     elif condition == "po_jepa_rollout_sup":   # 08 §6：只换 λ_r，λ_s 留协议（基础标定）的值，和 po_jepa_full 相同
-        # S28b：时间那格是有真值的两段滚动 L_roll（11-12 定义），不跟多段切分开关走，固定二等分
-        return check.build_full_model(config, device), replace(loss, time_weight=weights["time_weight"],
-                                                               temporal_partition="bisection")
+        # S28d（Jerry 2026-11-17）：切分跟变体走，多段切分时是 2^k 段有真值滚动（rollout_supervision.rollout_predictions）
+        return check.build_full_model(config, device), replace(loss, time_weight=weights["time_weight"])
     else:
         model = _registered_transformer(device)
     return model, replace(loss, time_weight=weights["time_weight"], space_weight=weights["space_weight"])
@@ -196,10 +195,12 @@ def transformer_consistency_step(model, optimizer, batch, loss_config, completed
 
 
 def rollout_sup_step(model, optimizer, batch, loss_config, completed_steps):
-    """08 §6：和 training.train_step（po_jepa_full）逐步相同，只把时间一致性项换成有真值的两段滚动损失。
+    """08 §6：和 training.train_step（po_jepa_full）逐步相同，只把时间一致性项换成有真值的滚动损失。
 
-    同一次 temporal_predictions（3 次 Φ）：JEPA 项仍在长支 direct 上，L_roll 用两段滚动 composed 对同一个 raw_target；
-    空间项（2 次 Φ）、λ_s、一致性预热（w(s) 同样乘在 λ_r 上）、裁剪、调度都不变。每次更新 5 次 Φ、10 次 p_out。
+    同一次 rollout_predictions：二等分 3 次 Φ（S27a，逐位不变）；多段切分（S28d）按 completed_steps 抽 k（和 po_jepa_full
+    同一步同一串 k），1 + Σ_{不同 k} 2^k 次 Φ。JEPA 项仍在长支 direct 上，L_roll 用滚动终点 composed 对同一个 raw_target；
+    空间项（2 次 Φ）、λ_s、一致性预热（w(s) 同样乘在 λ_r 上）、裁剪、调度都不变。二等分时每次更新 5 次 Φ、10 次 p_out，
+    多段切分时 (temporal_phi_calls + 2) 次 Φ（expected_readouts）。
     日志的 time / weighted_time 两格记的是 L_roll 和 λ_r·w(s)·L_roll（检查点和日志靠标签 rollout_sup 区分）。
     """
     training._count(completed_steps, "completed_steps")
@@ -209,7 +210,8 @@ def rollout_sup_step(model, optimizer, batch, loss_config, completed_steps):
         raise ValueError("caller must explicitly model.train() with gradient mode enabled outside inference")
     training._batch(batch, model)
     optimizer.zero_grad(set_to_none=True)
-    temporal = po_temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    temporal = rollout_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                                   config=loss_config, step=completed_steps, sample_ids=batch.sample_ids)
     jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config)
     rollout = rollout_supervision_loss(temporal, batch.raw_target, config=loss_config)
     spatial = po_spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)
@@ -301,8 +303,8 @@ def consistency_share(condition, model, batch, loss_config, completed):
         return None
     if condition == "transformer_consistency":
         norms = calibration.generic_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
-    elif condition == "po_jepa_rollout_sup":
-        norms = calibration.rollout_gradient_norms(model, batch, loss_config=loss_config)
+    elif condition == "po_jepa_rollout_sup":   # S28d：同一步序号抽 k
+        norms = calibration.rollout_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     else:   # S28b：这批是第 completed-1 次更新用的，多段切分按同一步序号抽 k（和训练那一步的 k 相同）
         norms = training.consistency_gradient_norms(model, batch, loss_config=loss_config, step=max(completed-1, 0))
     scale = training.consistency_warmup_scale(loss_config, completed)

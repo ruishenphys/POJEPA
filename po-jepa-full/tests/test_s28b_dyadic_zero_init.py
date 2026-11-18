@@ -280,14 +280,13 @@ def test_gradient_norms_use_the_training_step_levels():
 
 
 def test_loss_snapshot_labels_partition_and_keeps_legacy_snapshot():
-    """二等分不进快照（v7/v7.1 旧检查点照读）；多段切分进快照（检查点标签）；rollout_sup 只收二等分。"""
+    """二等分不进快照（v7/v7.1 旧检查点照读）；多段切分进快照（检查点标签）；S28d 起 rollout_sup 也收多段切分、同样进快照。"""
     legacy = training._loss_config(config(), "full")
     assert "temporal_partition" not in legacy
     dyadic = training._loss_config(config("dyadic"), "full")
     assert dyadic["temporal_partition"] == "dyadic" and {k: v for k, v in dyadic.items() if k != "temporal_partition"} == legacy
     assert not training._same_native(dyadic, legacy)
-    with pytest.raises(ValueError, match="rollout_sup"):
-        training._loss_config(config("dyadic"), "rollout_sup")
+    assert training._loss_config(config("dyadic"), "rollout_sup")["temporal_partition"] == "dyadic"   # S28d
     assert "temporal_partition" not in training._loss_config(config(), "rollout_sup")
 
 
@@ -420,19 +419,19 @@ def test_variant_env_rejected_outside_v7_and_bad_values(monkeypatch):
         checks.v7_variant()
 
 
-def test_rollout_sup_build_stays_bisection_under_dyadic(v7, monkeypatch):
-    """po_jepa_rollout_sup 的时间格是有真值两段滚动（11-12 定义），多段切分变体下也固定二等分。"""
+def test_rollout_sup_build_follows_the_variant_partition(v7, monkeypatch):
+    """S28d（Jerry 2026-11-17 定，取代 S28b 的固定二等分）：po_jepa_rollout_sup 跟变体走，多段切分时是 2^k 段有真值滚动。"""
     from po_jepa.runtime.addon import calibration, conditions
     monkeypatch.setenv(checks.PARTITION_ENV, "dyadic")
     monkeypatch.setattr(calibration, "load_addon_weights", lambda c: dict(time_weight=.3, space_weight=.4))
     _, loss = conditions.build("po_jepa_rollout_sup", torch.device("cpu"))
-    assert loss.temporal_partition == "bisection"
+    assert loss.temporal_partition == "dyadic"
     _, loss = conditions.build("po_jepa_time_only", torch.device("cpu"))
     assert loss.temporal_partition == "dyadic"
-    # Codex S28b P2-2：补跑标定的 JEPA-only 预训练也固定二等分
+    # 补跑标定的 JEPA-only 预训练也跟变体走（和同一变体的基础标定相同）
     from po_jepa.runtime.addon import calibrate
     _, loss = calibrate._jepa_only("po_jepa_rollout_sup", torch.device("cpu"))
-    assert loss.temporal_partition == "bisection" and loss.time_weight == loss.space_weight == 0.
+    assert loss.temporal_partition == "dyadic" and loss.time_weight == loss.space_weight == 0.
     _, loss = calibrate._jepa_only("fixed_fourier", torch.device("cpu"))
     assert loss.temporal_partition == "dyadic"
 
