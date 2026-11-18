@@ -7,8 +7,10 @@
     transformer_consistency: {rho: …, space_weight: …, time_weight: …, source: …}
     sigma_z_used: …
 
-po_jepa_rollout_sup 的 time_weight 是有真值两段滚动损失的 λ_r（08 §6，标定）；它的 space_weight 不标定，是基础标定的 λ_s
+po_jepa_rollout_sup 的 time_weight 是有真值滚动损失的 λ_r（08 §6，标定）；它的 space_weight 不标定，是基础标定的 λ_s
 原样抄过来（读的时候核它等于协议的 loss.space_weight）。
+S28d：多段切分变体（文件名带 ~dyadic）里 po_jepa_rollout_sup 这一项另有 rollout_partition: dyadic，表示 λ_r 是对 2^k 段
+滚动标的；没有这个键的 ~dyadic 文件是 S28d 以前的代码（两段滚动）标的，读的时候拒绝。二等分变体的文件格式不变。
     v7_calibration_sha256: …
 """
 
@@ -25,10 +27,19 @@ from .. import data
 from po_jepa.generic_consistency import spatial_predictions, temporal_predictions
 from po_jepa.losses import jepa_distance, spatial_consistency_loss, temporal_consistency_loss
 from po_jepa import losses as po_losses
-from po_jepa.rollout_supervision import rollout_supervision_loss
+from po_jepa.rollout_supervision import rollout_predictions, rollout_supervision_loss
 
 CALIBRATED_CONDITIONS = ("fixed_fourier", "transformer_consistency", "po_jepa_rollout_sup")
 ENTRY_KEYS = frozenset({"rho", "space_weight", "time_weight", "source"})
+# S28d：多段切分变体下 po_jepa_rollout_sup 这一项多一个键，值是标定时用的切分（只能是 dyadic）
+ROLLOUT_PARTITION_KEY = "rollout_partition"
+
+
+def entry_keys(condition: str, partition: str) -> frozenset:
+    """补跑标定文件里 condition 这一项应有的键：二等分变体都是 ENTRY_KEYS；多段切分变体的 po_jepa_rollout_sup 多 rollout_partition。"""
+    if condition == "po_jepa_rollout_sup" and partition != "bisection":
+        return ENTRY_KEYS | {ROLLOUT_PARTITION_KEY}
+    return ENTRY_KEYS
 FILE_KEYS = frozenset({*CALIBRATED_CONDITIONS, "sigma_z_used", "v7_calibration_sha256"})
 
 
@@ -54,15 +65,24 @@ def load_addon_weights(condition: str) -> dict:
     if type(value) is not dict or set(value) != FILE_KEYS:
         raise ValueError(f"add-on calibration must contain exactly {', '.join(sorted(FILE_KEYS))}")
     entry = value[condition]
-    if type(entry) is not dict or set(entry) != ENTRY_KEYS:
-        raise ValueError(f"add-on calibration entry {condition} must contain exactly rho, space_weight, time_weight, source")
+    protocol = check.load_protocol()
+    partition = protocol["loss"].get("temporal_partition", "bisection")
+    if type(entry) is not dict or set(entry) != entry_keys(condition, partition):
+        if (condition == "po_jepa_rollout_sup" and partition != "bisection" and type(entry) is dict
+                and set(entry) == ENTRY_KEYS):
+            raise ValueError("补跑标定里 po_jepa_rollout_sup 没有 rollout_partition：这是 S28d 以前的代码（两段滚动）在多段切分变体下"
+                             f"标的 λ_r，不能用于 2^k 段滚动；请删掉 {path.name} 后用当前代码重跑 run.py calibrate-addon")
+        extra = ", rollout_partition" if ROLLOUT_PARTITION_KEY in entry_keys(condition, partition) else ""
+        raise ValueError(f"add-on calibration entry {condition} must contain exactly rho, space_weight, time_weight, source{extra}")
+    if ROLLOUT_PARTITION_KEY in entry and entry[ROLLOUT_PARTITION_KEY] != partition:
+        raise ValueError(f"add-on calibration po_jepa_rollout_sup.rollout_partition is {entry[ROLLOUT_PARTITION_KEY]!r}, "
+                         f"the protocol partition is {partition!r}")
     weights = {}
     for name in ("time_weight", "space_weight"):
         weight = entry[name]
         if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
             raise ValueError(f"add-on calibration {condition}.{name} must be a finite positive number")
         weights[name] = float(weight)
-    protocol = check.load_protocol()
     if type(entry["rho"]) is bool or entry["rho"] != protocol["calibration"]["rho"]:
         raise ValueError("add-on calibration rho differs from the protocol calibration.rho")
     if type(value["sigma_z_used"]) is bool or value["sigma_z_used"] != protocol["model"]["graph"]["sigma_z"]:
@@ -105,16 +125,18 @@ def generic_gradient_norms(model, batch, *, loss_config, step=None) -> dict:
     return result
 
 
-def rollout_gradient_norms(model, batch, *, loss_config) -> dict:
+def rollout_gradient_norms(model, batch, *, loss_config, step=None) -> dict:
     """08 §6：po_jepa_rollout_sup 的三项梯度范数，键和 training.consistency_gradient_norms 相同，time 一格是 L_roll。
 
-    同一批、和 addon.conditions.rollout_sup_step 相同的 5 次 Φ（时间 3 次、空间 2 次），JEPA 在 direct 上，L_roll 是
-    composed 对 raw_target 的 JEPA 距离；三项分别用 torch.autograd.grad 对全部 27/29 个参数求导，不写 .grad、不改参数。
+    同一批、和 addon.conditions.rollout_sup_step 相同的 Φ（二等分时间 3 次、空间 2 次；多段切分时间 1 + Σ 2^k 次），JEPA 在
+    direct 上，L_roll 是滚动终点 composed 对 raw_target 的 JEPA 距离；三项分别用 torch.autograd.grad 对全部 27/29 个参数
+    求导，不写 .grad、不改参数。S28d：多段切分时 step 必须给（这批的更新序号，和训练、标定同一串 k）。
     """
     from .. import training
     parameters = [p for _, p in training._parameters(model)]
     training._batch(batch, model)
-    temporal = po_losses.temporal_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source)
+    temporal = rollout_predictions(model, batch.raw_z, batch.controls, batch.tau, batch.sigma, batch.transfer.source,
+                                   config=loss_config, step=step, sample_ids=batch.sample_ids)
     jepa = jepa_distance(temporal.direct, batch.raw_target, config=loss_config).mean
     rollout = rollout_supervision_loss(temporal, batch.raw_target, config=loss_config).mean
     spatial = po_losses.spatial_predictions(model, batch.raw_z, batch.controls, batch.duration, batch.transfer)

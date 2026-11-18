@@ -47,7 +47,7 @@ python tools/run_jobs.py jobs-sv-c2.txt --gpus 0,1
 先把 C-1 的汇总发回来，由 Jerry 这边确认变体再跑 C-2。C-2 要等 b-v7.1 的 R1、R2（探针、真值）和 L1、L2（长时程测试集）完成。
 C-2 训练 po_jepa_full、po_jepa_no_consistency、transformer_consistency、fixed_fourier、po_jepa_rollout_sup（每个场景 2000 条 × 10000 步），
 另跑 3 条 identity（不训练）：它和 v7.1 的 identity 逐位相同，才复用 v7.1 的 matched_transformer、AC-small、AC，不重训。
-如果 C-2 变体是多段切分，任务文件开头有一行关于 po_jepa_rollout_sup 的注意事项，按 Jerry 那边的决定处理。
+如果 C-2 变体是多段切分，po_jepa_rollout_sup 也是 2^k 段有真值滚动（和 po_jepa_full 同一串 k，S28d），任务文件开头有一行说明；用的代码必须含 S28d，S28d 以前在多段切分下标的补跑标定文件会被拒绝。
 
 ## 4. 回传
 

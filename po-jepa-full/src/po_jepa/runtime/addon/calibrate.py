@@ -103,9 +103,8 @@ def _jepa_only(condition, device):
     if condition == "transformer_consistency":
         return comparison.build_condition("matched_transformer", device)
     if condition == "po_jepa_rollout_sup":   # 08 §6：和 v7 的 workflow.calibrate_weights 相同的模型和零权重
-        # S28b（Codex S28b P2-2）：rollout_sup 所有入口固定二等分，JEPA-only 预训练也一样
-        model, loss = comparison.build_condition("po_jepa_no_consistency", device)
-        return model, replace(loss, temporal_partition="bisection")
+        # S28d：切分跟变体走（S28b 固定二等分已撤），和同一变体的基础标定、rollout_sup 训练同一种切分
+        return comparison.build_condition("po_jepa_no_consistency", device)
     raise ValueError(f"only {', '.join(calibration.CALIBRATED_CONDITIONS)} use the add-on calibration")
 
 
@@ -114,8 +113,8 @@ def _gradient_norms(condition, model, batch, loss, step) -> dict:
     S28b：step 是这批在查询序列里的序号，多段切分按它抽 k。"""
     if condition == "transformer_consistency":
         return calibration.generic_gradient_norms(model, batch, loss_config=loss, step=step)
-    if condition == "po_jepa_rollout_sup":   # time 一格是 L_roll（08 §6）
-        return calibration.rollout_gradient_norms(model, batch, loss_config=loss)
+    if condition == "po_jepa_rollout_sup":   # time 一格是 L_roll（08 §6）；S28d：多段切分按批序号抽 k
+        return calibration.rollout_gradient_norms(model, batch, loss_config=loss, step=step)
     return training.consistency_gradient_norms(model, batch, loss_config=loss, step=step)
 
 
@@ -224,6 +223,9 @@ def calibrate_addon(features, output, device, base="v7-import") -> dict:
               f"{protocol['calibration']['batches']} 批梯度范数的中位数；{output.parent.name}")
     payload = {c: dict(rho=r["rho"], time_weight=r["time_weight"], space_weight=r["space_weight"], source=source)
                for c, r in results.items()}
+    partition = protocol["loss"].get("temporal_partition", "bisection")
+    if partition != "bisection":   # S28d：λ_r 是对 2^k 段滚动标的（calibration.entry_keys）
+        payload["po_jepa_rollout_sup"][calibration.ROLLOUT_PARTITION_KEY] = partition
     payload.update(sigma_z_used=protocol["model"]["graph"]["sigma_z"], v7_calibration_sha256=v7_sha)
     header = f"# 仿真补跑标定（run.py calibrate-addon 自动写入，勿手改）：{data.datasets.active().tag}，{check.v7_updates()} 步\n"
     text = header+yaml.safe_dump(payload, allow_unicode=True, sort_keys=True)
