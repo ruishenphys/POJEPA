@@ -436,6 +436,53 @@ def test_counterfactual_tool(caches, readout_inputs, active, tmp_path, monkeypat
     assert datasets.active().tag in (BASE.tag, "double_well-200")
 
 
+def test_readout_tools_take_dataset_from_job_not_from_an_earlier_import(caches, readout_inputs, active, tmp_path, monkeypatch):
+    """G4 R3 回归：po_jepa.datasets 已经按别的数据集导入（例如没设 PO_JEPA_DATASET 时的默认 double_well-200）时，
+    rollout、counterfactual 仍按 --job 的 job.json 取数据集，不报 “probe was fitted on …, not double_well-200”。"""
+    base, long = caches
+    probe, truth = readout_inputs
+    tool = _tool("state_readout")
+    for command, features, extra in (("rollout", long, ["--horizon", "64"]), ("counterfactual", base, [])):
+        active(datasets.parse(""))                          # 默认数据集，模拟设好任务环境之前就导入了 datasets
+        assert datasets.active().tag == "double_well-200"
+        seen = {}
+        monkeypatch.setattr(v7jobs, "load_for_evaluation", _fake_load(seen))
+        out = tmp_path/f"{command}.json"
+        tool.main([command, "--job", str(_job(tmp_path/command)), "--probe", str(probe), "--truth", str(truth),
+                   "--features", str(features), *extra, "--device", "cpu", "--output", str(out)])
+        assert seen["dataset"] == BASE.tag and datasets.active() == BASE
+        assert json.loads(out.read_text())["train_dataset"] == BASE.tag
+
+
+def test_readout_tools_set_job_env_before_importing_po_jepa(readout_inputs, tmp_path):
+    """G4 R3 回归（真实入口）：新进程、没有 PO_JEPA_* 环境变量，直接跑 tools/state_readout.py。
+    数据集必须是 job.json 的 double_well-40：探针核对通过，停在后面的真值文件检查上。"""
+    probe, _ = readout_inputs
+    (tmp_path/"bad_truth.json").write_text(json.dumps(dict(kind="other")))
+    for command in ("rollout", "counterfactual"):
+        r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/state_readout.py"), command, "--job", str(_job(tmp_path/command)),
+                            "--probe", str(probe), "--truth", str(tmp_path/"bad_truth.json"), "--features", str(tmp_path),
+                            "--device", "cpu", "--output", str(tmp_path/f"{command}.json")],
+                           env=_clean_env(), capture_output=True, text=True)
+        assert r.returncode != 0 and "fitted on" not in r.stderr, r.stderr
+        assert f"--truth 不是 {BASE.tag} 的真值文件" in r.stderr, r.stderr
+        assert not (tmp_path/f"{command}.json").exists()
+
+
+def test_load_job_refuses_when_active_dataset_differs_from_job(tmp_path, active, monkeypatch):
+    """防线：任务环境和进程里的数据集对不上时（入口改坏了顺序），在读探针之前就停，并写明两边。"""
+    import argparse
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    tool = _tool("state_readout")
+    job_dir = _job(tmp_path)
+    active(datasets.parse(""))
+    a = argparse.Namespace(job=job_dir, ac_checkpoint=None, output=tmp_path/"o.json", probe=tmp_path, truth=tmp_path,
+                           features=tmp_path, device="cpu", cross_version=False, command="counterfactual")
+    a.job_dir, a.job_record = job_dir/"run"/"job", dict(seed=1703, updates=10000, dataset=BASE.tag, condition="identity")
+    with pytest.raises(SystemExit, match=f"double_well-200.*{BASE.tag}|{BASE.tag}.*double_well-200"):
+        tool._load_job(a)
+
+
 def test_rollout_tool_refuses_sampled_training_dataset(tmp_path, active, monkeypatch):
     monkeypatch.setattr(os, "environ", dict(os.environ))
     tool = _tool("state_readout")
