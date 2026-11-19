@@ -39,6 +39,8 @@ PRIORITY = {"vjepa2_ac": 1, "po_jepa_full": 2, "po_jepa_no_consistency": 2, "fix
 RES = {"index": (0, 32, 16, 120), "download": (0, 16, 8, 600), "prepare": (0, 8, 32, 240), "stats": (0, 8, 32, 60),
        "encode": (1, 8, 64, 600), "check": (1, 8, 64, 120), "calibrate": (1, 8, 64, 240),
        "train": (1, 8, 96, 1440), "evaluate": (1, 8, 96, 600), "summary": (0, 4, 16, 60)}
+# C9（12 §6 试跑关口）：pilot.yaml 把训练时长上限改成 20 分钟，好让训练任务被打断并续跑；其余阶段同 base
+RES_BY_CONFIG = {"pilot": dict(RES, train=(1, 8, 96, 20)), "full": RES}
 
 
 def expected(name: str, train_shards: int, seeds: list[int]) -> dict[str, tuple[list[str], str, str]]:
@@ -99,20 +101,21 @@ def test_graph_matches_the_12_table(name, train_shards, seeds, count):
     by_id = {j["id"]: j for j in graph["jobs"]}
     assert set(by_id) == set(want)
     level = level_of(graph["jobs"])                 # KeyError 就说明不是拓扑序
+    res_table = RES_BY_CONFIG[name]
     for job_id, (deps, complete, res) in want.items():
         j = by_id[job_id]
         stage = job_id.split("/")[0]
         assert sorted(j["deps"]) == sorted(deps), job_id
         assert j["complete"] == complete, job_id
         assert j["stage"] == stage
-        assert j["resources"] == dict(zip(("gpus", "cpus", "mem_gb", "time_limit_minutes"), RES[res])), job_id
+        assert j["resources"] == dict(zip(("gpus", "cpus", "mem_gb", "time_limit_minutes"), res_table[res])), job_id
         assert j["requeue_exit_codes"] == [75]
         argv = ["python", "tools/droid.py", stage, "--config", f"configs/droid/{name}.yaml", "--data-root", DATA,
                 "--run-root", RUNS, "--job", job_id]
         if stage == "encode" and job_id.startswith("encode/train-"):
             argv.append("--delete-raw")
         if stage in ("train", "eval"):
-            argv += ["--time-limit-minutes", str(RES[res][3])]
+            argv += ["--time-limit-minutes", str(res_table[res][3])]
         assert j["command"] == argv, job_id
         if stage == "train":
             assert j["priority"] == PRIORITY[job_id.split("/")[1]], job_id

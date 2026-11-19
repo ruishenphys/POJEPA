@@ -5,3 +5,6 @@ data:
 training:
   updates: 2000
   seeds: [1703]
+resources:
+  train:
+    time_limit_minutes: 20         # 12 §6 试跑关口：训练任务必须被时长上限打断并续跑过（base 是 1440）

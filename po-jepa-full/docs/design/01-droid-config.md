@@ -29,6 +29,7 @@
 | `data.train_episodes` | 500 | 20000 |
 | `training.updates` | 2000 | 30000（试跑测速后可在 full.yaml 里改，改后配置 SHA 随之变化） |
 | `training.seeds` | [1703] | [1703, 1704, 1705] |
+| `resources.train.time_limit_minutes` | 20（12 §6 试跑关口：训练任务要被时长上限打断并续跑过） | 不覆盖，取 base 的 1440（check/env 测速后在 full.yaml 里定） |
 
 由 `training.updates` 推出、不单独配置的量（`DroidConfig` 的属性，不是键）：
 
