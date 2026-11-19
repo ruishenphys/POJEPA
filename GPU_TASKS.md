@@ -25,6 +25,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G5 | Small validation C-1: calibration and checks (12 of the 29 commands in the `c1` job file) | **Ready after #8 is merged** | 2–4 GPU-hours for these 12 lines | PR #8 |
 | G6 | Small validation C-2: calibration, checks, identity check, equal-step evaluation, readouts (63 of the 84 commands in the `c2` job file) | **Blocked** | 10–20 GPU-hours | C-1 summary and Jerry's choice of variant; G4 steps R1, R2, L1, L2; PR #8; PR #7 if the variant is dyadic |
 | G7 | Other evaluation tasks that cannot run yet | **Blocked** (code or decisions missing) | see §8 | see §8 |
+| G8 | AC checks (C7): AC direct prediction with its context cut to the 8 frames it was trained on, and the feature noise floor (same state encoded twice) | **Ready once its pull request is merged** (pull only after the running job files are finished) | ~1–3 GPU-hours *(est.)* for seed 1703 | v7.1 AC checkpoints; the encoder weights and `vjepa2` checkout used for encoding |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -207,11 +208,33 @@ Non-training lines (63 of 84; counted from the tool's output): 3 × `calibrate` 
 
 | Task | Why it is blocked |
 |---|---|
-| AC checks (C7 in the small-validation plan): AC direct prediction beyond its 8-frame context, and the feature noise floor (same state encoded twice) | No tool yet; a code segment has to be written first |
 | Simulation add-on extra evaluations and D3 (official-scale AC planning, 256 samples, ~7.5 h *(est.)*) | The add-on code reads `results-v7/full/<scene>` from v7 0ac45fe, but v7.1 writes `results-v7/full/v7.1/`; a code segment has to adapt it first |
 | Evaluation-only stages of the simulation dataset (`variants`, `strength`, `long`, `timing` = frame-rate and timing changes, `space`, `readout` in `tools/make_v8_jobs.py`) | They read the formal-training checkpoints; planned for the advisor's cluster after the formal training |
 | S25b: re-encoding the 5 second-order scenes from two frames | Waits for the G2 result and a code segment |
-| DROID encoding, `check/env`, calibration, evaluation, and the S16 five-episode smoke test | Waits for decisions (DROID in the submission, cluster information) and segments S15/S16; `configs/droid/pilot.yaml` still lacks `resources.train.time_limit_minutes: 20` |
+| DROID encoding, `check/env`, calibration, evaluation, and the S16 five-episode smoke test | Waits for decisions (DROID in the submission, cluster information) and segments S15/S16 (`configs/droid/pilot.yaml` now sets `resources.train.time_limit_minutes: 20`, C9) |
+
+## 8b. G8: AC checks (C7, `tools/ac_context_check.py`)
+
+Evaluation only; it changes no training or evaluation code and is not part of any preregistration. **Pull the commit that adds it only after every job file in that clone (`c1`, `b-v7.1`) is finished**, as for any other pull (§1).
+
+- `context`: on the 16×16 test points of one AC job, recomputes the direct prediction with the context cut to the last W ∈ {1, 2, 4, 8} frames (AC was trained on 9-frame clips, so at most 8 context frames; the 12-cycle direct prediction uses up to 12), next to the full-context prediction (identical to the stored direct prediction) and the v7.1 step-by-step rollout. Question it answers: is "12-cycle rollout 0.094 < 12-cycle direct 0.154" caused by the context going beyond 8 frames?
+- `floor`: re-renders the first 8 test trajectories of one scene, checks the image hashes against the cache, re-encodes them with the same frozen encoder and preprocessing as `encode_v7.py`, and reports the distance to the cached features (and its parts: run-to-run, batch size, float16 storage), next to the distance between adjacent frames. Same metric as `future_jepa_distance`.
+
+```bash
+cd $WORK/full-model/po-jepa-full
+R=../../results-v7/full/v7.1; F=../../features-v7; O=../../results-small-validation/ac-check
+for s in advection_diffusion double_well van_der_pol; do
+  for c in vjepa2_ac vjepa2_ac_small; do
+    python tools/ac_context_check.py context --job $R/$s/seed1703/$c --cross-version --features $F/$s-2000 \
+        --ac-checkpoint ../../checkpoints/vjepa2-ac-vitg.pt --output $O/context/$s/seed1703/$c.json --device cuda:0
+  done
+  python tools/ac_context_check.py floor --system $s --trajectories 2000 --features $F/$s-2000 \
+      --upstream-root ../../vjepa2 --checkpoint ../../checkpoints/vjepa2-vitg-fpc64-256.pth \
+      --output $O/floor/$s.json --device cuda:0
+done
+```
+
+Each command refuses to overwrite an existing `--output` and writes it only at the end (via a `.partial` file), so after a failure just rerun that line. Send back `results-small-validation/ac-check/` together with the G4–G6 pack (§9; the pack command there already includes `results-small-validation`).
 
 ## 9. What to send back
 
