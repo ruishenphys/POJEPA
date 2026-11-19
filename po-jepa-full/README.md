@@ -36,3 +36,21 @@ po-jepa-full/
   docs/design/              # 本目录的设计规格
   docs/segments/            # 每段的提示词、验收单和审核记录
 ```
+
+## 在别的集群上跑（可移植模式，C8）
+
+默认的三道门槛是按机哥那台机器定的：显卡白名单（RTX 4090、RTX PRO 6000、A100，v7 另加 H100/H200/H800/A800/L40S）、环境版本写死（Python 3.12、torch 2.11.0、CUDA 13.0、numpy 2.4.3、PyYAML 6.0.3）、仿真续训必须落在同一张物理卡上（新旧两份 `runtime.json` 逐项相同）。在别的集群上跑时，任务脚本里设
+
+```bash
+export PO_JEPA_PORTABLE=1
+```
+
+就放宽这三处（不设或设成 `0` 时和以前完全相同；设成别的值直接报错）：
+
+| 门槛 | 放宽后 | 记在哪里 |
+|---|---|---|
+| 显卡白名单（`runtime/checks.py`） | 名单外的卡也收，但仍要整张物理卡（UUID 以 `GPU-` 开头、MIG 未开）、显存 ≥ 24 GB | 硬件记录里 `portable_unlisted_gpu: true`，`nominal_capacity_gb` 记 24 |
+| 环境版本（`runtime/environment.py`） | 版本不同也能跑 | `environment.json` 的 `portable_version_mismatches` 列出每一项的期望值和实际值 |
+| 续训同卡（`runtime/resume.py`） | 续训可以换卡、换节点：只放过 `platform`、`device`、`gpu_uuid`、`cpu_threads`、`interop_threads`、`CUDA_VISIBLE_DEVICES`；库版本、精度和 TF32、确定性开关、其余线程环境变量仍须相同；预登记仍须逐项相同 | 标准错误输出打一行不同的字段；新目录和旧目录的 `runtime.json` 都在，可以逐项对 |
+
+放宽的只是“在哪台机器、哪个环境上跑”的准入，不改模型、损失、随机流、选点和评测。换了版本或换了卡，结果不保证和原环境逐位相同；同一组对照（同一场景、同一种子的各条件）应在同一种卡、同一套环境上跑完。`run.py` 用 `PYTHONPATH=src` 读本目录的源码，不需要 `pip install`，所以 `pyproject.toml` 里写死的版本不拦运行。

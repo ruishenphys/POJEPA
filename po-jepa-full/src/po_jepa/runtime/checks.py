@@ -43,6 +43,7 @@ import yaml
 from po_jepa import datasets
 from . import data as data
 from . import training as training
+from . import environment
 from po_jepa.dynamics import DynamicsConfig, IntegratorConfig, ModalDynamics
 
 from po_jepa.losses import LossConfig
@@ -209,6 +210,8 @@ def make_query_sequence() -> list:
         sequence.append(rows)
     return sequence
 
+PORTABLE_MIN_GB = 24   # C8：可移植模式下名单外整卡的容量下限（名单里最小的是 RTX 4090 的 24 GB）
+
 def validate_target_device(record: dict) -> int:
     """核设备类别、物理GPU身份和MIG；容量下界用标称十进制GB，原始容量另记。
 
@@ -234,8 +237,15 @@ def validate_target_device(record: dict) -> int:
         capacity = 80 if "80GB" in name else 40
         if record["mig_mode"].lower() != "disabled":
             raise ValueError("F03 requires a full A100 with MIG explicitly Disabled")
+    elif environment.portable():
+        # C8：可移植模式放行名单外的整卡（MIG 未开），容量按名单里最小的 24 GB 核；记下是名单外的卡
+        capacity = PORTABLE_MIN_GB
+        if record["mig_mode"].lower() not in ("[n/a]", "n/a", "disabled", "not supported"):
+            raise ValueError("portable mode still requires a full GPU with MIG disabled")
+        record["portable_unlisted_gpu"] = True
     else:
-        raise ValueError("F03 target requires full RTX4090 or full A100; no smaller-device substitute")
+        raise ValueError("F03 target requires full RTX4090 or full A100; no smaller-device substitute"
+                         f" (on another cluster set {environment.PORTABLE_ENV}=1 to accept any full GPU with >= {PORTABLE_MIN_GB} GB)")
     if (not record["uuid"].startswith("GPU-") or record["memory_total_bytes"] < capacity*10**9
         or record["smi_total_mib"]*1024**2 < capacity*10**9):
         raise ValueError("physical GPU identity/capacity does not match the full target")

@@ -9,3 +9,9 @@ def cpu_test_threads():
     before=torch.get_num_threads();torch.set_num_threads(2)
     yield
     torch.set_num_threads(before)
+
+
+@pytest.fixture(autouse=True)
+def strict_portable_default(monkeypatch):
+    """C8：测试一律从严格模式（PO_JEPA_PORTABLE 未设）开始，不受跑测试的机器上残留的环境变量影响。"""
+    monkeypatch.delenv('PO_JEPA_PORTABLE',raising=False)

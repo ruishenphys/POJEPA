@@ -51,8 +51,19 @@ def verify_training_source(source, registration, runtime):
     source=Path(source).resolve()
     if read(source/'preregistration.json')!=registration:
         raise ValueError('resume preregistration differs from current source/config/query sequence')
-    if read(source/'runtime.json')!=runtime:
-        raise ValueError('resume runtime/thread/device signature differs')
+    old=read(source/'runtime.json')
+    if old!=runtime:
+        from . import environment
+        differences=environment.runtime_differences(old,runtime)
+        if not environment.portable():
+            raise ValueError('resume runtime/thread/device signature differs: '+', '.join(differences)
+                             +f' (on a cluster that moves jobs between GPUs set {environment.PORTABLE_ENV}=1)')
+        other=[k for k in differences if k not in environment.PORTABLE_RESUME_KEYS]
+        if other:   # C8：可移植模式只放过机器、卡和 CPU 线程数；版本和计算设置（精度、TF32、确定性开关）必须相同
+            raise ValueError('resume runtime differs beyond GPU/host placement: '+', '.join(other))
+        import sys
+        print(f'{environment.PORTABLE_ENV}=1: resuming on another GPU/host, differing fields: '+', '.join(differences),
+              file=sys.stderr, flush=True)
     if not source.is_dir(): raise ValueError('resume training directory missing')
 
 

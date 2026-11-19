@@ -155,9 +155,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "19fd0a59fa63ec655c53b15781c731d15968592a2b4210f891b16992f82163ba",
+      "candidate_sha256": "4e69475f875374b9a73eeadb8625cfda7d78e99aae24f7bc07fe0e83db37ecd9",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "600b3787fb34ce73bcc4d8086ca62694b6a72490533d0f6c088bf4e5d444aa04",
+      "executable_ast_sha256": "79e8646b144385897da50c05ccc05671d4601186583fec52a286161d4ef2c616",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -257,10 +257,11 @@
       "sha256": "de459135ef7ce6d81f98e574826673973edc6eb4e3a881700f4813d332eb776e",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416",
+      "candidate_sha256": "306382f21fcff166db875e5e49c05b876b2a8b18b2e82c10841fbc8edd7206a5",
       "comment_cleanup_baseline_sha256": "de459135ef7ce6d81f98e574826673973edc6eb4e3a881700f4813d332eb776e",
-      "executable_ast_sha256": "346bcff7854c6ee4767cac1b73f0c8f5806b56a421b63da11a6896436008a054",
-      "v4_previous_candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416"
+      "executable_ast_sha256": "defd6bb7bdd2dab4affa184fe2b743295d43726560ee420f56613c6e36631368",
+      "v4_previous_candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416",
+      "v7_previous_candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416"
     },
     {
       "source": "first_round/scripts/evaluate_simulation.py",
@@ -333,9 +334,9 @@
       "sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "existing_v3_runtime",
-      "candidate_sha256": "46a3e8cea8ff54af97cc9fb8f804d4cb5d822ba0e3247792ac4318f576d81a27",
+      "candidate_sha256": "3cb19703a99696760bf2f934d221352eb44f6cc2ad42283b2fb6ffc26fdf110f",
       "comment_cleanup_baseline_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
-      "executable_ast_sha256": "92b14788c4a0910f4c2e065b0c1d946c80cc33a042db11d3c20bbd0baff1f402",
+      "executable_ast_sha256": "4e607db4fe32fff128ccb9daa850ecd41518a2e6e1cdc964626013facb7a5ae2",
       "v7_previous_candidate_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5"
     },
     {
@@ -499,6 +500,7 @@
       "src/po_jepa/runtime/cli.py",
       "src/po_jepa/runtime/comparison.py",
       "src/po_jepa/runtime/data.py",
+      "src/po_jepa/runtime/environment.py",
       "src/po_jepa/runtime/evaluation.py",
       "src/po_jepa/runtime/learning.py",
       "src/po_jepa/runtime/resources.py",
