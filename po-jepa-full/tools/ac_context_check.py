@@ -16,7 +16,7 @@ T = 12 时上下文最长 12 帧、时间位置到 11；而 AC 训练用 9 帧�
              rerun     同一进程同一批大小编两次（GPU 运行间不确定性）；
              batch     每次 1 帧 vs 缓存的批大小（分批改变浮点结果，encode_v7 文件头 S25-fix3）；
              rounding  新编码的 float32 和它按缓存精度（默认 float16）存一遍的差（存储舍入）；
-             vs_cache  新编码和缓存里的特征（上面几项的合计，就是“同一状态编码两次”的下限）。
+             vs_cache  新编码和缓存里的特征（上面几项的综合差异，就是“同一状态编码两次”的下限）。
            另给 adjacent：缓存里相邻两帧（1 个 tick）的距离，作为特征变化的尺度参照。距离都是 future_jepa_distance 同一个式子。
            本仓库的主实验数据集没有执行噪声、过程噪声、像素噪声（variants 默认全 0），所以这个下限只来自数值，不含物理随机性。
 
@@ -39,6 +39,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = (1, 2, 4, 8)
 FLOOR_TRAJECTORIES = 8
+DEFAULT_ENCODE_BATCH = 33                    # encode_v7.py --batch 的默认值（S25-fix3 之前的缓存没记批大小时按它假设）
 
 
 def _parse(argv=None):
@@ -265,18 +266,28 @@ def cmd_floor(a):
         if len(frames) != len(m["frames"]) or any(hashlib.sha256(frames[k].tobytes()).hexdigest() != m["frames"][k]["image_sha256"]
                                                   for k in range(len(frames))):
             raise SystemExit(f"轨迹 {tid}：重画的画面和缓存记的哈希不符（不是同一状态的同一画面）")
-        batch = int(m["generation"].get("encode_batch", 33))
+        # 旧缓存的 generation 里可能没记批大小：那时 encode_v7 的默认是 33，但这只是假设，报告里分开写“记录值”和“实际用的”
+        recorded = m["generation"].get("encode_batch")
+        batch = int(recorded) if recorded is not None else DEFAULT_ENCODE_BATCH
         stored = np.asarray(raw)
         enc = lambda size: encode_v7._encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, size, False)
         first, again, single = enc(batch), enc(batch), enc(1)
-        rows.append(dict(trajectory_id=tid, manifest_sha256=sha, encode_batch=batch, stored_dtype=str(stored.dtype),
+        rows.append(dict(trajectory_id=tid, manifest_sha256=sha, encode_batch_recorded=recorded, encode_batch_used=batch,
+                         encode_batch_source="manifest" if recorded is not None else "assumed_default", stored_dtype=str(stored.dtype),
                          recorded_relative_rounding_error=m.get("feature_stats", {}).get("relative_rounding_error"),
                          values=floor_values(first, again, single, stored, stored.dtype, loss)))
         print(f"[{spec.tag}] 轨迹 {tid}：vs_cache {rows[-1]['values']['vs_cache']['mean']:.3g}", flush=True)
     names = ("rerun", "batch", "rounding", "vs_cache", "adjacent")
     summary = {k: dict(mean=float(np.mean([r["values"][k]["mean"] for r in rows])),
                        max=float(max(r["values"][k]["max"] for r in rows))) for k in names}
+    assumed = [r["trajectory_id"] for r in rows if r["encode_batch_source"] != "manifest"]
+    batch_note = (None if not assumed else
+                  f"轨迹 {assumed} 的缓存没记 encode_batch，按默认 {DEFAULT_ENCODE_BATCH} 重编码；当年实际批大小未核实，"
+                  "batch 一项可能不代表缓存写入时的分批")
+    if batch_note:
+        print(f"[{spec.tag}] 注意：{batch_note}", flush=True)
     report = dict(kind="feature_noise_floor", dataset=spec.tag, metric="future_jepa_distance", trajectories=ids,
+                  encode_batch_unverified_trajectories=assumed, encode_batch_note=batch_note,
                   cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]), summary=summary, rows=rows,
                   encoder=dict(checkpoint_sha256=cache.CHECKPOINT_SHA, device=str(device),
                                device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"),
