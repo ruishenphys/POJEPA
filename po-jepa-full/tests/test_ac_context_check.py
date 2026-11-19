@@ -258,7 +258,9 @@ def test_floor_tool(base_cache, real, active, tmp_path, monkeypatch):
     assert s["rerun"] == dict(mean=0., max=0.)
     assert s["vs_cache"]["mean"] == pytest.approx(s["rounding"]["mean"], rel=1e-3) and 0 < s["rounding"]["mean"] < 1e-2
     assert s["adjacent"]["mean"] > 10*s["vs_cache"]["mean"]
-    assert all(x["stored_dtype"] == "float16" and x["encode_batch"] == 33 for x in r["rows"])
+    assert all(x["stored_dtype"] == "float16" and (x["encode_batch_recorded"], x["encode_batch_used"], x["encode_batch_source"])
+               == (33, 33, "manifest") for x in r["rows"])
+    assert r["encode_batch_unverified_trajectories"] == [] and r["encode_batch_note"] is None
     with pytest.raises(SystemExit, match="已存在"):
         tool.main([*args, "--output", str(out)])
     from po_jepa import systems
@@ -272,3 +274,38 @@ def test_floor_tool(base_cache, real, active, tmp_path, monkeypatch):
         with pytest.raises(SystemExit, match="哈希不符"):
             tool.main([*args, "--output", str(tmp_path/"bad.json")])
         assert not (tmp_path/"bad.json").exists()
+
+
+def test_floor_tool_unrecorded_batch(base_cache, real, active, tmp_path, monkeypatch):
+    """旧缓存没记 encode_batch：按默认 33 重编码，但报告写明是假设（记录值 null、来源 assumed_default、附说明），不冒充记录值。"""
+    import sys
+    sys.path.insert(0, str(ROOT/"tools"))
+    import encode_v7
+    from po_jepa import vjepa
+    from po_jepa.runtime import cache
+    tool = _tool()
+    active(datasets.parse("double_well:200"))
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setattr(vjepa, "preprocess_rgb", _fake_preprocess)
+    project = encode_v7._fake_encoder(torch)
+    batches = []
+    class Fake:
+        def encode_target(self, chunk, *, target_time_seconds):
+            batches.append(chunk.shape[0])
+            return SimpleNamespace(raw_z=project(chunk.float()))
+    monkeypatch.setattr(tool, "_real_encoder", lambda root, ckpt, device: Fake())
+    read = cache._read_complete_cache
+    def old_style(path):
+        raw, m, sha = read(path)
+        m = json.loads(json.dumps(m)); m["generation"].pop("encode_batch", None)
+        return raw, m, sha
+    monkeypatch.setattr(cache, "_read_complete_cache", old_style)
+    out = tmp_path/"floor.json"
+    tool.main(["floor", "--system", "double_well", "--trajectories", "40", "--features", str(base_cache),
+               "--upstream-root", str(tmp_path), "--checkpoint", str(tmp_path/"x.pt"), "--device", "cpu", "--count", "1",
+               "--output", str(out)])
+    r = json.loads(out.read_text())
+    assert batches == [33, 33, *[1]*33]
+    row, = r["rows"]
+    assert (row["encode_batch_recorded"], row["encode_batch_used"], row["encode_batch_source"]) == (None, 33, "assumed_default")
+    assert r["encode_batch_unverified_trajectories"] == [36] and "未核实" in r["encode_batch_note"]
