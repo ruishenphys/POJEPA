@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = ROOT/"configs"/"droid"
 BASE = yaml.safe_load((CONFIGS/"base.yaml").read_text(encoding="utf-8"))
 PILOT = dict(name="pilot", data=dict(train_episodes=500), training=dict(updates=2000, seeds=[1703]))
+# C9：随仓库发的 pilot.yaml 另把训练时长上限设成 20 分钟（12 §6 试跑关口：训练任务要被打断并续跑过）
+PILOT_SHIPPED = dict(PILOT, resources=dict(train=dict(time_limit_minutes=20)))
 
 
 def _write(tmp_path: Path, overlay, *, base_edit=None, base=None) -> Path:
@@ -40,7 +42,7 @@ def _merged(overlay):
 
 # ---------------------------------------------------------------- 合并、SHA、推导量
 
-@pytest.mark.parametrize("name,overlay", [("pilot", PILOT),
+@pytest.mark.parametrize("name,overlay", [("pilot", PILOT_SHIPPED),
                                           ("full", dict(name="full", data=dict(train_episodes=20000),
                                                         training=dict(updates=30000, seeds=[1703, 1704, 1705])))])
 def test_shipped_overlays_merge_onto_base(name, overlay):
@@ -67,6 +69,9 @@ def test_shipped_overlays_merge_onto_base(name, overlay):
     same(dataclasses.replace(c), dict(merged, config_sha256=c.config_sha256))
     assert c.evaluation.cem == dc.CemConfig(iterations=4, samples=256, elites=24, init_std=0.5, clip=1.5)
     assert c.resources.calibrate == dc.StageResources(gpus=1, cpus=8, mem_gb=64, time_limit_minutes=240)
+    # 训练时长上限：pilot 20 分钟（12 §6），full 沿用 base 的 1440；只改时长，卡数、核数、内存不变
+    assert c.resources.train == dc.StageResources(gpus=1, cpus=8, mem_gb=96,
+                                                  time_limit_minutes=20 if name == "pilot" else 1440)
 
 
 @pytest.mark.parametrize("name,expected", [("pilot", (100, 200, 100, 280, 5)), ("full", (1500, 3000, 1500, 4200, 75))])
