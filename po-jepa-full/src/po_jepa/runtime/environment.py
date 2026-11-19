@@ -11,8 +11,10 @@ import yaml
 # 放宽的内容都记进产物：hardware 记录的 portable_unlisted_gpu、environment.json 的 portable_version_mismatches、
 # 续训时新旧两份 runtime.json（新目录和 --resume-from 指的旧目录各一份）。数学、损失、随机流和选点都不受这个开关影响。
 PORTABLE_ENV='PO_JEPA_PORTABLE'
-# 续训时可以不同的运行签名字段：只和“落在哪台机器、哪张卡、几个 CPU 线程”有关
-PORTABLE_RESUME_KEYS=('platform','device','gpu_uuid','cpu_threads','interop_threads','environment.CUDA_VISIBLE_DEVICES')
+# 续训时可以不同的运行签名字段：落在哪台机器、哪张物理卡、几个 CPU 线程。逻辑设备号 device 不放过（C8-fix1，Codex P2-2）：
+# checkpoint 的 _runtime 和 CUDA RNG 的 device_index 都要求逻辑号不变，所以换卡靠 CUDA_VISIBLE_DEVICES 映射、进程里始终用 cuda:0。
+# CPU 线程数会改谱分解等 CPU 上算的浮点结果（spectral.py），放过它是可移植模式的有意取舍，同一组对照要用同一线程数。
+PORTABLE_RESUME_KEYS=('platform','gpu_uuid','cpu_threads','interop_threads','environment.CUDA_VISIBLE_DEVICES')
 
 
 def portable():
@@ -31,6 +33,7 @@ def versions():
 
 def verify_versions():
     """按已交付固定环境核对；Python允许3.12补丁版本，其他研究依赖严格固定。"""
+    relaxed=portable()      # 先解析开关：非法值在版本全对时也要报错（C8-fix1，Codex P2-1）
     actual=versions()
     # 与一轮实际运行环境（conda env patho）一致。
     expected=dict(torch='2.11.0', cuda='13.0', numpy='2.4.3', PyYAML='6.0.3')
@@ -39,7 +42,7 @@ def verify_versions():
     if actual['python'].split('.')[:2]!=['3','12']:
         mismatches['python']=dict(expected='3.12.x', actual=actual['python'])
     if mismatches:
-        if not portable():
+        if not relaxed:
             raise ValueError('dependency versions differ: '+str(mismatches)
                              +f' (on another cluster set {PORTABLE_ENV}=1 to run anyway; the differences are then recorded)')
         return dict(actual,portable_version_mismatches=mismatches)
@@ -62,10 +65,12 @@ def runtime_signature(device):
 
 
 def runtime_differences(old,new):
-    """两份 runtime_signature 逐项（嵌套键用点号）不同的字段名，排好序。"""
+    """两份 runtime_signature 逐项（嵌套键用点号）不同的字段名，排好序。
+
+    空字典当成一个叶子（C8-fix1，Codex P3-1）：否则多出或少了一个空字典展开成零项，结构差异就看不见了。"""
     def flat(value,prefix=''):
-        if isinstance(value,dict):
+        if isinstance(value,dict) and value:
             return {k:v for key,item in value.items() for k,v in flat(item,prefix+key+'.').items()}
         return {prefix[:-1]:value}
     a,b=flat(old),flat(new)
-    return sorted(k for k in a.keys()|b.keys() if k not in a or k not in b or a[k]!=b[k])
+    return sorted(k for k in a.keys()|b.keys() if k not in a or k not in b or type(a[k]) is not type(b[k]) or a[k]!=b[k])

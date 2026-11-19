@@ -49,8 +49,8 @@ export PO_JEPA_PORTABLE=1
 
 | 门槛 | 放宽后 | 记在哪里 |
 |---|---|---|
-| 显卡白名单（`runtime/checks.py`） | 名单外的卡也收，但仍要整张物理卡（UUID 以 `GPU-` 开头、MIG 未开）、显存 ≥ 24 GB | 硬件记录里 `portable_unlisted_gpu: true`，`nominal_capacity_gb` 记 24 |
+| 显卡白名单（`runtime/checks.py`） | 名单外的卡也收，但仍要整张物理卡（UUID 以 `GPU-` 开头、MIG 未开）、显存 ≥ 24 GB（这是身份下限，不保证装得下；正式跑 `vjepa2_ac` 前先按实际批量和序列长度测一次峰值显存） | 硬件记录里 `portable_unlisted_gpu: true`，`nominal_capacity_gb` 记 24 |
 | 环境版本（`runtime/environment.py`） | 版本不同也能跑 | `environment.json` 的 `portable_version_mismatches` 列出每一项的期望值和实际值 |
-| 续训同卡（`runtime/resume.py`） | 续训可以换卡、换节点：只放过 `platform`、`device`、`gpu_uuid`、`cpu_threads`、`interop_threads`、`CUDA_VISIBLE_DEVICES`；库版本、精度和 TF32、确定性开关、其余线程环境变量仍须相同；预登记仍须逐项相同 | 标准错误输出打一行不同的字段；新目录和旧目录的 `runtime.json` 都在，可以逐项对 |
+| 续训同卡（`runtime/resume.py`） | 续训可以换卡、换节点：只放过 `platform`、`gpu_uuid`、`cpu_threads`、`interop_threads`、`CUDA_VISIBLE_DEVICES`；逻辑设备号 `device` 仍须相同（检查点和 CUDA 随机流都记了它），换卡时用 `CUDA_VISIBLE_DEVICES` 把新卡映射进来、进程里始终用默认的 `cuda:0`（`tools/run_jobs.py` 就是这样起任务的，别另传 `--device cuda:1`）；库版本、精度和 TF32、确定性开关、其余线程环境变量仍须相同；预登记仍须逐项相同 | 标准错误输出打一行不同的字段；新目录和旧目录的 `runtime.json` 都在，可以逐项对 |
 
-放宽的只是“在哪台机器、哪个环境上跑”的准入，不改模型、损失、随机流、选点和评测。换了版本或换了卡，结果不保证和原环境逐位相同；同一组对照（同一场景、同一种子的各条件）应在同一种卡、同一套环境上跑完。`run.py` 用 `PYTHONPATH=src` 读本目录的源码，不需要 `pip install`，所以 `pyproject.toml` 里写死的版本不拦运行。
+放宽的只是“在哪台机器、哪个环境上跑”的准入，不改模型、损失、随机流、选点和评测。换了版本或换了卡，结果不保证和原环境逐位相同；同一组对照（同一场景、同一种子的各条件）应在同一种卡、同一套环境上跑完，CPU 线程数（`OMP_NUM_THREADS`、`torch.get_num_threads()`）和谱分解后端也要相同：GPU 训练里图亲和度、谱分解仍在 CPU 上算（`spectral.py`），线程数不同浮点结果可能不同。开关设成 `0`、`1` 以外的值时，无论这三道门槛本来是否通过都直接报错。`run.py` 用 `PYTHONPATH=src` 读本目录的源码，不需要 `pip install`，所以 `pyproject.toml` 里写死的版本不拦运行。

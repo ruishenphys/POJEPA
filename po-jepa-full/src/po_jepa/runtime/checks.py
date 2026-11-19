@@ -218,6 +218,7 @@ def validate_target_device(record: dict) -> int:
     这只是硬件身份门槛，不能替代完整训练步的实际峰值显存证明。
     0须显式Disabled；unknown/Enabled/MIG设备不放行，无CPU或小模型回退。
     """
+    relaxed = environment.portable()   # 先解析开关：非法值在名单内的卡上也要报错（C8-fix1，Codex P2-1）
     name = record["name"]
     if name == "NVIDIA GeForce RTX 4090":
         capacity = 24
@@ -237,7 +238,7 @@ def validate_target_device(record: dict) -> int:
         capacity = 80 if "80GB" in name else 40
         if record["mig_mode"].lower() != "disabled":
             raise ValueError("F03 requires a full A100 with MIG explicitly Disabled")
-    elif environment.portable():
+    elif relaxed:
         # C8：可移植模式放行名单外的整卡（MIG 未开），容量按名单里最小的 24 GB 核；记下是名单外的卡
         capacity = PORTABLE_MIN_GB
         if record["mig_mode"].lower() not in ("[n/a]", "n/a", "disabled", "not supported"):

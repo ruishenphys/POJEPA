@@ -48,14 +48,15 @@ def read(path):
 
 def verify_training_source(source, registration, runtime):
     """旧目录登记须绑定本版源码、协议、缓存消费者及同一完整查询序列。"""
+    from . import environment
+    relaxed=environment.portable()   # 先解析开关：非法值在签名相同时也要报错（C8-fix1，Codex P2-1）
     source=Path(source).resolve()
     if read(source/'preregistration.json')!=registration:
         raise ValueError('resume preregistration differs from current source/config/query sequence')
     old=read(source/'runtime.json')
     if old!=runtime:
-        from . import environment
-        differences=environment.runtime_differences(old,runtime)
-        if not environment.portable():
+        differences=environment.runtime_differences(old,runtime) or ['<structure>']
+        if not relaxed:
             raise ValueError('resume runtime/thread/device signature differs: '+', '.join(differences)
                              +f' (on a cluster that moves jobs between GPUs set {environment.PORTABLE_ENV}=1)')
         other=[k for k in differences if k not in environment.PORTABLE_RESUME_KEYS]

@@ -87,7 +87,7 @@ def _source(tmp_path, runtime, registration):
 
 
 def _moved(runtime):
-    moved = dict(runtime, device="cuda:0", gpu_uuid="GPU-other", platform="Linux-other-node", cpu_threads=runtime["cpu_threads"]+8,
+    moved = dict(runtime, gpu_uuid="GPU-other", platform="Linux-other-node", cpu_threads=runtime["cpu_threads"]+8,
                  interop_threads=runtime["interop_threads"]+8)
     moved["environment"] = dict(runtime["environment"], CUDA_VISIBLE_DEVICES="3")
     return moved
@@ -98,6 +98,18 @@ def test_runtime_differences_names_nested_fields():
     b = dict(x=1, environment=dict(A="2", B=None), versions=dict(torch="2.11.0"), y=0)
     assert environment.runtime_differences(a, b) == ["environment.A", "y"]
     assert environment.runtime_differences(a, a) == []
+
+
+@pytest.mark.parametrize("old,new,expected", [
+    (dict(x=1), dict(x=1, extra={}), ["extra"]),                       # 多一个空字典
+    (dict(x=1, extra={}), dict(x=1), ["extra"]),                       # 少一个空字典
+    (dict(x=1, extra={}), dict(x=1, extra=None), ["extra"]),           # 空字典换成别的类型
+    (dict(x=1, extra=dict(a=1)), dict(x=1, extra="a"), ["extra", "extra.a"]),
+    (dict(x=1), dict(x=True), ["x"]),                                  # 1 == True 但类型不同
+])
+def test_runtime_differences_sees_structure_changes(old, new, expected):
+    """C8-fix1（Codex P3-1）：空字典当叶子，类型不同也算不同，结构变化不会被展开吞掉。"""
+    assert environment.runtime_differences(old, new) == expected
 
 
 def test_resume_on_another_gpu_strict_by_default_allowed_when_portable(monkeypatch, tmp_path, capsys):
@@ -113,6 +125,39 @@ def test_resume_on_another_gpu_strict_by_default_allowed_when_portable(monkeypat
     assert "PO_JEPA_PORTABLE=1" in err and all(k in err for k in environment.PORTABLE_RESUME_KEYS)
     resume.verify_training_source(source, registration, runtime)
     assert capsys.readouterr().err == ""                                        # 没换卡就不打印
+
+
+def test_portable_resume_keeps_logical_device(monkeypatch, tmp_path):
+    """C8-fix1（Codex P2-2）：逻辑设备号不放过（checkpoint 和 CUDA RNG 都要求它不变），换卡要靠 CUDA_VISIBLE_DEVICES 映射到 cuda:0。"""
+    monkeypatch.setenv(environment.PORTABLE_ENV, "1")
+    runtime = environment.runtime_signature(torch.device("cpu")); registration = dict(fictional=True)
+    source = _source(tmp_path, dict(runtime, device="cuda:0"), registration)
+    with pytest.raises(ValueError, match="beyond GPU/host placement: device"):
+        resume.verify_training_source(source, registration, dict(_moved(runtime), device="cuda:1"))
+    assert "device" not in environment.PORTABLE_RESUME_KEYS
+
+
+def test_portable_resume_rejects_extra_empty_structure(monkeypatch, tmp_path):
+    monkeypatch.setenv(environment.PORTABLE_ENV, "1")
+    runtime = environment.runtime_signature(torch.device("cpu")); registration = dict(fictional=True)
+    source = _source(tmp_path, dict(runtime, extra={}), registration)
+    with pytest.raises(ValueError, match="beyond GPU/host placement: extra"):
+        resume.verify_training_source(source, registration, _moved(runtime))
+
+
+@pytest.mark.parametrize("value", ["yes", "2"])
+def test_invalid_switch_rejected_on_success_paths(monkeypatch, tmp_path, value):
+    """C8-fix1（Codex P2-1）：开关值非法时，版本全对、名单内的卡、签名相同这三条本来会通过的路径也要报错。"""
+    runtime = environment.runtime_signature(torch.device("cpu")); registration = dict(fictional=True)
+    source = _source(tmp_path, runtime, registration)
+    monkeypatch.setattr(environment, "versions", lambda: _versions())
+    monkeypatch.setenv(environment.PORTABLE_ENV, value)
+    with pytest.raises(ValueError, match="PO_JEPA_PORTABLE must be"):
+        environment.verify_versions()
+    with pytest.raises(ValueError, match="PO_JEPA_PORTABLE must be"):
+        checks.validate_target_device(_record("NVIDIA RTX PRO 6000 Blackwell Server Edition", 96.))
+    with pytest.raises(ValueError, match="PO_JEPA_PORTABLE must be"):
+        resume.verify_training_source(source, registration, runtime)
 
 
 @pytest.mark.parametrize("field,value", [("matmul_tf32", "flip"), ("deterministic", "flip"), ("default_dtype", "torch.float64"),

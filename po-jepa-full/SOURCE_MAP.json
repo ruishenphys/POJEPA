@@ -155,9 +155,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "4e69475f875374b9a73eeadb8625cfda7d78e99aae24f7bc07fe0e83db37ecd9",
+      "candidate_sha256": "8dd50bf35235429e50ba6e43791ca2d0cb4f79c53cc44f5aa22ac456f04fdd95",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "79e8646b144385897da50c05ccc05671d4601186583fec52a286161d4ef2c616",
+      "executable_ast_sha256": "a4daf4a322261cbfef3cb67ef0e527b2dcd1edbb3d9ccd5ae5dab2940fb2e378",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -257,9 +257,9 @@
       "sha256": "de459135ef7ce6d81f98e574826673973edc6eb4e3a881700f4813d332eb776e",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "306382f21fcff166db875e5e49c05b876b2a8b18b2e82c10841fbc8edd7206a5",
+      "candidate_sha256": "970a0a3719930dd4cdc3a4a5e5af3a65255665c11be40a54691eee2875e24380",
       "comment_cleanup_baseline_sha256": "de459135ef7ce6d81f98e574826673973edc6eb4e3a881700f4813d332eb776e",
-      "executable_ast_sha256": "defd6bb7bdd2dab4affa184fe2b743295d43726560ee420f56613c6e36631368",
+      "executable_ast_sha256": "09f92c2adf2aeb486c8493ee6bf45b6d4707f1fd840c97db8773c86b9beeeae0",
       "v4_previous_candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416",
       "v7_previous_candidate_sha256": "503d8084caf5320a4a26f1fd0ce10ef87218d4e9a8043201007c3643a127d416"
     },
@@ -334,9 +334,9 @@
       "sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "existing_v3_runtime",
-      "candidate_sha256": "3cb19703a99696760bf2f934d221352eb44f6cc2ad42283b2fb6ffc26fdf110f",
+      "candidate_sha256": "224fef371220245720352dca7339fb0fd716155843dd4425dcbf2f443d3954c0",
       "comment_cleanup_baseline_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5",
-      "executable_ast_sha256": "4e607db4fe32fff128ccb9daa850ecd41518a2e6e1cdc964626013facb7a5ae2",
+      "executable_ast_sha256": "9bc0d3a118d9826f3deb312b40748e630155563f4ecdde7efb27aa4af2086806",
       "v7_previous_candidate_sha256": "d2401389e6cdbfd3d034f3be0e0af9e9fa94b240df27aba0db22230835e4ddf5"
     },
     {
