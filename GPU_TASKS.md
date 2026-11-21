@@ -26,6 +26,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G6 | Small validation C-2: calibration, checks, identity check, equal-step evaluation, readouts (63 of the 84 commands in the `c2` job file) | **Blocked** | 10–20 GPU-hours | C-1 summary and Jerry's choice of variant; G4 steps R1, R2, L1, L2; PR #8; PR #7 if the variant is dyadic |
 | G7 | Other evaluation tasks that cannot run yet | **Blocked** (code or decisions missing) | see §8 | see §8 |
 | G8 | AC checks (C7): AC direct prediction with its context cut to the 8 frames it was trained on, and the feature noise floor (same state encoded twice) | **Ready once its pull request is merged** (pull only after the running job files are finished) | ~1–3 GPU-hours *(est.)* for seed 1703 | v7.1 AC checkpoints; the encoder weights and `vjepa2` checkout used for encoding |
+| G9 | C-2 shrinkage check (`tools/shrinkage_check.py`): readout slope / spread / motion gain and LN-feature spread of the C-2 checkpoints on the registered test windows | **Ready once its pull request is merged** | ~1–2 GPU-hours *(est.)*, 21 commands | C-2 checkpoints, readout probes and truth files under `results-small-validation/` (all from G4/G6) |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -235,6 +236,28 @@ done
 ```
 
 Each command refuses to overwrite an existing `--output` and writes it only at the end (via a `.partial` file), so after a failure just rerun that line. Send back `results-small-validation/ac-check/` together with the G4–G6 pack (§9; the pack command there already includes `results-small-validation`).
+
+## 8c. G9: C-2 shrinkage check (`tools/shrinkage_check.py`)
+
+Evaluation only, no training; it reads the selected checkpoint of each C-2 job (the same one the C-2 evaluation used) and changes no training or evaluation code. C-2 is finished, so pulling the commit that adds it is safe (§1 still applies to anything else running in that clone).
+
+Question it answers: on double_well the full model's future JEPA distance is about equal to `po_jepa_no_consistency`, but its physical readout error is ~40% worse. Are its predictions shrunk toward the mean or toward "nothing moves"? On the same test windows as `state_readout.py counterfactual` (each test trajectory × registered start × T ∈ {1, 2, 4, 8}, 16×16), with the same probe and truth file, it reports per T: readout spread ratio and regression slope of prediction on truth, the share of the true displacement that is predicted (motion gain), the same in LayerNorm feature space, and raw feature norms. Formulas are in the file header.
+
+```bash
+cd $WORK/full-model/po-jepa-full
+R=../../results-small-validation; C=$R/c2/dyadic-zero; F=../../features-v7; O=$C/shrinkage
+for s in advection_diffusion double_well van_der_pol; do
+  for c in identity po_jepa_full po_jepa_no_consistency po_jepa_rollout_sup fixed_fourier transformer_consistency; do
+    python tools/shrinkage_check.py --job $C/$s/seed1703/$c --probe $R/readout/probe/$s --truth $R/readout/truth/$s.json \
+        --features $F/$s-2000 --output $O/$s/seed1703/$c.json --device cuda:0
+  done
+  python tools/shrinkage_check.py --job ../../results-v7/full/v7.1/$s/seed1703/matched_transformer --cross-version \
+      --probe $R/readout/probe/$s --truth $R/readout/truth/$s.json \
+      --features $F/$s-2000 --output $O/$s/seed1703/v7.1_matched_transformer.json --device cuda:0
+done
+```
+
+Each command refuses to overwrite an existing `--output`; after a failure just rerun that line. Send back `results-small-validation/c2/dyadic-zero/shrinkage/` (a few MB) with the pack command of §9, for example `python $TOOL pack results-small-validation/c2/dyadic-zero/shrinkage nvidia-smi.txt --output c2-shrinkage.pack.sqlite`.
 
 ## 9. What to send back
 
