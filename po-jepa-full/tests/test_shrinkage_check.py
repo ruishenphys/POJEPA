@@ -123,3 +123,39 @@ def test_shrinkage_tool(caches, readout_inputs, active, tmp_path, monkeypatch):
         tool.main(["--job", str(_job(tmp_path/"bad")), "--probe", str(probe_dir), "--truth", str(tmp_path/"bad.json"),
                    "--features", str(base), "--device", "cpu", "--output", str(tmp_path/"z.json")])
     assert not (tmp_path/"z.json").exists()
+
+
+def test_identical_predictions_give_exactly_zero_ln_spread():
+    """C2D1-P3-1: Welford accumulation, no Σx² − (Σx)²/n cancellation."""
+    tool = _tool("shrinkage_check")
+    g = torch.Generator().manual_seed(5)
+    acc = tool.Accumulator()
+    constant = torch.randn(1, 4, 8, generator=g)*3+1
+    for _ in range(7):
+        acc.add(x=torch.randn(1, 4, 8, generator=g), z_hat=constant.clone(), z_star=torch.randn(1, 4, 8, generator=g),
+                y=np.zeros(2), r_hat=np.zeros(2), r_star=np.zeros(2), r_0=np.zeros(2), fjd=0., ln_eps=1e-5)
+    assert acc.summary(1.)["ln_var_ratio"] == 0.
+
+
+def test_cross_version_flag_uses_the_cross_version_loader(caches, readout_inputs, active, tmp_path, monkeypatch):
+    """C2D1-P1: the C-2 jobs were trained before MANIFEST.json changed, so G9 reads them with --cross-version
+    (addon.v7load.load_v7_selected, checked against --features), not with v7jobs.load_for_evaluation."""
+    from po_jepa.runtime.addon import v7load
+    base, _ = caches
+    probe_dir, truth = readout_inputs
+    seen = {}
+
+    def refuse(*a, **k):
+        raise AssertionError("the default loader must not be used with --cross-version")
+
+    def fake(job_dir, condition, model, *, loss_config, features, device):
+        seen.update(condition=condition, features=features)
+        return dict(best=None, job_dir=str(job_dir))
+    monkeypatch.setattr(v7jobs, "load_for_evaluation", refuse)
+    monkeypatch.setattr(v7load, "load_v7_selected", fake)
+    out = tmp_path/"x.json"
+    _tool("shrinkage_check").main(["--job", str(_job(tmp_path/"cv")), "--cross-version", "--probe", str(probe_dir),
+                                   "--truth", str(truth), "--features", str(base), "--device", "cpu", "--output", str(out)])
+    r = json.loads(out.read_text())
+    assert seen == dict(condition="identity", features=base)
+    assert r["registration_sha256"] is None and r["cross_version"]["best"] is None and r["best"] is None

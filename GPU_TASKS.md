@@ -248,8 +248,8 @@ cd $WORK/full-model/po-jepa-full
 R=../../results-small-validation; C=$R/c2/dyadic-zero; F=../../features-v7; O=$C/shrinkage
 for s in advection_diffusion double_well van_der_pol; do
   for c in identity po_jepa_full po_jepa_no_consistency po_jepa_rollout_sup fixed_fourier transformer_consistency; do
-    python tools/shrinkage_check.py --job $C/$s/seed1703/$c --probe $R/readout/probe/$s --truth $R/readout/truth/$s.json \
-        --features $F/$s-2000 --output $O/$s/seed1703/$c.json --device cuda:0
+    python tools/shrinkage_check.py --job $C/$s/seed1703/$c --cross-version --probe $R/readout/probe/$s \
+        --truth $R/readout/truth/$s.json --features $F/$s-2000 --output $O/$s/seed1703/$c.json --device cuda:0
   done
   python tools/shrinkage_check.py --job ../../results-v7/full/v7.1/$s/seed1703/matched_transformer --cross-version \
       --probe $R/readout/probe/$s --truth $R/readout/truth/$s.json \
@@ -257,7 +257,7 @@ for s in advection_diffusion double_well van_der_pol; do
 done
 ```
 
-Each command refuses to overwrite an existing `--output`; after a failure just rerun that line. Send back `results-small-validation/c2/dyadic-zero/shrinkage/` (a few MB) with the pack command of §9, for example `python $TOOL pack results-small-validation/c2/dyadic-zero/shrinkage nvidia-smi.txt --output c2-shrinkage.pack.sqlite`.
+`--cross-version` is required on every line: the C-2 jobs were trained on d5a8fc1, and the commit that adds this tool changes `MANIFEST.json`, so the default loader would refuse them with `training run 的预登记与当前代码/配置不一致`. The cross-version loader checks the job record, selected step, query sequence, checkpoint SHA, configuration snapshot and data provenance instead of the source hashes. Each command refuses to overwrite an existing `--output`; after a failure just rerun that line. Send back `results-small-validation/c2/dyadic-zero/shrinkage/` (a few MB) with the pack command of §9, for example `python $TOOL pack results-small-validation/c2/dyadic-zero/shrinkage nvidia-smi.txt --output c2-shrinkage.pack.sqlite`.
 
 ## 9. What to send back
 

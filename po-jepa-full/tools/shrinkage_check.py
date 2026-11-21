@@ -19,12 +19,15 @@ Readout level (physical units, the probe's target):
   motion_gain    = sum<r_hat - r_0, y - r_0> / sum||y - r_0||^2  (share of the true displacement predicted; identity = 0)
   motion_ratio   = sqrt(sum||r_hat - r_0||^2 / sum||y - r_0||^2)
   *_star         the same with r_star in place of r_hat (probe sanity: ~1 where the probe floor is small)
-LN feature level (per-token LayerNorm without affine, eps = state_readout.LN_EPS, flattened 256 x 1408):
+LN feature level (per-token LayerNorm without affine, eps = state_readout.LN_EPS, flattened 256 x 1408; the spread across
+  windows uses float64 Welford running mean / M2, so identical predictions give exactly 0, C2D1-P3-1):
   ln_var_ratio   = sum_d Var_n(LN z_hat)_d / sum_d Var_n(LN z_star)_d   (spread across windows of the same T)
   ln_motion_gain = sum<LN z_hat - LN x, LN z_star - LN x> / sum||LN z_star - LN x||^2
   ln_motion_ratio= sqrt(sum||LN z_hat - LN x||^2 / sum||LN z_star - LN x||^2)
   ln_motion_cos  = mean over windows of cos(LN z_hat - LN x, LN z_star - LN x)
-Raw level (before LN; FJD and the probe are both invariant to a per-token shift and scale, so this is reported, not used):
+Raw level (before LN). FJD and the probe are invariant to a per-token shift, and approximately invariant to a positive
+  per-token scale only while the token variance stays far above eps = 1e-5 (C2D1-P3-2); so a raw shrink is reported here
+  and cannot be ruled out unconditionally:
   raw_norm_ratio = mean ||z_hat||_F / ||z_star||_F,  raw_token_std_ratio = mean over windows of mean_token std(z_hat)/std(z_star)
   fjd            = mean jepa_distance(z_hat, z_star) (losses.jepa_distance; should match the evaluation report's
                    grid-16 future_jepa_distance for T = 1, 2, 4, 8 up to the different control packing)
@@ -67,7 +70,7 @@ class Accumulator:
     def __init__(self):
         self.y, self.r_hat, self.r_star, self.r_0 = [], [], [], []
         self.n = 0
-        self.ln_sum_hat = self.ln_sq_hat = self.ln_sum_star = self.ln_sq_star = None
+        self.ln_mean_hat = self.ln_m2_hat = self.ln_mean_star = self.ln_m2_star = None
         self.ln_inner = self.ln_true = self.ln_pred = 0.
         self.ln_cos, self.raw_norm, self.raw_std, self.fjd = [], [], [], []
 
@@ -78,10 +81,14 @@ class Accumulator:
         self.fjd.append(float(fjd))
         ln = [F.layer_norm(t.double(), (t.shape[-1],), eps=ln_eps).reshape(-1) for t in (x, z_hat, z_star)]
         lx, lh, ls = ln
-        if self.ln_sum_hat is None:
+        if self.ln_mean_hat is None:
             zeros = torch.zeros_like(lh)
-            self.ln_sum_hat, self.ln_sq_hat, self.ln_sum_star, self.ln_sq_star = (zeros.clone() for _ in range(4))
-        self.ln_sum_hat += lh; self.ln_sq_hat += lh*lh; self.ln_sum_star += ls; self.ln_sq_star += ls*ls
+            self.ln_mean_hat, self.ln_m2_hat, self.ln_mean_star, self.ln_m2_star = (zeros.clone() for _ in range(4))
+        k = self.n+1                                   # Welford: mean_k = mean_{k-1} + (x - mean_{k-1})/k
+        for value, mean, m2 in ((lh, self.ln_mean_hat, self.ln_m2_hat), (ls, self.ln_mean_star, self.ln_m2_star)):
+            delta = value-mean
+            mean += delta/k
+            m2 += delta*(value-mean)
         dh, ds = lh-lx, ls-lx
         self.ln_inner += float(dh@ds); self.ln_true += float(ds@ds); self.ln_pred += float(dh@dh)
         denominator = float(dh.norm()*ds.norm())
@@ -97,8 +104,8 @@ class Accumulator:
         out.update(readout_summary(y, r_hat, r_0, variance))
         out.update({f"{k}_star": v for k, v in readout_summary(y, r_star, r_0, variance).items()})
         n = self.n
-        var_hat = float((self.ln_sq_hat-self.ln_sum_hat**2/n).sum())/n
-        var_star = float((self.ln_sq_star-self.ln_sum_star**2/n).sum())/n
+        var_hat = float(self.ln_m2_hat.sum())/n            # population variance summed over dimensions
+        var_star = float(self.ln_m2_star.sum())/n
         cos = [c for c in self.ln_cos if c == c]
         out.update(ln_var_ratio=var_hat/var_star if var_star > 0 else None,
                    ln_motion_gain=self.ln_inner/self.ln_true if self.ln_true > 0 else None,
