@@ -29,6 +29,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G9 | C-2 shrinkage check (`tools/shrinkage_check.py`): readout slope / spread / motion gain and LN-feature spread of the C-2 checkpoints on the registered test windows | **Ready once its pull request is merged** | ~1–2 GPU-hours *(est.)*, 21 commands | C-2 checkpoints, readout probes and truth files under `results-small-validation/` (all from G4/G6) |
 | G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the number of spatial basis vectors and never drop information (K = 16, 32, 64 plus the kept complement; all tokens) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~25 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
 | G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
+| G12 | C-1 2×2 readout (§8f): physical readout and counterfactual action response of the 12 C-1 checkpoints (bisection/dyadic × Xavier/zero `P_out`), evaluation only, probes and truth fitted on the 200-trajectory datasets | **Ready** (`full-model` c379bc4 or later; #14 and #15 are merged) | ~1 GPU-hour *(est.)*, 48 commands (12 of them optional) | C-1 job folders under `results-small-validation/c1/` with their selected checkpoints; the v6 `double_well-200` features (`$V6`, as for C-1) |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -336,6 +337,64 @@ python $TOOL pack results-small-validation/c3 logs-addon/jobs-sv-c3-* full-model
 ```
 
 (For batch 2 use `--output c3-batch2.pack.sqlite`; the same command picks up both batches.)
+
+## 8f. G12: C-1 2×2 readout (physical readout and action response, evaluation only)
+
+Evaluation only, no training, no new code: it runs the existing `tools/encode_v7.py` and `tools/state_readout.py` (the G4 tools) on the 12 C-1 checkpoints. Like G9 and G10, every readout line uses `--cross-version` (the C-1 jobs were trained on an older commit and later commits changed `MANIFEST.json`), so it runs on the current `full-model` and also after #14 (G10) and #15 (C-3) are merged (C-3 leaves the default model and its configuration snapshot unchanged).
+
+Question it answers: in C-2 (`dyadic-zero`), `po_jepa_full` on double_well responds to a change of actions only about half as much as `po_jepa_no_consistency` (counterfactual amplitude 0.18 against 0.33), but the v7.1 `po_jepa_full` (bisection + Xavier) does not (0.34). The two changes between them are the dyadic temporal partition and the zero-initialised `P_out` (S28b). C-1 trained all four combinations (200 trajectories × 2,000 updates, seed 1703), but never ran the readout on them. This task does, so we can tell which of the two changes causes the shrinkage.
+
+Because C-1 used the 200-trajectory datasets, the probes and truth files of G4 (fitted on the 2,000-trajectory datasets) cannot be reused: the tools refuse a probe or truth file of another dataset. So the job file first encodes a 200-trajectory long test set (only its 20 test trajectories × 129 frames), fits a probe on the 200-trajectory validation split, and writes the truth files, all under `results-small-validation/c1-readout/`. The `double_well-200` features are the v6 folder that C-1 read (`$V6`, the same absolute path as in §7 G5).
+
+```bash
+cd $WORK/full-model/po-jepa-full
+V6=/absolute/path/of/the/v6/double_well-200/features    # the same value you used for the c1 job file (§7 G5)
+R=../../results-small-validation; O=$R/c1-readout; LF=../../features-small-validation
+ENC="--upstream-root ../../vjepa2 --checkpoint ../../checkpoints/vjepa2-vitg-fpc64-256.pth"
+SCENES="advection_diffusion double_well van_der_pol"
+VARIANTS="bisection-xavier bisection-zero dyadic-xavier dyadic-zero"
+feats() { if [ "$1" = double_well ]; then echo "$V6"; else echo "../../features-v7/$1-200"; fi; }
+long() { echo "$LF/$1~horizon=128-200"; }
+readout() {  # $1 job folder, $2 scene, $3 output group, $4 condition
+  P="--probe $O/probe/$2 --truth $O/truth/$2.json"
+  echo "python tools/state_readout.py counterfactual --job $1 $P --features $(feats $2) --cross-version --output $O/$3/counterfactual/$2/seed1703/$4.json --device cuda:0"
+  echo "python tools/state_readout.py rollout --job $1 $P --features $(long $2) --horizon 128 --base-features $(feats $2) --cross-version --output $O/$3/rollout/$2/seed1703/$4.json --device cuda:0"
+}
+{
+echo "# ===== L1 encode the 200-trajectory long test sets (GPU, 3 commands: 20 test trajectories x 129 frames per scene) ====="
+for s in $SCENES; do echo "python tools/encode_v7.py encode --system $s --variant horizon=128 --trajectories 200 --splits test $ENC --output $(long $s) --device cuda:0 --shard 0/1"; done
+echo "# ===== L2 finalize the encodings (CPU, 3 commands) ====="
+for s in $SCENES; do echo "python tools/encode_v7.py finalize --system $s --variant horizon=128 --trajectories 200 --splits test --output $(long $s)"; done
+echo "# ===== R1 fit the probes on the 200-trajectory validation split (GPU, 3 commands) ====="
+for s in $SCENES; do echo "python tools/state_readout.py fit --system $s --trajectories 200 --features $(feats $s) --output $O/probe/$s --device cuda:0"; done
+echo "# ===== R2 truth files (CPU, 3 commands; counterfactual ends re-simulated) ====="
+for s in $SCENES; do echo "python tools/state_readout.py truth --system $s --trajectories 200 --features $(feats $s) --long-features $(long $s) --horizon 128 --output $O/truth/$s.json"; done
+echo "# ===== R3 counterfactual and long rollout of the C-1 2x2 checkpoints (GPU, 24 commands, independent) ====="
+for v in $VARIANTS; do for s in $SCENES; do readout $R/c1/$v/$s/seed1703/po_jepa_full $s $v po_jepa_full; done; done
+echo "# ===== P optional reference: v7 pilot (200 x 2000, bisection-xavier, v7 code) full and no-consistency (GPU, 12 commands) ====="
+for c in po_jepa_full po_jepa_no_consistency; do for s in $SCENES; do readout ../../results-v7/pilot/$s/seed1703/$c $s v7-pilot $c; done; done
+} > jobs-sv-c1-readout.txt
+grep -c '^python' jobs-sv-c1-readout.txt      # must print 48
+python tools/run_jobs.py jobs-sv-c1-readout.txt --gpus 0,1
+```
+
+- Sections: L1 (3) → L2 (3) → R1 (3) → R2 (3) → R3 (24) → P (12). `run_jobs.py` starts a section only after the previous one has finished, logs go to `../../logs-addon/jobs-sv-c1-readout/`, and rerunning the same command skips finished lines. Each readout refuses to overwrite an existing `--output`.
+- Run it in the clone where C-1 ran (the one used for C-2). The readout rebuilds each model with the λ of its variant, read from `configs/calibration/<scene>-200-u2000~dyadic.yaml`, `~zeroinit.yaml` and `~dyadic~zeroinit.yaml` (9 files written by the C-1 `calibrate` lines, not in git); the cross-version loader compares that configuration with the checkpoint and refuses on any difference. In a fresh clone, copy those 9 files over first.
+- **Section P is optional.** It reads the v7 pilot jobs (`../../results-v7/pilot/<scene>/seed1703/po_jepa_full` and `po_jepa_no_consistency`, trained on the v7 branch before v7.1) as a same-scale reference without the dyadic / zero changes, and the only same-scale no-consistency run we have. If that folder is gone, or its lines fail (for example `跨版本读检查点没通过`), just leave them failed and send the log; R3 is what matters. It is the last section, so a failure there blocks nothing.
+- If an R3 line stops with `跨版本读检查点没通过` or a missing checkpoint, the C-1 selected checkpoint was probably cleaned up; please tell us which variants still have `run/job/training/po_jepa_full/` with its checkpoint file.
+- Time *(est., scaled from the G4 runs: a 2,000-trajectory counterfactual took ~170 s and a rollout ~300 s; here each has 10× fewer test trajectories)*: L1 a few minutes per scene, R1/R2 1–2 minutes each, each R3/P line ~1 minute plus model loading. About 1 GPU-hour in total, well under an hour on two cards. Disk: ~2 GB of new features per scene (20 × 129 frames, float16) under `features-small-validation/`.
+
+Order with the other tasks tonight: **G9 → G10 → G12 → G11 batch 1 (C-3)**. G9 and G10 need no pull if that clone already has them. G12 is cheap and its answer may change how we read C-3 (all C-3 variants are `dyadic-zero`), so run it right after pulling the C-3 merge, before starting the C-3 batch-1 job file (~55 GPU-hours, ~28 hours on two cards) in the same clone; once C-3 batch 1 is running, do not pull again (§1). If C-3 is not merged yet when you get to it, G12 can also run on the `full-model` commit you already have (d5a8fc1 or later): the readout tools and `--cross-version` are unchanged since C-2, and it does not depend on #14 or #15.
+
+Send back (a few MB plus logs):
+
+```bash
+cd $WORK
+python $TOOL pack results-small-validation/c1-readout logs-addon/jobs-sv-c1-readout \
+    full-model/po-jepa-full/jobs-sv-c1-readout.txt nvidia-smi.txt --output c1-readout.pack.sqlite
+```
+
+Do not include `features-small-validation/` in the pack (only the readouts are needed).
 
 ## 9. What to send back
 
