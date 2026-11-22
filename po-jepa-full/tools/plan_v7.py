@@ -22,7 +22,8 @@ S25a 二阶场景（po_jepa.configuration）：状态摘要是画面上看得到
 每 2 tick 一段）。“不动”在二阶场景里不是停住：惯性和振荡照样在走，成功判据照旧是“误差 ≤ 0.5 × 不动时的误差”。
 spring_chain 的目标门槛是 0.03（GOAL_GAP）：弹簧硬（k = 16），8 个 tick 的随机动作只把受控质点推开约 0.04（≈ 2 像素），
 0.15 根本够不着（S25a 实测，docs/segments/S25a.md §3）。
-二阶场景现在按单帧复制（dup）编码（与 encode_v7 一致，特征看不到速度）；两帧（pair）编码在 S25b 接（等 S22 探针结果）。
+二阶场景在这里按单帧复制（dup）编码（与不带 tubelet=pair 的 encode_v7 一致，特征看不到速度）；两帧编码（tubelet=pair）的数据集
+这里先拒绝，目标和重规划画面的在线两帧编码在 S25b 第二段接。
 
 用法（GPU，需要冻结编码器做目标与重规划编码）：
   python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/po_jepa_full \
@@ -188,6 +189,10 @@ def main():
         base.system, base.count, variants.format(base.system, variants.parse(base.system, a.test_variant)))
     for checked in (base, test_spec):
         _refuse_unsupported(checked.knobs, systems.TICKS)
+        if checked.knobs.tubelet == "pair":
+            # S25b 第一段只接了 encode_v7 的两帧缓存；这里的在线编码（目标和重规划画面）还是单帧复制，和两帧特征上训练的
+            # 模型对不上。训练数据集或测试数据集任何一个带 tubelet=pair 都先拒绝（S25b 第二段接，docs/segments/S25b.md §5）
+            raise SystemExit(f"{checked.scene} 是两帧编码（tubelet=pair）的数据集：规划的在线两帧编码还没接（S25b 第二段）")
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":

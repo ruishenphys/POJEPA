@@ -12,7 +12,8 @@ d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
 方块中心 4 个位置坐标的 L2 × 48（不含朝向角），gray_scott 是 U、V 池化场（512 维）的 L2（不是像素，注入点不计入）；
 S25a 二阶场景只比画面上看得到的位置（构形，见 po_jepa.configuration）：pendulum 摆锤 × 80、cart_pole 小车和摆锤 × 36、
 spring_chain 和 bouncing_balls 全部质点/球 × 48，wave 是 u 的 16×16 池化场（256 维）的 L2（不是像素）。
-二阶场景现在按单帧复制（dup）编码，和 encode_v7 一致：特征里看不到速度；两帧（pair）编码在 S25b 接（等 S22 探针结果）。
+二阶场景在这里按单帧复制（dup）编码，和不带 tubelet=pair 的 encode_v7 一致：特征里看不到速度；两帧编码（tubelet=pair）的数据集
+这里先拒绝，反事实终点的在线两帧编码在 S25b 第二段接。
 D_cf 大说明在这个模拟状态下，换动作会让终点特征可以区分（数据里有动作信号）。它不是模型 delta_act 的一般上限：
 D_cf 用完整物理状态续算，模型只看到起点画面；画面推不出完整状态时（例如二阶场景 dup 编码看不到速度，同一画面、同一动作
 可以有不同的未来），模型达不到它。所以 D_cf 大、训练好的模型 delta_act≈1e-6，本身不能断定是训练没学会用动作，
@@ -140,6 +141,10 @@ def main():
     if spec.knobs.changes_space():
         # S24c：探针按单帧重画（systems.draw，不经过相机）；空间采样的探针在第 6 阶段接
         raise SystemExit(f"{spec.scene} 带空间采样调节项：动作探针还没接（S24c 只做数据生成）")
+    if spec.knobs.tubelet == "pair":
+        # S25b 第一段只接了 encode_v7 的两帧缓存；这里的在线编码（反事实终点画面）还是单帧复制，
+        # 和两帧缓存、两帧特征上训练的模型对不上，先拒绝（S25b 第二段接，docs/segments/S25b.md §5）
+        raise SystemExit(f"{spec.scene} 是两帧编码（tubelet=pair）的数据集：动作探针的在线两帧编码还没接（S25b 第二段）")
     if a.fake_encoder:
         encoder = encode_v7._fake_encoder(torch)
     else:

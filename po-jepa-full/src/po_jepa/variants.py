@@ -31,6 +31,11 @@ S24a horizon 不用新的随机流：每个流按 tick 顺序抽，长轨迹只�
 与 horizon=32（其余调节项相同）逐位相同（前缀一致，见 docs/segments/S24a.md §2）。
 S24b 新增流 10 = 帧时间抖动，流 11 = 不在整 tick 上的帧的像素噪声（按帧号另起，见 po_jepa.timing）。
 S24c 新增流 12 = 相机（pan 的方向角）。
+- 编码（S25b）：tubelet = dup（默认，同一帧复制两份，v7 的编码）或 pair（第 t−1、t 帧按时间顺序组成 V-JEPA 2 的 tubelet，
+  特征里带速度）。只改 tools/encode_v7.py 怎样把画面送进冻结编码器，不改物理、动作、画面和任何随机流：同一编号的轨迹
+  在 pair 和 dup 下的状态、画面逐位相同。pair 只用于二阶场景（SECOND_ORDER；S22 探针 2026-11-19：单摆 θ̇ 的 R²
+  pair 0.962、dup 0.003）。它是调节项而不是二阶场景的默认，是因为缓存读取（runtime/cache.py，SHA 被钉住）按调节项字符串
+  核缓存：写成调节项后 pair 与 dup 的特征目录、结果目录自动分开，互相读不到（docs/segments/S25b.md §2）。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -72,6 +77,8 @@ FIELD_SYSTEMS = ("advection_diffusion", "gray_scott", "wave")   # 场方程：�
 SECOND_ORDER = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
 NOT_ODE = ("advection_diffusion", "gray_scott", "push")+SECOND_ORDER   # 不走 System.variant_trajectory 的 RK4（过程噪声）
 NO_SIGMA = ("bouncing_balls",)                                  # S23b：有光点但不是高斯光点（有物理半径的圆盘），sigma 不适用
+# S25b 编码：送进 V-JEPA 2 tubelet（两帧一组）的两帧。dup = 同一帧复制两份；pair = (第 t−1 帧, 第 t 帧)，只用于二阶场景
+TUBELETS = ("dup", "pair")
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,8 @@ class Variant:
     zoom: float = 1.                  # 每个世界单位的像素数相对默认的比例（≤ 1：缩小，画布四周露出 SURROUND）
     pan: float = 0.                   # 相机中心偏离画布中心的距离 / 缩小留出的余量（方向每条轨迹随机，流 12）；要 zoom < 1
     drift: float = 0.                 # 相机中心绕画布中心逆时针转的角速度（rad/s），半径就是 pan 给的偏移；要 pan > 0
+    # S25b 编码（默认值 = v7 的单帧复制）。只改编码时送进 tubelet 的两帧，不改物理、动作、画面和随机流
+    tubelet: str = "dup"              # dup / pair：pair = 第 t−1、t 帧（相隔 1 tick = 0.25 s）组成 tubelet，只用于二阶场景
 
     def param(self, system: str, name: str):
         default = PARAMS[system][name][0]
@@ -235,6 +244,16 @@ def validate(system: str, v: Variant) -> None:
         # S21a 的 goal 策略按“下达动作 ∝ 受控点速度”做开环推算（System.policy_anchor 的 K）；二阶场景的动作是力，
         # 这个推算不成立（wave 的激振源是速度控制，但它和 gray_scott 的注入点一样没有要推到目标的受控点）
         raise ValueError(f"{system} 是二阶场景，动作是力：S21a 的开环朝目标推算不适用，policy 只能是 random")
+    if v.tubelet not in TUBELETS:
+        raise ValueError(f"调节项越界：tubelet ∈ {TUBELETS}")
+    if v.tubelet == "pair":
+        if system not in SECOND_ORDER:
+            # 一阶场景一帧就能看全状态，继续用 v7 的单帧复制（与已有缓存逐位一致）
+            raise ValueError(f"{system} 是一阶场景：tubelet=pair 只用于二阶场景 {SECOND_ORDER}")
+        if v.changes_timing() or v.changes_space():
+            # 时间采样：前一帧固定取 0.25 s（1 tick）前的画面，不取视频流里的上一帧（Jerry 2026-11-22 定），要另画这些帧；
+            # 空间采样要原生分辨率的两帧编码器。两者都在 S25b 第二段接，这里先拒绝，免得编出和这个口径不符的缓存
+            raise ValueError("tubelet=pair 还没接时间采样（fps/jitter/exposure/switch_offset）和空间采样（resolution/zoom/pan/drift）调节项")
     if system == "cart_pole" and v.axes == "y":
         raise ValueError("cart_pole 只受水平推力（u_y 不起作用）：axes=y 等于没有控制")
 
@@ -244,12 +263,18 @@ GENERAL_SAMPLES = {"gain": "2", "axes": "x", "segments": "2", "zero": "0.5", "no
                    "saturation": "0.3", "policy": "goal", "process_noise": "0.1", "sigma": "4", "color": "white",
                    "background": "checker", "distractors": "2", "movers": "2", "occluders": "2", "pixel_noise": "10",
                    "horizon": "128", "fps": "8", "jitter": "0.2", "exposure": "0.5", "switch_offset": "0.5",
-                   "resolution": "384", "zoom": "0.75", "pan": "zoom=0.75,pan=0.5", "drift": "zoom=0.75,pan=0.5,drift=0.25"}
+                   "resolution": "384", "zoom": "0.75", "pan": "zoom=0.75,pan=0.5", "drift": "zoom=0.75,pan=0.5,drift=0.25",
+                   "tubelet": "pair"}
 KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", "saturation"), "数据采集": ("policy",),
                "物理": ("process_noise",),
                "观察": ("sigma", "color", "background", "distractors", "movers", "occluders", "pixel_noise"),
                "时间": ("horizon", "fps", "jitter", "exposure", "switch_offset"),
-               "空间": ("resolution", "zoom", "pan", "drift")}
+               "空间": ("resolution", "zoom", "pan", "drift"), "编码": ("tubelet",)}
+
+
+def tubelet_label(system: str, v: Variant):
+    """报告里的 tubelet 字段：二阶场景写 dup / pair（特征里有没有速度），一阶场景写 None（一帧就能看全状态）。"""
+    return v.tubelet if system in SECOND_ORDER else None
 
 
 def coverage() -> dict:
