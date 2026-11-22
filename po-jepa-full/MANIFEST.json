@@ -123,7 +123,7 @@
     "tests/test_addon_encoder_identity.py": "c45342ac0c763896e910cf9806213e1aff90ea6862336eb7cda3652c9f2e5b92",
     "tests/test_addon_entry.py": "1cf428d0a31122334e1d2caa2766f92f80a73c38d456945954a11fe78dc27e35",
     "tests/test_addon_eval_cli.py": "c0fd9133ee7e89690bbb9046cdbaa36d547efac6df172c0697f4771e08dc7a96",
-    "tests/test_addon_fourier.py": "37f3518c130dbaecd50c800ec2eff7c907333c6aa33d39ddbaa8501c33f3b76d",
+    "tests/test_addon_fourier.py": "67e030c6a00e3c1941c9fefea1b27487dea4d762ecb60b01a616b5d7f1678237",
     "tests/test_addon_generic_consistency.py": "bae64ac4c32b91cd09d997e53c3c54a8e4c79b311984c6ad5e952e3a1da1a37e",
     "tests/test_addon_import.py": "1da0f55fcb08e2b655372fb15ae1a176fc3b012cd5b5d49e1634503d00e4b0a2",
     "tests/test_addon_jobs.py": "1b8529f0d9d53d4d3fb62e0a50b63dc75951576c51726ebdb6adb10135a7819e",
