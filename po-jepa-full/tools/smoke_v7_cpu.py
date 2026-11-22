@@ -69,6 +69,7 @@ def main():
         for condition in a.jobs.split(","):
             v7jobs.run_job(a.features_root, a.output/"jobs"/condition, device, condition)
             if a.transfer:
+                workflow.refuse_tubelet_test_variant(a.transfer[0])     # S25b：与正式入口（workflow）相同的拒绝
                 v7jobs.transfer_job(Path(a.transfer[1]), a.output/"jobs"/f"{condition}-transfer", device, condition,
                                     training_run=None if condition == "identity" else a.output/"jobs"/condition,
                                     test_variant=a.transfer[0])

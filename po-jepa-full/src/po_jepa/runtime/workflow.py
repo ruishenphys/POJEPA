@@ -27,6 +27,11 @@ def read(path):
     return json.loads(Path(path).read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=invalid)
 
 
+def refuse_tubelet_test_variant(test_variant: str) -> None:
+    """S25b：transfer 的 --test-variant 不能写 tubelet（写 dup、pair 都不行），测试集沿用训练数据集的。"""
+    if any(item.split('=',1)[0].strip()=='tubelet' for item in test_variant.split(',')):
+        raise ValueError('--test-variant 不能写 tubelet：测试集沿用训练数据集的 tubelet（两帧和单帧复制的特征不能跨着评测）')
+
 def verify_bundle():
     """核本包源码/配置/公式清单，不依赖开发仓库或旧验收记录。"""
     manifest=read(ROOT/'MANIFEST.json')
@@ -432,6 +437,9 @@ def execute(args):
             from . import v7jobs
             if not getattr(args,'condition',None) or not getattr(args,'test_variant',None):
                 raise ValueError('transfer 需要 --condition 和 --test-variant')
+            # S25b（Codex 审核 F1）：测试集沿用训练数据集的 tubelet。transfer_job 把 --test-variant 并到训练调节项上、同名以测试为准，
+            # 写 tubelet=… 就能让两帧特征上训练的模型读单帧复制的测试缓存（或反过来）。v7jobs.py 在训练的源码身份里，所以拦在这里。
+            refuse_tubelet_test_variant(args.test_variant)
             stage='transfer'
             report=v7jobs.transfer_job(Path(args.features_root),output/'job',device,args.condition,
                 training_run=args.training_run,test_variant=args.test_variant)

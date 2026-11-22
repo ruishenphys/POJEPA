@@ -7,7 +7,7 @@ comparison.POJEPA 模型），只接线性场景（advection_diffusion、spring_
   python tools/modal_spectrum.py --job ../results-v8/full/advection_diffusion/seed1703/po_jepa_full \\
       --features ../features-v8/advection_diffusion-2000 --output ../results-v8/full/modal/advection_diffusion/seed1703/po_jepa_full.json \\
       --device cuda:0
-二阶场景（spring_chain、wave）现在按单帧复制（dup）编码，特征里看不到速度：对照要等 S25b 的 pair 编码后重跑才有意义。
+二阶场景（spring_chain、wave）不带 tubelet=pair 时按单帧复制（dup）编码，特征里看不到速度：对照要在两帧编码（tubelet=pair，S25b）的任务上跑才有意义；报告的 tubelet 字段照实写。
 """
 import argparse
 import hashlib
@@ -98,7 +98,7 @@ def main(argv=None):
             z = torch.from_numpy(np.array(raw[start:start+1], dtype=np.float32)).to(device)
             reference.append(modal_spectrum.learned_blocks(fresh, z, cache.regular_grid(16, 16)))
     report = dict(kind="modal_spectrum", dataset=spec.tag, condition=job["condition"], seed=job["seed"], updates=job["updates"],
-                  job_dir=str(job_dir), tubelet="dup" if spec.system in variants.SECOND_ORDER else None,
+                  job_dir=str(job_dir), tubelet=variants.tubelet_label(spec.system, spec.knobs),
                   best=None if selected is None else dict(step=selected["step"], checkpoint_sha256=selected.get("checkpoint_sha256")),
                   **identity_fields,
                   cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]), starts=rows,

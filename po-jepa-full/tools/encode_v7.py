@@ -24,6 +24,14 @@ S25e 空间采样测试集（--variant 带 resolution/zoom/pan/drift）：也只
 （po_jepa.native_encoder：预处理输出边长 R、编码器输入 [B,3,R,R]，不缩放回 256），特征 [33,(R/16)²,1408]，manifest 的 grid 是
 [R/16,R/16]、多一个 space 记录，预处理记录和摘要是原生分辨率版（runtime/space_cache.py），所以 cache.read_window 不收。
 
+S25b 两帧编码（--variant 带 tubelet=pair，只用于二阶场景）：每个 tick t 的特征由 (第 t−1 帧, 第 t 帧) 按时间顺序组成的 tubelet
+编码（dup 是同一帧复制两份），特征里带速度。画面取 systems.SecondOrderSystem.frames_with_prev（多 t = −1 一帧：初值，零动作
+预跑一个 tick 到 t = 0），每帧照 v3 规则单独预处理（同一条轨迹重置同一个 generator，所以两帧的裁剪相同），编码器是 S22 探针
+用的 tubelet_probe.FrozenClipEncoder（同一个冻结编码器；两帧相同时与 dup 逐元素相同）。缓存格式不变（[帧数,256,1408]、
+states.npy、frames 逐帧来源都与 dup 相同），manifest 多一个 tubelet 记录；物理、动作、画面和随机流与不带 tubelet=pair 时
+逐位相同。长时程（horizon=64/128）照样分批：第 k 批是第 33k…33k+32 个 tubelet，前 33 个与主实验缓存同一批。
+时间采样、空间采样加 tubelet=pair 还没接（variants.validate 拒绝，docs/segments/S25b.md §5）。
+
 S25-fix3：每条 manifest 的 generation.encode_batch 记 --batch，finalize 的 report.json 汇总（encode_batches）。
 
 中途断了直接重跑同一条命令：已完成（有 COMPLETE.json）的轨迹会跳过，未完成的残留会被清掉重做。
@@ -67,7 +75,7 @@ def main():
     sys.path.insert(0, str(ROOT/"src"))
     import numpy as np
     import torch
-    from po_jepa import datasets, simulation, systems, timing, vjepa
+    from po_jepa import datasets, simulation, systems, timing, variants, vjepa
     from po_jepa.runtime import cache, space_cache
 
     spec = datasets.active()
@@ -90,10 +98,13 @@ def main():
         # S25e：空间采样测试集只用来评测（tools/space_eval.py），只编码测试段；模型在 256、相机不动的基础场景上训练
         raise SystemExit(f"{spec.scene} 带空间采样调节项：只能 --splits test（只用来评测，见 tools/space_eval.py）")
     resolution = spec.knobs.resolution
+    paired = spec.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景、不带时间/空间采样）
     out = args.output.resolve()
 
     if args.mode == "finalize":
-        return finalize(out, spec, cache, _splits(args.splits))
+        return finalize(out, spec, cache, _splits(args.splits), variants)
+    if paired:
+        from po_jepa import tubelet_probe
 
     if args.batch < 1:
         raise SystemExit(f"--batch 必须是正整数：{args.batch}")
@@ -111,7 +122,8 @@ def main():
 
     if args.fake_encoder:
         from po_jepa import native_encoder
-        encoder = native_encoder.fake_encoder() if spaced else _fake_encoder(torch)
+        encoder = (native_encoder.fake_encoder() if spaced else
+                   tubelet_probe.fake_tubelet_encoder() if paired else _fake_encoder(torch))
         load_report, role = dict(sha256=None, encoder_key=None, strict=None,
                                    missing_keys=[], unexpected_keys=[]), "synthetic_development_only"
     else:
@@ -127,6 +139,9 @@ def main():
             from po_jepa import native_encoder
             frozen = native_encoder.NativeFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
                                                        autocast_dtype=None, resolution=resolution)
+        elif paired:   # S25b：同一个冻结编码器，输入换成两张预处理图组成的 tubelet（S22 探针用的、测过的那个类）
+            frozen = tubelet_probe.FrozenClipEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
+                                                     autocast_dtype=None)
         else:
             frozen = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
                                               autocast_dtype=None)
@@ -140,7 +155,8 @@ def main():
     generator_sources = {name: cache.file_sha(ROOT/name) for name in
                          ("src/po_jepa/simulation.py", "src/po_jepa/systems.py", "src/po_jepa/new_systems.py", "src/po_jepa/second_order.py", "src/po_jepa/variants.py", "src/po_jepa/vjepa.py",
                           "src/po_jepa/datasets.py", "tools/encode_v7.py")+(("src/po_jepa/timing.py",) if timed else ())
-                         +(("src/po_jepa/timing.py", "src/po_jepa/camera.py", "src/po_jepa/native_encoder.py") if spaced else ())}
+                         +(("src/po_jepa/timing.py", "src/po_jepa/camera.py", "src/po_jepa/native_encoder.py") if spaced else ())
+                         +(("src/po_jepa/tubelet_probe.py",) if paired else ())}
     environment = dict(python=sys.version.split()[0], torch=torch.__version__, cuda_runtime=torch.version.cuda,
                        numpy=np.__version__, platform=platform.platform(), encoder_device=str(device),
                        device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
@@ -154,15 +170,25 @@ def main():
         if folder.exists():
             shutil.rmtree(folder)       # 上次中断留下的半成品
         folder.mkdir()
-        states, frames = system.frames(tid)
+        if paired:
+            # S25b：多 t = −1 一帧在最前（下标 f = tick f−1）；送编码器的是全部帧，存下来的状态和逐帧来源只记 tick 0…H（同 dup）
+            states, clip_frames = system.frames_with_prev(tid)
+            if clip_frames.shape[0] != frames_per_trajectory+1 or states.shape[0] != frames_per_trajectory+1:
+                raise ValueError(f"trajectory {tid}: {clip_frames.shape[0]} frames with prev, expected {frames_per_trajectory+1}")
+            states, frames = states[1:], clip_frames[1:]
+        else:
+            states, frames = system.frames(tid)
+            clip_frames = frames
         if frames.shape[0] != frames_per_trajectory:
             raise ValueError(f"trajectory {tid}: {frames.shape[0]} frames, expected {frames_per_trajectory}")
         # S25d：每帧的实际时刻（tick）；不带时间采样时就是 0…H
         ticks = timing.frame_times(tid) if timed else np.arange(frames_per_trajectory, dtype=np.float64)
         if spaced and frames.shape[1:] != (resolution, resolution, 3):
             raise ValueError(f"trajectory {tid}: frames {frames.shape[1:]}, expected {resolution}x{resolution}")
-        raw = _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None,
-                                 resolution if spaced else None)
+        raw = _encode_trajectory(encoder, clip_frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None,
+                                 resolution if spaced else None, pair=paired)
+        if raw.shape[0] != frames_per_trajectory:
+            raise ValueError(f"trajectory {tid}: {raw.shape[0]} encoded frames, expected {frames_per_trajectory}")
         stored = raw.astype(dtype)
         if not np.isfinite(stored).all():
             raise ValueError(f"trajectory {tid}: features overflow {args.dtype}")
@@ -187,6 +213,7 @@ def main():
             **({"timing": dict(fps=spec.knobs.fps, jitter=spec.knobs.jitter, exposure=spec.knobs.exposure,
                                switch_offset=spec.knobs.switch_offset)} if timed else {}),
             **({"space": space_cache.space_record(spec)} if spaced else {}),
+            **({"tubelet": variants.tubelet_record(hashlib.sha256(clip_frames[0].tobytes()).hexdigest())} if paired else {}),
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,
@@ -218,13 +245,23 @@ def _controls_record(controls, systems):
                 values=controls.values.tolist(), units="simulation_position_per_second")
 
 
-def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None, resolution=None):
+def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None, resolution=None, pair=False):
     """按 v3 规则：每帧前把同一条轨迹的预处理 generator 重置到同一初始状态，再单帧预处理并编码。
     ticks：每帧的时刻（tick，S25d 时间采样时不是 0…L−1）；编码器只把它当元数据（vjepa._encode 不用它算特征）。
-    resolution：S25e 空间采样时的原生分辨率 R（预处理输出 R×R，native_encoder.preprocess_native）；None = v7 的 256。"""
+    resolution：S25e 空间采样时的原生分辨率 R（预处理输出 R×R，native_encoder.preprocess_native）；None = v7 的 256。
+    pair（S25b）：frames 是 L+1 帧（按时间顺序，相邻两帧相隔 1 tick），第 k 个输出 = tubelet(第 k 帧, 第 k+1 帧)，
+    k = 0…L−1，返回 [L,256,1408]；encoder 是 tubelet_probe.FrozenClipEncoder（fake 时是 fake_tubelet_encoder）。
+    分批按 tubelet 计：第 s…s+batch−1 个 tubelet 一批。"""
     rgb = torch.from_numpy(frames)
+    if pair:
+        if ticks is not None or resolution is not None:
+            raise ValueError("两帧编码没接时间采样和空间采样")
+        if rgb.shape[0] < 2:
+            raise ValueError("两帧编码至少要 2 帧（前一帧在最前）")
     if fake:
         x = rgb.permute(0, 3, 1, 2).float()/255.
+        if pair:
+            return encoder(torch.stack((x[:-1], x[1:]), 2)).numpy().astype(np.float64)
         return encoder(x).numpy().astype(np.float64)
     from po_jepa import vjepa
     seed = simulation.preprocess_seed(tid)
@@ -238,6 +275,11 @@ def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch
             pre.append(native_encoder.preprocess_native(rgb[t:t+1], resolution=resolution, spec=cache.preprocess_spec(), generator=g))
     pre = torch.cat(pre)
     out = []
+    if pair:
+        for s in range(0, pre.shape[0]-1, batch):
+            e = min(s+batch, pre.shape[0]-1)
+            out.append(encoder.encode_clip(pre[s:e], pre[s+1:e+1]).cpu().double())
+        return torch.cat(out).numpy()
     for s in range(0, pre.shape[0], batch):
         chunk = pre[s:s+batch]
         times = (torch.arange(s, s+chunk.shape[0], dtype=torch.float64) if ticks is None
@@ -264,7 +306,9 @@ def _splits(text):
     return names
 
 
-def finalize(out, spec, cache, splits=("train", "validation", "test")):
+def finalize(out, spec, cache, splits=("train", "validation", "test"), variants=None):
+    if variants is None:
+        from po_jepa import variants
     records, missing = [], []
     for tid in (t for t in range(spec.count) if spec.split_for(t) in splits):
         folder = out/f"{tid:04d}"
@@ -276,6 +320,11 @@ def finalize(out, spec, cache, splits=("train", "validation", "test")):
         m = json.loads((folder/"manifest.json").read_bytes())
         if m["system"] != spec.system or m["dataset_count"] != spec.count or m.get("variant", "") != spec.variant:
             raise ValueError(f"trajectory {tid}: encoded for {m['system']}-{m['dataset_count']}")
+        # S25b：manifest 的 tubelet 记录要和数据集的调节项一致（tubelet=pair ⇔ 有记录，且记录逐项等于编码定义）
+        try:
+            variants.check_tubelet_record(m, spec.knobs)
+        except ValueError as error:
+            raise ValueError(f"trajectory {tid}: tubelet 记录与数据集 {spec.tag} 不一致：{error}") from None
         records.append(dict(trajectory_id=tid, split=m["split"], manifest_sha256=complete["manifest_sha256"],
                             evidence_role=m["generation"]["evidence_role"],
                             max_abs=m["feature_stats"]["max_abs"],
@@ -293,7 +342,8 @@ def finalize(out, spec, cache, splits=("train", "validation", "test")):
                   **({"variant": spec.variant} if spec.variant else {}),
                   splits=dict(train=spec.train, validation=spec.validation, test=spec.test),
                   **({"splits_encoded": list(splits)} if tuple(splits) != ("train", "validation", "test") else {}),
-                  evidence_roles=sorted(roles), **batch_record, records=records,
+                  evidence_roles=sorted(roles), **batch_record, **({"tubelet": "pair"} if spec.knobs.tubelet == "pair" else {}),
+                  records=records,
                   max_abs=max(r["max_abs"] for r in records),
                   max_relative_rounding_error=max(r["relative_rounding_error"] for r in records))
     for name in ("report.json", "COMPLETE.json"):

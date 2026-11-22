@@ -19,7 +19,7 @@
   python tools/state_readout.py counterfactual --job ../results-v8/full/double_well/seed1703/po_jepa_full \\
       --probe ../results-v8/full/readout/probe/double_well --truth ../results-v8/full/readout/truth/double_well.json \\
       --features ../features-v8/double_well-2000 --output ../results-v8/full/readout/counterfactual/double_well/seed1703/po_jepa_full.json
-二阶场景现在按单帧复制（dup）编码（特征看不到速度，S25b 接 pair 编码），只读位置，报告写 tubelet: dup。
+二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。只读位置（两帧编码下读速度在 S25b 第二段接）。
 """
 import argparse
 from dataclasses import replace
@@ -125,7 +125,7 @@ def cmd_fit(a):
     meta = state_readout.save(probe, a.output, dict(
         dataset=spec.tag, system=spec.system, variant=spec.variant, split="validation", units=state_readout.units(spec.system),
         trajectories=ids, cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]),
-        tubelet="dup" if spec.system in variants.SECOND_ORDER else None, seconds=round(time.perf_counter()-started, 1),
+        tubelet=variants.tubelet_label(spec.system, spec.knobs), seconds=round(time.perf_counter()-started, 1),
         scientific_conclusions_verified=False))
     print(f"{spec.tag} 探针（{a.kind}）：{record['samples']} 个样本，交叉验证 R² {record['cv_r2']:.4f}"
           f"（λ = 10^{record['lambda_exponent']:g}·trace/n{'，在网格边上' if record['lambda_at_grid_edge'] else ''}）→ {a.output}")
@@ -181,7 +181,7 @@ def cmd_truth(a):
                   units=state_readout.units(base.system), cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]),
                   long_cache_identity=dict(encode_report_sha256=long_approved["encode_report_sha256"]),
                   counterfactual=counterfactual, long=long, seconds=round(time.perf_counter()-started, 1),
-                  tubelet="dup" if base.system in variants.SECOND_ORDER else None)
+                  tubelet=variants.tubelet_label(base.system, base.knobs))
     _write(a.output, report)
     print(f"{base.tag} 真值：反事实 {len(counterfactual)} 个窗口，长时程 {len(long)} 条 → {a.output}")
     return report
@@ -245,7 +245,7 @@ def _report(kind, a, job_dir, job, base, probe_meta, truth, selected, registrati
     from po_jepa import variants
     return dict(kind=kind, train_dataset=base.tag, condition=job["condition"], seed=job["seed"], updates=job["updates"],
                 job_dir=str(job_dir), units=truth["units"],
-                tubelet="dup" if base.system in variants.SECOND_ORDER else None,
+                tubelet=variants.tubelet_label(base.system, base.knobs),
                 best=None if selected is None else dict(step=selected["step"], checkpoint_sha256=selected.get("checkpoint_sha256")),
                 **_registration_fields(registration),
                 probe=dict(path=str(a.probe), kind=probe_meta["fit"]["kind"], weight_sha256=probe_meta["weight_sha256"],

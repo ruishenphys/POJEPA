@@ -11,7 +11,7 @@
       --output ../features-v8/double_well~horizon=128-2000
   python tools/long_rollout.py --job ../results-v8/full/double_well/seed1703/po_jepa_full \\
       --features ../features-v8/double_well~horizon=128-2000 --output ../results-v8/full/long/double_well/seed1703/po_jepa_full.json --device cuda:0
-二阶场景现在按单帧复制（dup）编码（特征看不到速度，S25b 接 pair 编码），报告写 tubelet: dup。
+二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。
 """
 import argparse
 import hashlib
@@ -69,7 +69,7 @@ def main(argv=None):
         datasets._set_for_tests(old)
     report = dict(kind="long_rollout", dataset=long_spec.tag, train_dataset=base.tag, condition=condition, seed=job["seed"],
                   updates=job["updates"], horizon=a.horizon, job_dir=str(job_dir),
-                  tubelet="dup" if base.system in variants.SECOND_ORDER else None,
+                  tubelet=variants.tubelet_label(base.system, base.knobs),
                   best=None if selected is None else dict(step=selected["step"], checkpoint_sha256=selected.get("checkpoint_sha256")),
                   registration_sha256=hashlib.sha256(cache._json_bytes(registration)).hexdigest(),
                   cache_identity=dict(encode_report_sha256=identity["encode_report_sha256"]),

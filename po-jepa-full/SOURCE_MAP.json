@@ -387,9 +387,9 @@
       "sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
       "source_commit": "8b0d68563f6c2677bf2ff73faa65b74820a1ed4f",
       "operation": "v4_modified",
-      "candidate_sha256": "17e734cbe8c213772d5311653c190c83c406994737aa6761fad980addf6745a5",
+      "candidate_sha256": "b91fe185c030411e8cc3fa67a3a3436fdaac7ee8c913c6178bf3a0e0527ed9b1",
       "comment_cleanup_baseline_sha256": "47c72b003945af5282a9011567f8b8e9aa42f04a7764c357f3124f8ffc7a9f81",
-      "executable_ast_sha256": "d02f0c6351f08ef803b473e6a6b760716500abaf0fc89f478ef2f0831e070c6a",
+      "executable_ast_sha256": "7b392e270509739b3ae2e5ee41974ae183de1e11a0956e29e16e3cead591715f",
       "prior_operation": "existing_v3_runtime",
       "v4_previous_candidate_sha256": "4ebdda70a82b8a8bf63d6a7d0d1d1c8165040f89ec5a4e11516b63a059783418",
       "v7_previous_candidate_sha256": "0f28f0bd0fb535dc8231e8ae5ac0c12fd9bf8500f4c31d27f4e6659ab1b059df"
