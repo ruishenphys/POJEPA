@@ -462,12 +462,7 @@ def test_transfer_inherits_tubelet_and_refuses_overrides(tmp_path, active, monke
     assert seen["variant"] == "gain=2,tubelet=pair"
 
 
-def test_noise_floor_tool_refuses_pair_dataset(tmp_path):
-    """Codex 审核 F2：ac_context_check floor 的重编码是单帧复制，pair 数据集先拒绝（在读缓存和建编码器之前）。"""
-    r = _tool("ac_context_check.py", "floor", "--system", "pendulum", "--trajectories", "40", "--variant", "tubelet=pair",
-              "--features", str(tmp_path), "--upstream-root", str(tmp_path), "--checkpoint", str(tmp_path/"x.pt"),
-              "--device", "cpu", "--count", "1", "--output", str(tmp_path/"floor.json"))
-    assert r.returncode != 0 and "tubelet=pair" in r.stderr and "单帧复制" in r.stderr and not (tmp_path/"floor.json").exists()
+# ac_context_check floor 对 pair 数据集的拒绝（Codex 审核 F2）已由 S25b 第二段的两帧重编码取代：tests/test_s25b2_online_pair.py
 
 
 def _rewrite_manifest(folder, change):
@@ -504,12 +499,4 @@ def test_encode_refuses_pair_for_first_order_scene(tmp_path):
     assert r.returncode != 0 and "一阶场景" in r.stderr and not (tmp_path/"x").exists()
 
 
-# —— 在线编码的工具：两帧数据集先拒绝（第二段接） ——
-
-def test_probe_and_plan_refuse_pair_datasets(tmp_path):
-    r = _tool("probe_actions.py", "--system", "pendulum", "--trajectories", "40", "--variant", "tubelet=pair",
-              "--output", str(tmp_path/"p.json"), "--device", "cpu", "--fake-encoder", "--max-trajectories", "1")
-    assert r.returncode != 0 and "tubelet=pair" in r.stderr and "还没接" in r.stderr and not (tmp_path/"p.json").exists()
-    text = (ROOT/"tools/plan_v7.py").read_text(encoding="utf-8")
-    guard = text.index('if checked.knobs.tubelet == "pair":')
-    assert text.index("for checked in (base, test_spec):") < guard < text.index("comparison.build_condition(condition, device)")
+# 在线编码的工具（probe_actions、plan_v7）：第二段已接两帧编码，测试在 tests/test_s25b2_online_pair.py
