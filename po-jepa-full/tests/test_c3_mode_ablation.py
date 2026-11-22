@@ -660,3 +660,91 @@ def test_c3_h1_needs_only_one_lossless_variant(tmp_path):
     assert h["pass_"] is True and all(x["minus_k16"]["Kfull"] == pytest.approx(0.) for x in h["scenes"])
     values.update({(sc, "K16c"): dict(f16=1.40) for sc in SCENES})   # 只高 2.5 pp
     assert summary_tool.c3_summary(*c3_tree(tmp_path/"b", values=values))["hypotheses"]["H1"]["pass_"] is False
+
+
+# ---------- Codex C3 审核的反例（P2-1 缺失格、P2-2 时长、P2-3 查询可比性）----------
+
+def test_c3_missing_cells_make_h5_and_h1_unknown(tmp_path):
+    """P2-1：只有第一批时 H5 是未知（不是“通过”）；一个候选不达标、另一个缺失时 H1 是未知；整个变体无效时 H5 也是未知。"""
+    root, c2 = c3_tree(tmp_path, batches=(1,))
+    h = summary_tool.c3_summary(root, c2)["hypotheses"]
+    assert h["H5"]["pass_"] is None and len(h["H5"]["rows"]) == len(summary_tool.C3_SPACE)*len(SCENES)
+    # K16c 只比 K16 好 1 pp（1.43 对 1.45），Kfull 整个缺失：不能判“不通过”
+    root, c2 = c3_tree(tmp_path/"b", values={(sc, "K16c"): dict(f16=1.43) for sc in SCENES})
+    import shutil
+    shutil.rmtree(root/"dyadic-zero-Kfull")
+    h = summary_tool.c3_summary(root, c2)["hypotheses"]
+    assert h["H1"]["pass_"] is None and all(x["pass_"] is None for x in h["H1"]["scenes"])
+    # 两个候选都已知且都不达标才是“不通过”
+    root, c2 = c3_tree(tmp_path/"c", values={(sc, v): dict(f16=1.43) for sc in SCENES for v in ("K16c", "Kfull")})
+    assert summary_tool.c3_summary(root, c2)["hypotheses"]["H1"]["pass_"] is False
+    # 整个 K64c 无效（变体记录写错）：H5 未知，不是只看剩下的格
+    root, c2 = c3_tree(tmp_path/"d")
+    for sc in SCENES:
+        job = root/"dyadic-zero-K64c"/sc/"seed1703"/"po_jepa_full"/"run"/"job"/"job.json"
+        data = json.loads(job.read_text(encoding="utf-8"))
+        data["variant"] = dict(DYZ, modes="64")
+        job.write_text(json.dumps(data), encoding="utf-8")
+    s = summary_tool.c3_summary(root, c2)
+    assert len(s["invalid"]) == 3 and s["hypotheses"]["H5"]["pass_"] is None
+
+
+def test_c3_direct_summary_uses_only_the_four_prespecified_durations(tmp_path):
+    """P2-2：16×16 的汇总只取 T = 1, 2, 4, 8 四个时长的“比 identity 好”的均值；T = 3、12 再差也不影响 H5。"""
+    values = {(sc, "K16c"): dict(bump=.982) for sc in SCENES}           # T=3、12 的距离 1.3+0.982 ≈ identity 的 2+0.3
+    s = summary_tool.c3_summary(*c3_tree(tmp_path, values=values))
+    row = s["scenes"]["advection_diffusion"]["rows"]["K16c"]
+    assert row["direct16"] == pytest.approx(sum(row["direct"].values())/4) == pytest.approx(1-1.3/2)
+    k16 = s["scenes"]["advection_diffusion"]["rows"]["K16"]["direct16"]
+    assert k16 == pytest.approx(1-1.45/2)
+    cell = next(x for x in s["hypotheses"]["H5"]["rows"] if x["variant"] == "K16c" and x["scene"] == "advection_diffusion")
+    assert cell["checks"]["direct16"]["ok"] is True
+
+
+def test_c3_inconsistent_queries_block_every_comparison(tmp_path):
+    """P2-3：Kfull 的登记和结果一起少一个难样本（任务内部仍完整）时，这个场景不可比，H2、H6 不下结论，不取交集。"""
+    values = {(sc, v): dict(spread=.8) for sc in SCENES for v in ("K16c", "Kfull", "K32c", "K64c")}
+    root, c2 = c3_tree(tmp_path, values=values)
+    for sc in SCENES:
+        evaluation = root/"dyadic-zero-Kfull"/sc/"seed1703"/"po_jepa_full"/"run"/"job"/"evaluation"/"po_jepa_full"
+        reg = json.loads((evaluation/"registration.json").read_text(encoding="utf-8"))
+        drop = lambda q: q["kind"] == "point" and q["trajectory_id"] == 1 and q["duration_cycles"] == 8. and q["grid_size"] == 16
+        reg["queries"] = [q for q in reg["queries"] if not drop(q)]
+        (evaluation/"registration.json").write_text(json.dumps(reg), encoding="utf-8")
+        for f in (evaluation/"rows").glob("*.json"):
+            if drop(json.loads(f.read_text(encoding="utf-8"))["query"]):
+                f.unlink()
+    s = summary_tool.c3_summary(root, c2)
+    assert not s["invalid"] and all(not x["comparable"] and not x["rows"] for x in s["scenes"].values())
+    assert any("不可比" in p for p in s["problems"])
+    h = s["hypotheses"]
+    assert h["H2"]["verdict"] is None and h["H6"]["pass_"] is None and h["H1"]["pass_"] is None and h["H5"]["pass_"] is None
+
+
+def test_a_perp_gradient_is_isolated_from_the_modal_path():
+    """Codex C3 P3-4：关掉 B、F、C（状态只有 R、只看自由项 A R），用分辨旋转的线性读出：gamma_head、omega_head 都有梯度，
+    且和直接用条件网络在 lambda_perp 处算的 A(lambda_perp, g) 得到的梯度相同；R 行系数 detach 后梯度为零（测试本身能分辨）。"""
+    model = make_model(complement="shared")
+    q = model.prepare_query(make_z(2), GRID)
+    dyn, K = model.dynamics, q.spectrum.basis.shape[2]
+    torch.manual_seed(7)
+    state = torch.cat((torch.zeros(2, K, 64), torch.randn(2, N, 64)), dim=1)
+    weight = torch.randn(2, N, 64)
+
+    def grads(a_blocks):
+        model.zero_grad()
+        loss = (weight*dyn.free_rhs(state, a_blocks)[:, K:]).sum()
+        if not loss.requires_grad:
+            return 0., 0.
+        loss.backward(retain_graph=True)
+        return (dyn.gamma_head.weight.grad.clone() if dyn.gamma_head.weight.grad is not None else torch.zeros(1),
+                dyn.omega_head.weight.grad.clone() if dyn.omega_head.weight.grad is not None else torch.zeros(1))
+
+    g_model, w_model = grads(q.dynamics.coefficients.a_blocks)
+    assert g_model.abs().sum() > 0 and w_model.abs().sum() > 0
+    reference = dyn._condition_free(q.dynamics.complement_eigenvalue.unsqueeze(1), q.dynamics.pooled).a_blocks
+    g_ref, w_ref = grads(torch.cat((q.dynamics.coefficients.a_blocks[:, :K], reference.expand(-1, N, -1, -1, -1)), dim=1))
+    assert torch.allclose(g_model, g_ref, rtol=1e-5, atol=1e-6) and torch.allclose(w_model, w_ref, rtol=1e-5, atol=1e-6)
+    blocks = q.dynamics.coefficients.a_blocks
+    g_cut, w_cut = grads(torch.cat((blocks[:, :K], blocks[:, K:].detach()), dim=1))
+    assert float(torch.as_tensor(g_cut).abs().sum()) == 0. and float(torch.as_tensor(w_cut).abs().sum()) == 0.

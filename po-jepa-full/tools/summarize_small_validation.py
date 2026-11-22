@@ -654,6 +654,8 @@ def c3_summary(root, c2_root, readout=True) -> dict:
             if bad:
                 invalid.append(dict(scene=s, condition=f"C-2 {c}", folder=str(folder), reasons=bad)); continue
             old[label] = j
+        # Codex C3 P2-3：本次各条件（含 identity）登记的评测查询必须相同才可比；不同就整个场景不进任何判定（不取交集，不改预登记范围）
+        comparable = len({frozenset(j["expected_keys"]) for j in jobs.values()}) <= 1
         gate = identity_check(jobs.get("identity"), old.get("identity"))
         if gate.get("reason"):
             gate["reason"] = gate["reason"].replace("v7.1", "C-2")
@@ -663,18 +665,21 @@ def c3_summary(root, c2_root, readout=True) -> dict:
         table = {k: j for k, j in jobs.items() if k != "identity"}
         if gate["identical"]:
             table.update({k: j for k, j in old.items() if k != "identity"})
-        elif len({frozenset(j["expected_keys"]) for j in jobs.values()}) > 1:
-            problems.append(f"{s}：本次各条件登记的评测查询不同")
+        if not comparable:
+            problems.append(f"{s}：本次各条件登记的评测查询不同，这个场景不可比，不进任何判定")
+            table = {}
         rows = {}
         for label, j in table.items():
             m = metrics(j)
-            rows[label] = dict(direct={f"{t:g}": _gain(j, identity, 16, t) if identity else None for t in C3_TIMES},
-                               direct16=_gain(j, identity, 16) if identity else None,
+            direct = {f"{t:g}": _gain(j, identity, 16, t) if identity else None for t in C3_TIMES}
+            # Codex C3 P2-2：16×16 直接预测的汇总只取预定的 T = 1, 2, 4, 8，四个时长各自的“比 identity 好”取算术平均（不混入 T = 3、12）
+            known = [g for g in direct.values() if g is not None]
+            rows[label] = dict(direct=direct, direct16=sum(known)/len(known) if len(known) == len(C3_TIMES) else None,
                                grid12=_gain(j, identity, 12) if identity else None, grid8=_gain(j, identity, 8) if identity else None,
                                rollout12=m["rollout16@12"], finite=m["finite"], completed_updates=m["completed_updates"],
                                stopped_early=m["stopped_early"], checkpoint_sha256=_selected_sha(j),
                                source="C-2" if label in C2_REFERENCE else "C-3")
-        scenes[s] = dict(identity_gate=gate, rows=rows)
+        scenes[s] = dict(identity_gate=gate, comparable=comparable, rows=rows)
     problems += [f"{x['scene']}/{x['condition']}（{x['folder']}）无效，不进判定：{'；'.join(x['reasons'])}" for x in invalid]
     invalid_keys = {(x["scene"], x["condition"]) for x in invalid}
     missing = [dict(scene=s, variant=v, condition=c) for s in SCENES for v, cs in C3_CONDITIONS.items() for c in cs
@@ -703,9 +708,10 @@ def c3_hypotheses(scenes) -> dict:
         base = _get(scenes, s, "K16", "direct", "8")
         gains = {v: _get(scenes, s, v, "direct", "8") for v in C3_LOSSLESS}
         diff = {v: None if g is None or base is None else g-base for v, g in gains.items()}
-        known = [d for d in diff.values() if d is not None]
+        # Codex C3 P2-1：三值“或”——任一已知候选达标就通过；两个都已知且都不达标才不通过；其余（有缺）是未知
+        hits = [None if d is None else d >= r["h1_gain"] for d in diff.values()]
         h1.append(dict(scene=s, k16=base, gains=gains, minus_k16=diff,
-                       pass_=None if not known else max(known) >= r["h1_gain"]))
+                       pass_=True if True in hits else (None if None in hits else False)))
     out["H1"] = dict(scenes=h1, pass_=None if any(x["pass_"] is None for x in h1) else all(x["pass_"] for x in h1))
     # H2：B16 − K 取满（不是通过/不通过，决定主候选）
     h2 = []
@@ -755,7 +761,7 @@ def c3_hypotheses(scenes) -> dict:
         h4[v] = dict(scenes=rows, one=None if None in one else count_true(one) >= r["majority"],
                      two=None if None in two else count_true(two) >= r["majority"])
     out["H4"] = h4
-    # H5：advection_diffusion 直接预测、各场景 8×8 和 12×12 不比 K16 差 1 个百分点以上；有限
+    # H5：advection_diffusion 直接预测（16×16、T = 1, 2, 4, 8 的均值）、各场景 8×8 和 12×12 不比 K16 差 1 个百分点以上；有限
     h5 = []
     for v in C3_SPACE:
         for s in SCENES:
@@ -765,8 +771,7 @@ def c3_hypotheses(scenes) -> dict:
                 checks_[metric] = dict(minus_k16=None if a is None or b is None else a-b,
                                        ok=None if a is None or b is None else a-b >= -r["h5_tolerance"])
             finite = _get(scenes, s, v, "finite")
-            if finite is None and not any(c["ok"] is not None for c in checks_.values()):
-                continue
+            # Codex C3 P2-1：每个“变体 × 场景”格都保留；缺失或无效的格是未知，不从总判定里消失（只有第一批时 H5 是未知）
             h5.append(dict(variant=v, scene=s, checks=checks_, finite=finite))
     flags = [c["ok"] for x in h5 for c in x["checks"].values()] + [x["finite"] for x in h5]
     out["H5"] = dict(rows=h5, pass_=None if None in flags or not flags else all(flags))
@@ -945,7 +950,7 @@ def c3_markdown(summary) -> list:
         g = x["identity_gate"]
         lines.append(f"- {s}：{'相同（' + str(g['rows']) + ' 行），K16、TF+一致性取 C-2' if g['identical'] else '不同：' + g['reason'] + '；C-2 的参照记不可比'}")
     lines += ["", "## 直接预测与长滚动", "",
-              "| 场景 | 模型 | 来源 | T=1 | T=2 | T=4 | T=8 | 16×16 全部 | 12×12 | 8×8 | rollout16@12 | 步数 | 早停 |",
+              "| 场景 | 模型 | 来源 | T=1 | T=2 | T=4 | T=8 | 16×16 四个时长均值 | 12×12 | 8×8 | rollout16@12 | 步数 | 早停 |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s, x in summary["scenes"].items():
         for label, r in x["rows"].items():

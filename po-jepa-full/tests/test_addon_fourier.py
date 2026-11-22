@@ -95,7 +95,11 @@ def test_spectrum_for_matches_graph_spectrum_contract(size):
     ours = FourierSpectrum(FourierConfig(**protocol_graph())).spectrum_for(z, grid, k=16, model_device=CPU)
     theirs = GraphSpectrum(GraphConfig(**protocol_graph())).spectrum_for(z, grid, k=16, model_device=CPU)
     assert type(ours) is SpectralResult and type(ours.diagnostics) is type(theirs.diagnostics)
-    pairs = [(f.name, getattr(ours, f.name), getattr(theirs, f.name)) for f in dataclasses.fields(ours) if f.name != "diagnostics"]
+    # C3：lambda_perp（补空间特征值）只有图谱有；fixed_fourier 不提供（方案 B 在 Fourier 下拒跑），其余字段契约照旧
+    complement = ("complement_eigenvalue_cpu", "complement_eigenvalue")
+    assert all(getattr(ours, name) is None and getattr(theirs, name) is not None for name in complement)
+    pairs = [(f.name, getattr(ours, f.name), getattr(theirs, f.name)) for f in dataclasses.fields(ours)
+             if f.name != "diagnostics" and f.name not in complement]
     pairs += [(f.name, getattr(ours.diagnostics, f.name), getattr(theirs.diagnostics, f.name))
               for f in dataclasses.fields(ours.diagnostics)]
     for name, a, b in pairs:
