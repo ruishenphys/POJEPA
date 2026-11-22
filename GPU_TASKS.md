@@ -27,6 +27,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G7 | Other evaluation tasks that cannot run yet | **Blocked** (code or decisions missing) | see §8 | see §8 |
 | G8 | AC checks (C7): AC direct prediction with its context cut to the 8 frames it was trained on, and the feature noise floor (same state encoded twice) | **Ready once its pull request is merged** (pull only after the running job files are finished) | ~1–3 GPU-hours *(est.)* for seed 1703 | v7.1 AC checkpoints; the encoder weights and `vjepa2` checkout used for encoding |
 | G9 | C-2 shrinkage check (`tools/shrinkage_check.py`): readout slope / spread / motion gain and LN-feature spread of the C-2 checkpoints on the registered test windows | **Ready once its pull request is merged** | ~1–2 GPU-hours *(est.)*, 21 commands | C-2 checkpoints, readout probes and truth files under `results-small-validation/` (all from G4/G6) |
+| G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -258,6 +259,37 @@ done
 ```
 
 `--cross-version` is required on every line: the C-2 jobs were trained on d5a8fc1, and the commit that adds this tool changes `MANIFEST.json`, so the default loader would refuse them with `training run 的预登记与当前代码/配置不一致`. The cross-version loader checks the job record, selected step, query sequence, checkpoint SHA, configuration snapshot and data provenance instead of the source hashes. Each command refuses to overwrite an existing `--output`; after a failure just rerun that line. Send back `results-small-validation/c2/dyadic-zero/shrinkage/` (a few MB) with the pack command of §9, for example `python $TOOL pack results-small-validation/c2/dyadic-zero/shrinkage nvidia-smi.txt --output c2-shrinkage.pack.sqlite`.
+
+
+## 8d. G10: C-2 truncation check (`tools/truncation_check.py`)
+
+Evaluation only, no training; it reads the selected checkpoint of each C-2 job (the same one the C-2 evaluation used) and changes no training or evaluation code. Like G9 it needs `--cross-version` on every line (the C-2 jobs were trained on d5a8fc1 and this commit changes `MANIFEST.json`). **Please do not delete the C-2 checkpoints**: G10 and later diagnostics read them.
+
+Question it answers: the PO-JEPA change is `Z_hat − Z = Ψ_16 (C_τ − C_0) W_outᵀ`, so it can only use the 16 lowest graph modes of the start frame. Is that what keeps its direct prediction below the Transformer's? On the C-2 test windows (each test trajectory × registered start × T ∈ {1, 2, 4, 8}, grids 16×16, 12×12, 8×8, the same points as the C-2 evaluation), with the evaluation metric (per-token LayerNorm, mean absolute difference):
+
+- `ceiling`: how far the identity error can be reduced by *any* change in a given output subspace when the true future frame is known (Adam, 6000 steps; the optimised value is a lower bound of the true ceiling): the 16 graph modes, the 16 modes with the trained PO-JEPA readout, 64 modes, and a per-token change in a 64-dim channel space (the Transformer's form). The heaviest step (est. 40–80 min per scene).
+- `project`: the trained `transformer_consistency` prediction, with its change projected onto those 16 modes (and onto 64), scored again; next to `po_jepa_full` on the same windows. A drop after the projection shows that what the Transformer learned uses the removed directions; it is not by itself a proof that the truncation explains the whole gap (the projection is not the best point of the subspace under this metric). It also re-scores the stored C-2 evaluation rows and reports the largest difference (`evaluation_check`, expected ≈ 0).
+- `dynamics`: for the trained PO-JEPA variants, the top-r attention (max weight, entropy) and the sizes of the terms of dC/dt at every integration step.
+
+```bash
+cd $WORK/full-model/po-jepa-full
+C=../../results-small-validation/c2/dyadic-zero; F=../../features-v7; O=$C/truncation
+for s in advection_diffusion double_well van_der_pol; do
+  J=$C/$s/seed1703
+  python tools/truncation_check.py ceiling --job $J/po_jepa_full --cross-version --features $F/$s-2000 \
+      --output $O/ceiling/$s.json --device cuda:0
+  python tools/truncation_check.py project --job $J/transformer_consistency --spectrum-job $J/po_jepa_full --cross-version \
+      --features $F/$s-2000 --output $O/project/$s/transformer_consistency.json --device cuda:0
+  for c in po_jepa_full po_jepa_no_consistency po_jepa_rollout_sup fixed_fourier; do
+    python tools/truncation_check.py dynamics --job $J/$c --cross-version --features $F/$s-2000 \
+        --output $O/dynamics/$s/$c.json --device cuda:0
+  done
+  python tools/truncation_check.py project --job $J/po_jepa_no_consistency --spectrum-job $J/po_jepa_full --cross-version \
+      --features $F/$s-2000 --output $O/project/$s/po_jepa_no_consistency.json --device cuda:0
+done
+```
+
+The `ceiling` lines can run on the second card (`--device cuda:1`) while the other lines run on the first. Each command refuses to overwrite an existing `--output` and writes it only at the end (via a `.partial` file), so after a failure just rerun that line. `ceiling` keeps one duration's windows (400 × 2 frames, ~1.2 GB) in CPU memory and about 3 GB on the GPU with the default `--batch 100`; lower `--batch` if memory is short (the result does not depend on it). Send back `results-small-validation/c2/dyadic-zero/truncation/` (well under 10 MB), for example `python $TOOL pack results-small-validation/c2/dyadic-zero/truncation nvidia-smi.txt --output c2-truncation.pack.sqlite` (§9).
 
 ## 9. What to send back
 
