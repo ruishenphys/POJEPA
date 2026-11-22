@@ -75,10 +75,12 @@ def check_manifest(path, m, manifest_sha, spec):
             or m.get("split") != spec.split_for(m["trajectory_id"]) or m.get("observation_variant") != "canonical"
             or m.get("preprocess_sha256") != cache.v7_preprocess_sha256()):
         raise ValueError("long-horizon cache schema/system/variant/count/split mismatch (check --system/--variant/--trajectories)")
-    # S25b：两帧编码的数据集（tubelet=pair）要有 mode=pair 的 tubelet 记录，其余数据集不能有（调节项字符串已经核过，这里再核产物）
-    paired = spec.knobs.tubelet == "pair"
-    if ("tubelet" in m) != paired or (paired and m["tubelet"].get("mode") != "pair"):
-        raise ValueError("long-horizon cache tubelet record does not match the active dataset's tubelet knob")
+    # S25b：两帧编码的数据集（tubelet=pair）要有逐项等于编码定义的 tubelet 记录，其余数据集不能有（调节项字符串已经核过，这里再核产物）
+    from po_jepa import variants
+    try:
+        variants.check_tubelet_record(m, spec.knobs)
+    except ValueError as error:
+        raise ValueError(f"long-horizon cache tubelet record does not match the active dataset's tubelet knob: {error}") from None
     g = m["generation"]
     if (g.get("evidence_role") != "real_frozen_encoder" or g.get("encoder_checkpoint_sha256") != cache.CHECKPOINT_SHA
             or g.get("upstream_commit") != vjepa.UPSTREAM_COMMIT or g.get("preprocess") != cache._v7_preprocess_record()):

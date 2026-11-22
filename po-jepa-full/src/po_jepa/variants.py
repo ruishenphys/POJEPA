@@ -272,6 +272,35 @@ KNOB_GROUPS = {"控制": ("gain", "axes", "segments", "zero", "noise", "delay", 
                "空间": ("resolution", "zoom", "pan", "drift"), "编码": ("tubelet",)}
 
 
+# S25b：两帧编码写进缓存 manifest 的 tubelet 记录（tools/encode_v7.py 写，finalize 和 runtime/long_cache 核）。
+PAIR_CLIP = "(tick t-1, tick t) in time order; tick -1 = initial state before the zero-action pre-run tick"
+PAIR_PREPROCESS = "each of the two frames preprocessed alone after resetting the same trajectory generator (same crop)"
+
+
+def tubelet_record(first_prev_image_sha256: str) -> dict:
+    """frames[t].image_sha256 是第 t 帧（tubelet 的后一帧）；tick t ≥ 1 的前一帧就是 frames[t−1]，
+    tick 0 的前一帧（t = −1）不在 frames 里，它的画面 SHA 记在 first_prev。"""
+    return dict(mode="pair", clip=PAIR_CLIP, prev_offset_ticks=-1, prev_offset_seconds=-.25, preprocess=PAIR_PREPROCESS,
+                first_prev=dict(tick=-1, time_seconds=-.25, image_sha256=first_prev_image_sha256))
+
+
+def check_tubelet_record(manifest: dict, v: Variant) -> None:
+    """manifest 的 tubelet 记录要和调节项一致：tubelet=pair ⇔ 有记录，且记录逐项等于 tubelet_record（时间顺序、
+    −1 tick / −0.25 s、预处理规则、first_prev 的 tick 和时刻），first_prev 的画面 SHA 是 64 位小写十六进制。
+    S25b 修改（Codex 审核 F3）：原来只核有没有记录和 mode。"""
+    if v.tubelet != "pair":
+        if "tubelet" in manifest:
+            raise ValueError("manifest 有 tubelet 记录，但数据集不是 tubelet=pair")
+        return
+    record = manifest.get("tubelet")
+    sha = record.get("first_prev", {}).get("image_sha256") if isinstance(record, dict) and isinstance(record.get("first_prev"), dict) else None
+    if (type(sha) is not str or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)
+            or record != tubelet_record(sha)
+            or any(type(record[k]) is not t for k, t in (("prev_offset_ticks", int), ("prev_offset_seconds", float)))
+            or type(record["first_prev"]["tick"]) is not int or type(record["first_prev"]["time_seconds"]) is not float):
+        raise ValueError("manifest 的 tubelet 记录与 tubelet=pair 的编码定义不一致（variants.tubelet_record）")
+
+
 def tubelet_label(system: str, v: Variant):
     """报告里的 tubelet 字段：二阶场景写 dup / pair（特征里有没有速度），一阶场景写 None（一帧就能看全状态）。"""
     return v.tubelet if system in SECOND_ORDER else None

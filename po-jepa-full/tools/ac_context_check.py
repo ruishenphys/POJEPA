@@ -243,6 +243,9 @@ def cmd_floor(a):
     import state_readout as sr
     spec = datasets.active()
     sr._refuse_sampling(spec, "特征噪声下限")
+    if spec.knobs.tubelet == "pair":
+        # S25b（Codex 审核 F2）：这里的重编码是单帧复制（FrozenFrameEncoder、frames() 的 33 帧），和两帧缓存比出来的不是噪声下限
+        raise SystemExit(f"{spec.scene} 是两帧编码（tubelet=pair）的数据集：特征噪声下限的重编码还是单帧复制，没接两帧（S25b 第二段）")
     if a.output.exists():
         raise SystemExit(f"{a.output} 已存在，不覆盖")
     if a.count < 1:

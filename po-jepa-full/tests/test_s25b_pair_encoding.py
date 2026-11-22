@@ -375,6 +375,101 @@ def test_long_cache_checks_variant_and_tubelet_record(caches, real, active, tmp_
         long_cache.check_manifest(path, bad, "x", DUP_LONG)
 
 
+GOOD_SHA = "ab"*32
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r.clear() or r.update(mode="pair"),                              # 只有 mode
+    lambda r: r.update(clip="(tick t, tick t-1)"),                             # 时间顺序
+    lambda r: r.update(prev_offset_ticks=1),
+    lambda r: r.update(prev_offset_seconds=.25),
+    lambda r: r.update(prev_offset_ticks=-1.),                                 # 类型
+    lambda r: r.update(preprocess="independent crops"),
+    lambda r: r["first_prev"].update(tick=0),
+    lambda r: r["first_prev"].update(time_seconds=0.),
+    lambda r: r["first_prev"].update(image_sha256="xyz"),
+    lambda r: r["first_prev"].update(image_sha256="AB"*32),
+    lambda r: r.pop("first_prev"),
+    lambda r: r.update(first_prev="x"),
+    lambda r: r.update(extra=1),
+])
+def test_tubelet_record_is_checked_field_by_field(change):
+    """Codex 审核 F3：记录逐项等于编码定义才收；每次只改一项，其余不变（没改时通过）。"""
+    pair, dup = variants.parse("pendulum", "tubelet=pair"), variants.Variant()
+    good = variants.tubelet_record(GOOD_SHA)
+    assert good["prev_offset_ticks"] == -1 and good["prev_offset_seconds"] == -.25 and "t-1, tick t" in good["clip"]
+    assert good["first_prev"] == dict(tick=-1, time_seconds=-.25, image_sha256=GOOD_SHA)
+    variants.check_tubelet_record(dict(tubelet=good), pair)
+    variants.check_tubelet_record({}, dup)
+    bad = copy.deepcopy(good); change(bad)
+    with pytest.raises(ValueError, match="tubelet"):
+        variants.check_tubelet_record(dict(tubelet=bad), pair)
+    for m in ({}, dict(tubelet=None), dict(tubelet="pair")):
+        with pytest.raises(ValueError, match="tubelet"):
+            variants.check_tubelet_record(m, pair)
+    with pytest.raises(ValueError, match="tubelet"):
+        variants.check_tubelet_record(dict(tubelet=good), dup)
+
+
+def test_long_cache_and_finalize_use_the_full_record_check(caches, real, active, tmp_path):
+    path = caches/"pair_long"/"0037"
+    good = json.loads((path/"manifest.json").read_text())
+    active(PAIR_LONG)
+    bad = copy.deepcopy(good); bad["tubelet"] = dict(mode="pair")
+    with pytest.raises(ValueError, match="tubelet record"):
+        long_cache.check_manifest(path, bad, "x", PAIR_LONG)
+    bad = copy.deepcopy(good); bad["tubelet"]["prev_offset_ticks"] = 1
+    with pytest.raises(ValueError, match="tubelet record"):
+        long_cache.check_manifest(path, bad, "x", PAIR_LONG)
+    out = tmp_path/"pair"
+    assert _encode(out, "tubelet=pair").returncode == 0
+    _rewrite_manifest(out/"0036", lambda m: m.update(tubelet=dict(mode="pair")))
+    r = _encode(out, "tubelet=pair", modes=("finalize",))
+    assert r.returncode != 0 and "tubelet 记录" in r.stderr
+    _rewrite_manifest(out/"0036", lambda m: m.update(tubelet=dict(good["tubelet"], clip="(tick t, tick t-1)")))
+    r = _encode(out, "tubelet=pair", modes=("finalize",))
+    assert r.returncode != 0 and "tubelet 记录" in r.stderr
+
+
+# —— transfer：测试集沿用训练数据集的 tubelet（Codex 审核 F1） ——
+
+def test_transfer_inherits_tubelet_and_refuses_overrides(tmp_path, active, monkeypatch):
+    from po_jepa.runtime import v7jobs, workflow
+    for text in ("tubelet=dup", "tubelet=pair", "gain=2,tubelet=dup", "tubelet=pair,gain=2", " tubelet=dup"):
+        with pytest.raises(ValueError, match="不能写 tubelet"):
+            workflow.refuse_tubelet_test_variant(text)
+    workflow.refuse_tubelet_test_variant("gain=2,damping=0.6")
+    # 正式入口和 CPU 冒烟在调 transfer_job 之前都先过这道检查
+    source = (SRC/"po_jepa/runtime/workflow.py").read_text(encoding="utf-8")
+    assert source.index("refuse_tubelet_test_variant(args.test_variant)") < source.index("report=v7jobs.transfer_job(")
+    smoke = (ROOT/"tools/smoke_v7_cpu.py").read_text(encoding="utf-8")
+    assert smoke.index("workflow.refuse_tubelet_test_variant(a.transfer[0])") < smoke.index("v7jobs.transfer_job(")
+    # 只改别的调节项时测试集继承训练数据集的 pair（走到建目录、载入模型那一步，记下它要读的测试数据集）
+    seen = {}
+
+    def stop(condition, training_run, device):
+        raise RuntimeError("stop before loading")
+    monkeypatch.setattr(v7jobs, "load_for_evaluation", stop)
+    original = datasets.DatasetSpec
+
+    def spy(system, count, variant=""):
+        seen["variant"] = variant
+        return original(system, count, variant)
+    monkeypatch.setattr(v7jobs.data.datasets, "DatasetSpec", spy)
+    active(PAIR)
+    with pytest.raises(RuntimeError, match="stop before loading"):
+        v7jobs.transfer_job(tmp_path, tmp_path/"out", torch.device("cpu"), "identity", training_run=None, test_variant="gain=2")
+    assert seen["variant"] == "gain=2,tubelet=pair"
+
+
+def test_noise_floor_tool_refuses_pair_dataset(tmp_path):
+    """Codex 审核 F2：ac_context_check floor 的重编码是单帧复制，pair 数据集先拒绝（在读缓存和建编码器之前）。"""
+    r = _tool("ac_context_check.py", "floor", "--system", "pendulum", "--trajectories", "40", "--variant", "tubelet=pair",
+              "--features", str(tmp_path), "--upstream-root", str(tmp_path), "--checkpoint", str(tmp_path/"x.pt"),
+              "--device", "cpu", "--count", "1", "--output", str(tmp_path/"floor.json"))
+    assert r.returncode != 0 and "tubelet=pair" in r.stderr and "单帧复制" in r.stderr and not (tmp_path/"floor.json").exists()
+
+
 def _rewrite_manifest(folder, change):
     m = json.loads((folder/"manifest.json").read_text())
     change(m)

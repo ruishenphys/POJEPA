@@ -75,7 +75,7 @@ def main():
     sys.path.insert(0, str(ROOT/"src"))
     import numpy as np
     import torch
-    from po_jepa import datasets, simulation, systems, timing, vjepa
+    from po_jepa import datasets, simulation, systems, timing, variants, vjepa
     from po_jepa.runtime import cache, space_cache
 
     spec = datasets.active()
@@ -102,7 +102,7 @@ def main():
     out = args.output.resolve()
 
     if args.mode == "finalize":
-        return finalize(out, spec, cache, _splits(args.splits))
+        return finalize(out, spec, cache, _splits(args.splits), variants)
     if paired:
         from po_jepa import tubelet_probe
 
@@ -213,7 +213,7 @@ def main():
             **({"timing": dict(fps=spec.knobs.fps, jitter=spec.knobs.jitter, exposure=spec.knobs.exposure,
                                switch_offset=spec.knobs.switch_offset)} if timed else {}),
             **({"space": space_cache.space_record(spec)} if spaced else {}),
-            **({"tubelet": _tubelet_record(clip_frames[0])} if paired else {}),
+            **({"tubelet": variants.tubelet_record(hashlib.sha256(clip_frames[0].tobytes()).hexdigest())} if paired else {}),
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,
@@ -233,17 +233,6 @@ def main():
             left = sum(1 for t in ids if not (out/f"{t:04d}"/"COMPLETE.json").exists())
             print(f"[{spec.tag} shard {index}/{total}] 已编码 {done} 条，约 {rate:.1f} s/条，本分片剩余 {left} 条", flush=True)
     print(f"[{spec.tag} shard {index}/{total}] 完成", flush=True)
-
-
-PAIR_CLIP = "(tick t-1, tick t) in time order; tick -1 = initial state before the zero-action pre-run tick"
-PAIR_PREPROCESS = "each of the two frames preprocessed alone after resetting the same trajectory generator (same crop)"
-
-
-def _tubelet_record(prev_frame):
-    """S25b：两帧编码的 manifest 记录。frames[t].image_sha256 是第 t 帧（tubelet 的后一帧）；tick t ≥ 1 的前一帧就是
-    frames[t−1]，tick 0 的前一帧（t = −1）不在 frames 里，它的画面 SHA 记在这里。"""
-    return dict(mode="pair", clip=PAIR_CLIP, prev_offset_ticks=-1, prev_offset_seconds=-.25, preprocess=PAIR_PREPROCESS,
-                first_prev=dict(tick=-1, time_seconds=-.25, image_sha256=hashlib.sha256(prev_frame.tobytes()).hexdigest()))
 
 
 def _controls_record(controls, systems):
@@ -317,7 +306,9 @@ def _splits(text):
     return names
 
 
-def finalize(out, spec, cache, splits=("train", "validation", "test")):
+def finalize(out, spec, cache, splits=("train", "validation", "test"), variants=None):
+    if variants is None:
+        from po_jepa import variants
     records, missing = [], []
     for tid in (t for t in range(spec.count) if spec.split_for(t) in splits):
         folder = out/f"{tid:04d}"
@@ -329,9 +320,11 @@ def finalize(out, spec, cache, splits=("train", "validation", "test")):
         m = json.loads((folder/"manifest.json").read_bytes())
         if m["system"] != spec.system or m["dataset_count"] != spec.count or m.get("variant", "") != spec.variant:
             raise ValueError(f"trajectory {tid}: encoded for {m['system']}-{m['dataset_count']}")
-        # S25b：manifest 的 tubelet 记录要和数据集的调节项一致（tubelet=pair ⇔ 有 mode=pair 的记录）
-        if (m.get("tubelet", {}).get("mode") == "pair") != (spec.knobs.tubelet == "pair") or ("tubelet" in m) != (spec.knobs.tubelet == "pair"):
-            raise ValueError(f"trajectory {tid}: manifest 的 tubelet 记录与数据集 {spec.tag} 的 tubelet={spec.knobs.tubelet} 不一致")
+        # S25b：manifest 的 tubelet 记录要和数据集的调节项一致（tubelet=pair ⇔ 有记录，且记录逐项等于编码定义）
+        try:
+            variants.check_tubelet_record(m, spec.knobs)
+        except ValueError as error:
+            raise ValueError(f"trajectory {tid}: tubelet 记录与数据集 {spec.tag} 不一致：{error}") from None
         records.append(dict(trajectory_id=tid, split=m["split"], manifest_sha256=complete["manifest_sha256"],
                             evidence_role=m["generation"]["evidence_role"],
                             max_abs=m["feature_stats"]["max_abs"],
