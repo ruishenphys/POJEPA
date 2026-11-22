@@ -35,6 +35,9 @@ def main(argv=None):
     # 写了就以参数为准，和已设的环境变量不同时报错，不让两处说法打架
     parser.add_argument('--temporal-partition',choices=('bisection','dyadic'),help='S28b M1：时间一致性切分（默认二等分）；设 PO_JEPA_TEMPORAL_PARTITION')
     parser.add_argument('--readout-init',choices=('xavier','zero'),help='S28b M2：P_out 初始化（默认 Xavier）；设 PO_JEPA_READOUT_INIT')
+    # C3（2026-11-22 K 消融 + 方案 B）：同一写法，参数和已设的环境变量不同时报错
+    parser.add_argument('--modes',choices=('16','32','64','full'),help='C3：空间基底数 K（默认 16 固定；full = 每个网格 K = token 数）；设 PO_JEPA_MODES')
+    parser.add_argument('--complement',choices=('none','shared'),help='C3：补空间（默认 none；shared = 方案 B，前 K 个模态照常、补空间整体保留并参与演化）；设 PO_JEPA_COMPLEMENT')
     args=parser.parse_args(argv)
     # 子进程的工作目录是代码根目录，相对路径须先按调用者当前目录解析成绝对路径。
     if not Path(args.features_root).resolve().is_dir():parser.error(f'--features-root不存在：{Path(args.features_root).resolve()}')
@@ -72,7 +75,8 @@ def main(argv=None):
     env['PO_JEPA_DATASET']=f"{args.system}{'~'+args.variant if args.variant else ''}:{args.trajectories}"
     env['PO_JEPA_UPDATES']=str(args.updates)
     for flag,name,value in (('--temporal-partition','PO_JEPA_TEMPORAL_PARTITION',args.temporal_partition),
-                            ('--readout-init','PO_JEPA_READOUT_INIT',args.readout_init)):
+                            ('--readout-init','PO_JEPA_READOUT_INIT',args.readout_init),
+                            ('--modes','PO_JEPA_MODES',args.modes),('--complement','PO_JEPA_COMPLEMENT',args.complement)):
         if value is None:continue
         if env.get(name,value)!=value:parser.error(f'{flag} {value} 和环境变量 {name}={env[name]} 不一致：去掉其中一个')
         env[name]=value

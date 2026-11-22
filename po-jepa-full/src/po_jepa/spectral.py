@@ -102,6 +102,10 @@ class SpectralResult:
     eigenvalues: Tensor
     basis: Tensor
     diagnostics: SpectralDiagnostics
+    # C3（方案 B）：被截掉的那些特征值的均值 λ_⊥ = mean(λ_{K+1..N}) [B]，CPU float64 与模型设备 float32 各一份，无梯度；
+    # K = N 时没有补空间，为 None。只有 dynamics.complement="shared" 用它，其余路径不读，数值不变。
+    complement_eigenvalue_cpu: Tensor | None = None
+    complement_eigenvalue: Tensor | None = None
 
 
 class GraphSpectrum(nn.Module):
@@ -285,9 +289,13 @@ class GraphSpectrum(nn.Module):
             diagnostics = SpectralDiagnostics(residuals, orthogonality, gaps, cutoff, pivots)
             if any(not torch.isfinite(t).all() for t in (residuals, orthogonality, gaps)) or (cutoff is not None and not torch.isfinite(cutoff).all()):
                 raise ValueError("spectral diagnostics must contain finite values")
+            # C3：补空间的公共特征值 λ_⊥ 取被截掉的全部特征值的均值（eigh 已经给了全谱，不多算）
+            complement_cpu = values[:, k:].mean(dim=-1).detach().clone() if k < nodes else None
             return SpectralResult(eigenvalues_cpu, basis_cpu,
                                   eigenvalues_cpu.to(device=model_device, dtype=torch.float32).detach(),
-                                  basis_cpu.to(device=model_device, dtype=torch.float32).detach(), diagnostics)
+                                  basis_cpu.to(device=model_device, dtype=torch.float32).detach(), diagnostics,
+                                  complement_cpu,
+                                  None if complement_cpu is None else complement_cpu.to(device=model_device, dtype=torch.float32).detach())
 
     def spectrum_for(self, source: Tensor, grid: GridSpec, *, k: int,
                      model_device: torch.device) -> SpectralResult:

@@ -175,7 +175,12 @@ def variant_of(job) -> dict:
 
 
 def variant_label(variant) -> str:
-    return f"{variant['temporal_partition']}-{variant['readout_init']}"
+    """bisection-xavier 这种写法；C3 的空间变体（K、补空间）再接 -K32c、-Kfull、-K16c（和结果目录名一致）。"""
+    label = f"{variant['temporal_partition']}-{variant['readout_init']}"
+    modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
+    if modes != "16" or complement != "none":
+        label += f"-K{modes}"+("c" if complement == "shared" else "")
+    return label
 
 
 def scene_of(job) -> str:
@@ -584,6 +589,229 @@ def readout_summary(root, actions=None) -> dict:
 
 # —— 输出 ——
 
+# —— C-3：空间基底数 K 消融 + 方案 B（方案 small-validation-results/c3-plan/2026-11-22_mode-ablation-plan.md §5）——
+#
+# 指标（测试集、单种子、和 C-2 同口径）：直接预测比 identity 好多少 = 1 − d(条件)/d(identity)，d 是 future_jepa_distance
+# 在 16×16、时长 T 的测试点上的均值，T = 1, 2, 4, 8；换网格 = 8×8、12×12 上全部时长的同一比值；长滚动 = rollout16@12。
+# 判据 H1–H6 照方案 §5 的表写死（阈值见 C3_RULES）；方案没写场景数的 H4②，这里和 H4① 一样按 ≥ 2/3 个场景算（Claude 的读法）。
+# K16（现模型）、K16 的 no_consistency 和 transformer_consistency 取 C-2 的 dyadic-zero；先核这里第一批的 identity 和 C-2 的逐位相同、
+# 各条件登记的评测查询相同，不同就不拿 C-2 比。
+
+C3_BASE = dict(temporal_partition="dyadic", readout_init="zero")
+C3_SPACE = dict(K16c=dict(complement="shared"), Kfull=dict(modes="full"),
+                K32c=dict(modes="32", complement="shared"), K64c=dict(modes="64", complement="shared"))
+C3_CONDITIONS = dict(K16c=("po_jepa_full", "po_jepa_no_consistency"), Kfull=("po_jepa_full", "po_jepa_no_consistency"),
+                     K32c=("po_jepa_full",), K64c=("po_jepa_full",))
+C3_IDENTITY_VARIANT = "K16c"
+C3_LOSSLESS = ("K16c", "Kfull")
+# Jerry 2026-11-22：四个变体都不丢信息，只改显式基底个数；H6 看这条曲线（K16 截断版只作 H1、H5 的“丢信息”对照）
+C3_CURVE = ("K16c", "K32c", "K64c", "Kfull")
+C3_TIMES = (1., 2., 4., 8.)
+C3_RULES = dict(h1_gain=.03, h1_scenes=("double_well", "van_der_pol"), h2_tie=.01, h3_tolerance=.01, h3_inconclusive=.02,
+                h4_rollout=.05, h5_tolerance=.01, h6_noise=.005, majority=2)
+C2_REFERENCE = dict(K16="po_jepa_full", **{"K16/no_cons": "po_jepa_no_consistency"}, **{"TF+cons": "transformer_consistency"})
+
+
+def _point_mean(job, grid, duration=None):
+    values = [r["values"].get("future_jepa_distance") for k, r in job["rows"].items()
+              if k[0] == "point" and k[4] == grid and (duration is None or k[3] == duration)]
+    return _mean(values)
+
+
+def _gain(job, identity, grid, duration=None):
+    """1 − d(条件)/d(identity)；有一个缺就是 None。"""
+    a, b = _point_mean(job, grid, duration), _point_mean(identity, grid, duration)
+    return None if a is None or not b else 1-a/b
+
+
+def c3_label(variant, condition) -> str:
+    return variant if condition == "po_jepa_full" else f"{variant}/no_cons"
+
+
+def c3_summary(root, c2_root, readout=True) -> dict:
+    problems, invalid, scenes = [], [], {}
+    for s in SCENES:
+        jobs = {}
+        for v, conditions in C3_CONDITIONS.items():
+            vroot = Path(root)/f"{variant_label(C3_BASE)}-{v}"
+            for c in (*conditions, *(("identity",) if v == C3_IDENTITY_VARIANT else ())):
+                folder = finished_attempt(vroot/s/f"seed{SEED}"/c)
+                if folder is None:
+                    continue
+                j = load_job(folder)
+                bad = job_identity_problems(j["job"], scene=s, data=C2_DATA, condition=c, variant=dict(C3_BASE, **C3_SPACE[v]))
+                bad += row_problems(j) + (metric_problems(metrics(j), TRAINED_METRICS) if c != "identity" else [])
+                if bad:
+                    invalid.append(dict(scene=s, condition=f"{v} {c}", folder=str(folder), reasons=bad)); continue
+                jobs["identity" if c == "identity" else c3_label(v, c)] = j
+        old = {}
+        for label, c in (*C2_REFERENCE.items(), ("identity", "identity")):
+            folder = finished_attempt(Path(c2_root)/s/f"seed{SEED}"/c)
+            if folder is None:
+                continue
+            j = load_job(folder)
+            bad = job_identity_problems(j["job"], scene=s, data=C2_DATA, condition=c, variant=C3_BASE) + row_problems(j)
+            if bad:
+                invalid.append(dict(scene=s, condition=f"C-2 {c}", folder=str(folder), reasons=bad)); continue
+            old[label] = j
+        # Codex C3 P2-3：本次各条件（含 identity）登记的评测查询必须相同才可比；不同就整个场景不进任何判定（不取交集，不改预登记范围）
+        comparable = len({frozenset(j["expected_keys"]) for j in jobs.values()}) <= 1
+        gate = identity_check(jobs.get("identity"), old.get("identity"))
+        if gate.get("reason"):
+            gate["reason"] = gate["reason"].replace("v7.1", "C-2")
+        if gate["identical"] and len({frozenset(j["expected_keys"]) for j in (*jobs.values(), *old.values())}) > 1:
+            gate = dict(identical=False, reason="各条件登记的评测查询不同")
+        identity = old.get("identity") if gate["identical"] else jobs.get("identity")
+        table = {k: j for k, j in jobs.items() if k != "identity"}
+        if gate["identical"]:
+            table.update({k: j for k, j in old.items() if k != "identity"})
+        if not comparable:
+            problems.append(f"{s}：本次各条件登记的评测查询不同，这个场景不可比，不进任何判定")
+            table = {}
+        rows = {}
+        for label, j in table.items():
+            m = metrics(j)
+            direct = {f"{t:g}": _gain(j, identity, 16, t) if identity else None for t in C3_TIMES}
+            # Codex C3 P2-2：16×16 直接预测的汇总只取预定的 T = 1, 2, 4, 8，四个时长各自的“比 identity 好”取算术平均（不混入 T = 3、12）
+            known = [g for g in direct.values() if g is not None]
+            rows[label] = dict(direct=direct, direct16=sum(known)/len(known) if len(known) == len(C3_TIMES) else None,
+                               grid12=_gain(j, identity, 12) if identity else None, grid8=_gain(j, identity, 8) if identity else None,
+                               rollout12=m["rollout16@12"], finite=m["finite"], completed_updates=m["completed_updates"],
+                               stopped_early=m["stopped_early"], checkpoint_sha256=_selected_sha(j),
+                               source="C-2" if label in C2_REFERENCE else "C-3")
+        scenes[s] = dict(identity_gate=gate, comparable=comparable, rows=rows)
+    problems += [f"{x['scene']}/{x['condition']}（{x['folder']}）无效，不进判定：{'；'.join(x['reasons'])}" for x in invalid]
+    invalid_keys = {(x["scene"], x["condition"]) for x in invalid}
+    missing = [dict(scene=s, variant=v, condition=c) for s in SCENES for v, cs in C3_CONDITIONS.items() for c in cs
+               if c3_label(v, c) not in scenes[s]["rows"] and (s, f"{v} {c}") not in invalid_keys]
+    hyp = c3_hypotheses(scenes)
+    reads = c3_readout(root, c2_root, scenes, problems) if readout else []
+    return dict(stage="c3", base_variant=variant_label(C3_BASE), rules=C3_RULES, scenes=scenes, hypotheses=hyp, readout=reads,
+                missing=missing, invalid=invalid, problems=problems, single_seed=True, scientific_conclusions_verified=False)
+
+
+def _get(scenes, s, label, *path):
+    x = scenes[s]["rows"].get(label)
+    for key in path:
+        if x is None:
+            return None
+        x = x.get(key)
+    return x
+
+
+def c3_hypotheses(scenes) -> dict:
+    r = C3_RULES
+    out = {}
+    # H1：截断是不是实际瓶颈——两个场景上，K 取满或 B16 的 T=8 直接预测比 K16 至少高 3 个百分点
+    h1 = []
+    for s in r["h1_scenes"]:
+        base = _get(scenes, s, "K16", "direct", "8")
+        gains = {v: _get(scenes, s, v, "direct", "8") for v in C3_LOSSLESS}
+        diff = {v: None if g is None or base is None else g-base for v, g in gains.items()}
+        # Codex C3 P2-1：三值“或”——任一已知候选达标就通过；两个都已知且都不达标才不通过；其余（有缺）是未知
+        hits = [None if d is None else d >= r["h1_gain"] for d in diff.values()]
+        h1.append(dict(scene=s, k16=base, gains=gains, minus_k16=diff,
+                       pass_=True if True in hits else (None if None in hits else False)))
+    out["H1"] = dict(scenes=h1, pass_=None if any(x["pass_"] is None for x in h1) else all(x["pass_"] for x in h1))
+    # H2：B16 − K 取满（不是通过/不通过，决定主候选）
+    h2 = []
+    for s in SCENES:
+        d = {f"{t:g}": None for t in C3_TIMES}
+        for t in d:
+            a, b = _get(scenes, s, "K16c", "direct", t), _get(scenes, s, "Kfull", "direct", t)
+            d[t] = None if a is None or b is None else a-b
+        h2.append(dict(scene=s, b16_minus_kfull=d))
+    t8 = [x["b16_minus_kfull"]["8"] for x in h2 if x["scene"] in r["h1_scenes"]]
+    if any(v is None for v in t8) or not t8:
+        verdict, candidate = None, None
+    else:
+        mean = sum(t8)/len(t8)
+        verdict = "持平" if abs(mean) <= r["h2_tie"] else ("B16 更好" if mean > 0 else "K 取满更好")
+        candidate = "Kfull" if verdict == "K 取满更好" else "K16c"
+    out["H2"] = dict(scenes=h2, mean_t8=None if verdict is None else sum(t8)/len(t8), verdict=verdict, candidate=candidate)
+    # H3：最好的不丢信息变体（两个场景 T=8 的均值更高的那个，事先定、不逐格挑）≥ TF − 1 个百分点，两个场景、四个时长
+    best = None
+    means = {v: [_get(scenes, s, v, "direct", "8") for s in r["h1_scenes"]] for v in C3_LOSSLESS}
+    if all(x is not None for xs in means.values() for x in xs):
+        best = max(C3_LOSSLESS, key=lambda v: sum(means[v]))
+    h3 = []
+    for s in r["h1_scenes"]:
+        cells = {}
+        for t in (f"{t:g}" for t in C3_TIMES):
+            a, tf = (_get(scenes, s, best, "direct", t) if best else None), _get(scenes, s, "TF+cons", "direct", t)
+            gap = None if a is None or tf is None else a-tf
+            cells[t] = dict(gap=gap, ok=None if gap is None else gap >= -r["h3_tolerance"],
+                            inconclusive=None if gap is None else abs(gap) <= r["h3_inconclusive"])
+        h3.append(dict(scene=s, cells=cells))
+    oks = [c["ok"] for x in h3 for c in x["cells"].values()]
+    out["H3"] = dict(variant=best, scenes=h3, pass_=None if None in oks or not oks else all(oks),
+                     inconclusive=any(c["inconclusive"] for x in h3 for c in x["cells"].values() if c["inconclusive"] is not None),
+                     note="差距在 ±2 个百分点以内的格子单种子不下结论（方案 §5：加种子 1704、1705 要 Jerry 点头）")
+    # H4：①B16、K 取满上 full 的 12 周期滚动比 no_cons 低至少 5%，≥ 2/3 场景；② full 的滚动不高于 TF+一致性（≥ 2/3 场景）
+    h4 = {}
+    for v in C3_LOSSLESS:
+        rows = []
+        for s in SCENES:
+            full, nc, tf = (_get(scenes, s, v, "rollout12"), _get(scenes, s, f"{v}/no_cons", "rollout12"),
+                            _get(scenes, s, "TF+cons", "rollout12"))
+            rows.append(dict(scene=s, full=full, no_cons=nc, tf=tf, rel_no_cons=rel(full, nc),
+                             one=None if full is None or nc is None else full <= (1-r["h4_rollout"])*nc,
+                             two=None if full is None or tf is None else full <= tf))
+        one, two = [x["one"] for x in rows], [x["two"] for x in rows]
+        h4[v] = dict(scenes=rows, one=None if None in one else count_true(one) >= r["majority"],
+                     two=None if None in two else count_true(two) >= r["majority"])
+    out["H4"] = h4
+    # H5：advection_diffusion 直接预测（16×16、T = 1, 2, 4, 8 的均值）、各场景 8×8 和 12×12 不比 K16 差 1 个百分点以上；有限
+    h5 = []
+    for v in C3_SPACE:
+        for s in SCENES:
+            checks_ = {}
+            for metric in (("direct16",) if s == "advection_diffusion" else ()) + ("grid12", "grid8"):
+                a, b = _get(scenes, s, v, metric), _get(scenes, s, "K16", metric)
+                checks_[metric] = dict(minus_k16=None if a is None or b is None else a-b,
+                                       ok=None if a is None or b is None else a-b >= -r["h5_tolerance"])
+            finite = _get(scenes, s, v, "finite")
+            # Codex C3 P2-1：每个“变体 × 场景”格都保留；缺失或无效的格是未知，不从总判定里消失（只有第一批时 H5 是未知）
+            h5.append(dict(variant=v, scene=s, checks=checks_, finite=finite))
+    flags = [c["ok"] for x in h5 for c in x["checks"].values()] + [x["finite"] for x in h5]
+    out["H5"] = dict(rows=h5, pass_=None if None in flags or not flags else all(flags))
+    # H6：K16c → K32c → K64c → K 取满（T=8，都不丢信息，只改显式基底个数）单调不降，允许 0.5 个百分点噪声
+    h6 = []
+    for s in SCENES:
+        curve = [(v, _get(scenes, s, v, "direct", "8")) for v in C3_CURVE]
+        known = [g for _, g in curve if g is not None]
+        mono = None if len(known) < len(C3_CURVE) else all(b >= a-r["h6_noise"] for a, b in zip(known, known[1:]))
+        h6.append(dict(scene=s, curve=dict(curve), monotone=mono))
+    out["H6"] = dict(scenes=h6, pass_=None if any(x["monotone"] is None for x in h6) else all(x["monotone"] for x in h6))
+    return out
+
+
+def c3_readout(root, c2_root, scenes, problems) -> list:
+    """只报告、不设门槛：每个变体上 full 对 no_cons 的长时程读出和反事实（同一探针、同一真值；检查点要是训练任务选中的那个）。"""
+    out = []
+    sources = {v: Path(root)/f"{variant_label(C3_BASE)}-{v}"/"readout" for v in C3_SPACE}
+    sources["K16"] = Path(c2_root)/"readout"
+    for v, path in sources.items():
+        if not path.exists():
+            continue
+        rows = readout_rows(path)
+        for s in SCENES:
+            labels = {"po_jepa_full": v, "po_jepa_no_consistency": f"{v}/no_cons"}
+            selected = {c: _get(scenes, s, label, "checkpoint_sha256") for c, label in labels.items()
+                        if label in scenes[s]["rows"]}
+            entry = {c: _readout_entry(rows, s, c, selected, f"C-3 {v}", problems) for c in labels if c in selected}
+            if not any(entry.values()):
+                continue
+            item = dict(variant=v, scene=s)
+            for c, e in entry.items():
+                if e:
+                    item[c] = dict(nmse_mean=(e.get("rollout") or {}).get("nmse_mean"), vpt=(e.get("rollout") or {}).get(VPT_KEY),
+                                   gain=(e.get("counterfactual") or {}).get("gain"), cos_mean=(e.get("counterfactual") or {}).get("cos_mean"))
+            out.append(item)
+    return out
+
+
+
 def _f(x, digits=4):
     if x is None:
         return "—"
@@ -701,11 +929,62 @@ def markdown(summary) -> str:
                 o = p["overall"]
                 lines.append(f"| {name} | {_f(o['identity'])} | {_f(o['oracle_delta_act'])} | {_f(o['motion_px'])} | {_f(o['action_swap_px'])} | "
                              f"{_f(o['oracle_over_identity'])} |")
+    if summary["stage"] == "c3":
+        lines += c3_markdown(summary)
     if summary.get("missing"):
         lines += ["", "## 缺失", ""] + [f"- {m}" for m in summary["missing"]]
     if summary.get("problems"):
         lines += ["", "## 问题", ""] + [f"- {p}" for p in summary["problems"]]
     return "\n".join(lines)+"\n"
+
+
+def _pp(x):
+    """百分点（gain 已是比例）：+1.23 pp。"""
+    return "—" if x is None else f"{100*x:+.2f} pp"
+
+
+def c3_markdown(summary) -> list:
+    lines = [f"底变体：{summary['base_variant']}（C-2 定下的）；单种子 1703，未复核。指标是“比 identity 好多少”（1 − d/d_identity）。", "",
+             "## 前提：identity 与 C-2 逐位相同", ""]
+    for s, x in summary["scenes"].items():
+        g = x["identity_gate"]
+        lines.append(f"- {s}：{'相同（' + str(g['rows']) + ' 行），K16、TF+一致性取 C-2' if g['identical'] else '不同：' + g['reason'] + '；C-2 的参照记不可比'}")
+    lines += ["", "## 直接预测与长滚动", "",
+              "| 场景 | 模型 | 来源 | T=1 | T=2 | T=4 | T=8 | 16×16 四个时长均值 | 12×12 | 8×8 | rollout16@12 | 步数 | 早停 |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for s, x in summary["scenes"].items():
+        for label, r in x["rows"].items():
+            lines.append(f"| {s} | {label} | {r['source']} | " + " | ".join(_pct(r["direct"][f"{t:g}"]) for t in C3_TIMES)
+                         + f" | {_pct(r['direct16'])} | {_pct(r['grid12'])} | {_pct(r['grid8'])} | {_f(r['rollout12'])} | "
+                           f"{_f(r['completed_updates'])} | {_f(r['stopped_early'])} |")
+    h = summary["hypotheses"]
+    def v(flag):
+        return "**缺数据**" if flag is None else _verdict(flag)
+    lines += ["", f"## H1 截断是不是实际瓶颈（T=8 比 K16 高 ≥ 3 pp）：{v(h['H1']['pass_'])}", ""]
+    lines += [f"- {x['scene']}：K16 {_pct(x['k16'])}；" + "，".join(f"{k} {_pp(d)}" for k, d in x["minus_k16"].items()) for x in h["H1"]["scenes"]]
+    lines += ["", f"## H2 B16 − K 取满：{h['H2']['verdict'] or '缺数据'}（两场景 T=8 均值 {_pp(h['H2']['mean_t8'])}；主候选 {h['H2']['candidate'] or '—'}）", ""]
+    lines += [f"- {x['scene']}：" + "，".join(f"T={t} {_pp(d)}" for t, d in x["b16_minus_kfull"].items()) for x in h["H2"]["scenes"]]
+    lines += ["", f"## H3 追不追得上 TF+一致性（{h['H3']['variant'] or '—'} ≥ TF − 1 pp）：{v(h['H3']['pass_'])}", "", f"（{h['H3']['note']}）", ""]
+    lines += [f"- {x['scene']}：" + "，".join(f"T={t} {_pp(c['gap'])}" + ("（单种子不下结论）" if c["inconclusive"] else "")
+                                         for t, c in x["cells"].items()) for x in h["H3"]["scenes"]]
+    lines += ["", "## H4 一致性压长程累积误差（① 比 no_cons 低 ≥ 5%，≥ 2/3 场景；② 不高于 TF+一致性，≥ 2/3 场景）", ""]
+    for name, x in h["H4"].items():
+        lines.append(f"- {name}：① {v(x['one'])}，② {v(x['two'])}；" + "；".join(
+            f"{r['scene']} full {_f(r['full'])} / no_cons {_f(r['no_cons'])}（{_pct(r['rel_no_cons'])}）/ TF {_f(r['tf'])}" for r in x["scenes"]))
+    lines += ["", f"## H5 别处有没有变差（不比 K16 差 1 pp 以上、有限）：{v(h['H5']['pass_'])}", ""]
+    lines += [f"- {x['variant']} {x['scene']}：" + "，".join(f"{m} {_pp(c['minus_k16'])}" for m, c in x["checks"].items())
+              + f"，有限 {_f(x['finite'])}" for x in h["H5"]["rows"]]
+    lines += ["", f"## H6 基底数曲线 K16c → K32c → K64c → K 取满（T=8，单调不降，允许 0.5 pp）：{v(h['H6']['pass_'])}", ""]
+    lines += [f"- {x['scene']}：" + " → ".join(f"{k} {_pct(g)}" for k, g in x["curve"].items()) for x in h["H6"]["scenes"]]
+    if summary["readout"]:
+        lines += ["", "## 读出（只报告）", "", "| 变体 | 场景 | full nmse | no_cons nmse | full VPT@0.1 | no_cons VPT@0.1 | full gain | no_cons gain |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for e in summary["readout"]:
+            a, b = e.get("po_jepa_full") or {}, e.get("po_jepa_no_consistency") or {}
+            lines.append(f"| {e['variant']} | {e['scene']} | {_f(a.get('nmse_mean'))} | {_f(b.get('nmse_mean'))} | {_f(a.get('vpt'))} | "
+                         f"{_f(b.get('vpt'))} | {_f(a.get('gain'))} | {_f(b.get('gain'))} |")
+        lines.append("\nG9 收缩检查（motion_gain）在 `<变体>/shrinkage/`，这里不汇总。")
+    return lines
 
 
 def write(output, summary):
@@ -723,6 +1002,9 @@ def main(argv=None):
     for name in ("--results", "--v7-results", "--output"):
         c2.add_argument(name, type=Path, required=True)
     c2.add_argument("--readout", type=Path); c2.add_argument("--v7-readout", type=Path)
+    c3 = sub.add_parser("c3")
+    for name in ("--results", "--c2-results", "--output"):
+        c3.add_argument(name, type=Path, required=True)
     r = sub.add_parser("readout"); r.add_argument("--results", type=Path, required=True); r.add_argument("--output", type=Path, required=True)
     r.add_argument("--actions", type=Path, help="动作探针 probe-actions-<场景>.json 所在目录")
     a = p.parse_args(argv)
@@ -730,6 +1012,8 @@ def main(argv=None):
         summary = c1_summary(a.results)
     elif a.stage == "c2":
         summary = c2_summary(a.results, a.v7_results, a.readout, a.v7_readout)
+    elif a.stage == "c3":
+        summary = c3_summary(a.results, a.c2_results)
     else:
         summary = readout_summary(a.results, a.actions)
     write(a.output, summary)

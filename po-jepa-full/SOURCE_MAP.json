@@ -38,9 +38,9 @@
       "target": "src/po_jepa/dynamics.py",
       "sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
       "operation": "comments_and_docstrings_only",
-      "candidate_sha256": "7e3d1b548477aaccce1532056bf03023d95a223a4e01eca82bb7094caf8f9ac4",
+      "candidate_sha256": "fdc84273c5ede2e0f0d48f586101e544e90626d57876cb759028d45de3c779ad",
       "comment_cleanup_baseline_sha256": "0ab86d588832abc133a7d54cdda44ecd633fc5fa0778d5e8d29b03f2d91abada",
-      "executable_ast_sha256": "886b94ab779809da072a5c6b6776b077ad36963bd936cf60e569ab9dec3e5fc5",
+      "executable_ast_sha256": "70e3099a64f79633bb88519fb58944e732809e4205d211e1a4ea692e3d0214de",
       "prior_operation": "identical_bytes",
       "v7_previous_candidate_sha256": "1d1f74a73153016715ad722aa417ee367d8d624f2f162bebc37026044a5d5143"
     },
@@ -81,9 +81,9 @@
       "target": "src/po_jepa/model.py",
       "sha256": "c37009b8a022f813c2fac6b9f9f7d037061c655ddbe2d4b8b3485d411c089938",
       "operation": "v4_modified",
-      "candidate_sha256": "8218ce2f10a51fe896f9a903084f5a9adaeab64a3c295163a38e83e4fb7537c7",
+      "candidate_sha256": "e13e8540e0f4857e17b6465b74303b39c9aeb54f8d865236100d4339cce37a95",
       "comment_cleanup_baseline_sha256": "c37009b8a022f813c2fac6b9f9f7d037061c655ddbe2d4b8b3485d411c089938",
-      "executable_ast_sha256": "cfbb6357035ad1e9819662c87c7c8cdd861bc2cbcffeb43d14fe38db1b2c72d3",
+      "executable_ast_sha256": "1d9ddff95019ef2959aa388eaed15f92bd63793dddcd328a28ac51353c0620ac",
       "prior_operation": "identical_bytes",
       "v4_previous_candidate_sha256": "3a4be80bee9f2be733301d22bd9e26c307562ea39c6194ac72883ee3663f68e3",
       "v7_previous_candidate_sha256": "3a4be80bee9f2be733301d22bd9e26c307562ea39c6194ac72883ee3663f68e3"
@@ -155,9 +155,9 @@
         "validation_cost"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "8dd50bf35235429e50ba6e43791ca2d0cb4f79c53cc44f5aa22ac456f04fdd95",
+      "candidate_sha256": "d9d8cd68037751d73435b8f8b4826baa7371d77271408521bc11dd5521725ff9",
       "comment_cleanup_baseline_sha256": "73c0f7c521b3eec1fd92a6f55d705e722e3eacb79d17f0606b3dd1c09f946b61",
-      "executable_ast_sha256": "a4daf4a322261cbfef3cb67ef0e527b2dcd1edbb3d9ccd5ae5dab2940fb2e378",
+      "executable_ast_sha256": "1ed6f048a5e5dc61e3a0e34393db2b10764f0e6b9d8c10d541c08f581edb9158",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99",
       "v7_previous_candidate_sha256": "a1ca6d07bdf111c912e7e842f0a668fd29e60dfbb466f3f43fbf98f57cf18d99"
@@ -374,9 +374,9 @@
         "train_step"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "5ea63c933c8c920157ca3d11946fcccfd569562a48fe742bd74e7e16c2af65e5",
+      "candidate_sha256": "432a6a6a96d3b944f350be9628d88cf2432699840fd8500b4f001d973a509a81",
       "comment_cleanup_baseline_sha256": "0ef052987ce4034221c4f6f8956b08ab06999757349352e7b51a848e8027b444",
-      "executable_ast_sha256": "975646bb2c731e4c29203a5678484fd6dac0fdb6784d38b37ec4fdbf1cba02db",
+      "executable_ast_sha256": "95d1ecacd006b67d1b9a7e1732ea62019e4780698105353264fb5b9469f668db",
       "prior_operation": "dependency_closure_and_resource_relocation",
       "v4_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71",
       "v7_previous_candidate_sha256": "337c38c20454209a199adadebc9b907aa5ec921a93b58f308ca1f8f681a5cc71"
@@ -410,9 +410,9 @@
       "target": "src/po_jepa/spectral.py",
       "sha256": "742348374c97adad299fa7e7647c423ec4f6a9a6a1ce65ceeb97cb01b9f614e3",
       "operation": "v4_modified",
-      "candidate_sha256": "f5d780210e45b8f27d5a8750def4b8e48094f1b3bfb017bef66d2795e473cdc9",
+      "candidate_sha256": "08dd2b1993467d3ea1049d7c3e5d7d9fac3740869d5825e1620653ef3d9e89b4",
       "comment_cleanup_baseline_sha256": "742348374c97adad299fa7e7647c423ec4f6a9a6a1ce65ceeb97cb01b9f614e3",
-      "executable_ast_sha256": "1fdf6c404a1c94528277bc4c93f2b675d6062a06046a720f2a9e616e7a804c13",
+      "executable_ast_sha256": "f73857bdc40b67de1bcf4748d9d72998b00a135a0b5f6da8ee3d1aaaf43b2c6c",
       "prior_operation": "identical_bytes",
       "v4_previous_candidate_sha256": "d8e630fef100b17245951ce47ee168815e166b73c19374a9c35cef16db8f557e",
       "v7_previous_candidate_sha256": "d8e630fef100b17245951ce47ee168815e166b73c19374a9c35cef16db8f557e"

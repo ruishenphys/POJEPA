@@ -416,8 +416,12 @@ def _model_config(model: POJEPA) -> dict:
     # S28b：默认的 Xavier 不进快照（旧检查点的 model_config 逐键不变）；零初始化写进去，两种检查点不会互相读错
     if snapshot["readout_init"] == "xavier":
         del snapshot["readout_init"]
+    dynamics = asdict(model.dynamics.config)
+    # C3：默认的 complement="none" 不进快照（C-2 及以前的检查点 model_config 逐键不变、照样能读）；方案 B 写进去，两种检查点不会互相读错
+    if dynamics.get("complement") == "none":
+        del dynamics["complement"]
     return _native_config(dict(projection=snapshot, graph=asdict(model.spectrum.config),
-        dynamics=asdict(model.dynamics.config), integrator=asdict(model.integrator)))
+        dynamics=dynamics, integrator=asdict(model.integrator)))
 
 def _optimizer_config(optimizer: torch.optim.AdamW) -> dict:
     """记录实际defaults和组配置；真实参数顺序另存名称，不以数量替代归属。"""

@@ -77,8 +77,10 @@ def learned_blocks(model, raw_z, grid) -> dict:
     """一个起点 [1,256,1408] → dict(decay [K·32] s⁻¹, frequency [K·32] rad/s, weight [K·32]，和为 1)，float64 numpy。"""
     q = model.prepare_query(raw_z, grid)
     co = q.dynamics.coefficients
-    gamma, omega = co.gamma[0].double().cpu(), co.omega[0].double().cpu()             # [K,32]，每周期
-    c0 = q.initial_coefficients[0].double().cpu()                                     # [K,64]
+    # C3：方案 B（complement="shared"）的状态是 [C; R]，这里只取前 K 个模态行；补空间 R 不在对照里（工具输出 complement_excluded）
+    k = q.spectrum.basis.shape[2]
+    gamma, omega = co.gamma[0, :k].double().cpu(), co.omega[0, :k].double().cpu()     # [K,32]，每周期
+    c0 = q.initial_coefficients[0, :k].double().cpu()                                 # [K,64]
     if gamma.shape != omega.shape or c0.shape != (gamma.shape[0], 64) or gamma.shape[1] != 32:
         raise ValueError("unexpected modal coefficient shapes")
     energy = (c0.reshape(gamma.shape[0], 32, 2)**2).sum(-1)

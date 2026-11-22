@@ -267,8 +267,13 @@ def equal_step_rows(groups, equal_jobs, problems):
 def _variant_suffix(job):
     """S28b：非默认变体（job.json 的 variant：多段切分、零初始化）加在数据集名后，和标定文件名同一写法；默认变体为空。"""
     variant = job.get("variant") or {}
-    return (("~dyadic" if variant.get("temporal_partition") == "dyadic" else "")
-            + ("~zeroinit" if variant.get("readout_init") == "zero" else ""))
+    suffix = (("~dyadic" if variant.get("temporal_partition") == "dyadic" else "")
+              + ("~zeroinit" if variant.get("readout_init") == "zero" else ""))
+    # C3：空间部分（K、补空间），和 runtime.checks.variant_suffix 同一写法
+    modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
+    if modes != "16" or complement != "none":
+        suffix += f"~K{modes}"+("c" if complement == "shared" else "")
+    return suffix
 
 
 def _label(job):
