@@ -8,6 +8,12 @@ make_v7_jobs.py 相同，在 工作目录/full-model/po-jepa-full 里用 tools/r
   python tools/make_small_validation_jobs.py --stage c2 --temporal-partition <P> --readout-init <I> > jobs-sv-c2.txt
       # C-2 对照：C-1 选定的变体，3 个场景 × 2000 条 × 10000 步，种子 1703；po_jepa_full、po_jepa_no_consistency、
       # transformer_consistency、fixed_fourier、po_jepa_rollout_sup 共 15 条训练，加 3 条 identity（逐位核对，决定能不能复用 v7.1）
+  python tools/make_small_validation_jobs.py --stage c3 --batch 1 > jobs-sv-c3-b1.txt
+  python tools/make_small_validation_jobs.py --stage c3 --batch 2 > jobs-sv-c3-b2.txt
+      # C-3 空间基底数 K 消融 + 方案 B（方案 small-validation-results/c3-plan/2026-11-22_mode-ablation-plan.md §4），
+      # 都是 C-2 的 dyadic-zero，只改空间部分。第一批：K16c（K=16 + 补空间）、Kfull（每个网格 K = token 数）各
+      # po_jepa_full + po_jepa_no_consistency，共 12 条训练，加 3 条 identity（和 C-2 逐位核对）；
+      # 第二批：K32、K64 只训 po_jepa_full，共 6 条。K16 和 transformer_consistency 复用 C-2，不重训。
 
 C-2 的变体必须显式给：由 C-1 的汇总（tools/summarize_small_validation.py c1）按预先写好的规则推荐，Jerry 可以改。
 三个阶段的先后：b-v7.1 和 c1 互不依赖，可以同时排；c2 在 c1 之后，它的 R 段（新检查点的读出）要用 b-v7.1 的探针和真值。
@@ -51,6 +57,12 @@ LONG_HORIZON = 128
 CHECK_SCENE = "van_der_pol"
 FEATURES, LONG_FEATURES = "../../features-v7", "../../features-small-validation"
 RESULTS_V71, OUT = "../../results-v7/full/v7.1", "../../results-small-validation"
+# C-3（2026-11-22 方案 §4）：变体名 → run.py 的 --modes/--complement；分两批，第一批是两个“不丢信息”的候选
+C3_VARIANTS = dict(K16c=("16", "shared"), Kfull=("full", "none"), K32=("32", "none"), K64=("64", "none"))
+C3_BATCHES = {1: ("K16c", "Kfull"), 2: ("K32", "K64")}
+C3_CONDITIONS = {1: ("po_jepa_full", "po_jepa_no_consistency"), 2: ("po_jepa_full",)}
+C3_BASE = ("dyadic", "zero")            # C-2 定下的变体（Jerry 2026-11-19），C-3 只改空间部分
+C3_IDENTITY_VARIANT = "K16c"            # 第一批的 3 条 identity 放在这个变体的结果根下（identity 不用模型，和变体无关）
 ENCODER, AC, UPSTREAM = "../../checkpoints/vjepa2-vitg-fpc64-256.pth", "../../checkpoints/vjepa2-ac-vitg.pt", "../../vjepa2"
 V6_REQUIRED = ("c1 必须给 --v6-features：v7 里 200 条的 double_well 读的是 v6 的特征目录（v7 试跑同样），给 v7 试跑用的同一个"
                "绝对路径（v7 交接说明里 V6= 那一行）")
@@ -224,11 +236,86 @@ def c2_lines(partition, init):
     return lines
 
 
-def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4):
+def c3_root(name) -> str:
+    return f"{OUT}/c3/{variant_name(*C3_BASE)}-{name}"
+
+
+def c3_flags(name) -> str:
+    modes, complement = C3_VARIANTS[name]
+    return f"{variant_flags(*C3_BASE)} --modes {modes} --complement {complement}"
+
+
+def c3_lines(batch):
+    """C-3（方案 §4、§6）：每个新变体重标 λ、检查一次，训练 + 评测，第一批另有 identity、同步数对照和 G9 收缩检查。"""
+    n, updates = C2["n"], C2["updates"]
+    names, conditions = C3_BATCHES[batch], C3_CONDITIONS[batch]
+    c2_root = f"{OUT}/c2/{variant_name(*C3_BASE)}"
+    lines = [f"# C-3 第 {batch} 批：{', '.join(names)}，都是 C-2 的 {variant_name(*C3_BASE)}（多段切分 + P_out 零初始化），只改空间部分。",
+             f"# K16（现模型）和 transformer_consistency 复用 C-2（{c2_root}，不重训）；"
+             + ("E 段先核这里的 identity 和 C-2 逐位相同。" if batch == 1 else "复用前提是第一批的 identity 已和 C-2 逐位相同。"),
+             "# 前提：b-v7.1 的 R1、R2（探针、真值）和 L1–L2（长时程测试集）已完成；C-2 的任务目录还在。",
+             "# 变体：" + "；".join(f"{v} = --modes {C3_VARIANTS[v][0]} --complement {C3_VARIANTS[v][1]}" for v in names),
+             f"# ===== C 标定（GPU，{len(names)*len(SCENES)} 条；每个变体每个场景重标 σ_z、λ_t、λ_s）====="]
+    for v in names:
+        for s in SCENES:
+            lines.append(f"python run.py calibrate {ds(s, n)} --updates {updates} {c3_flags(v)} --features-root {feats(s, n)} "
+                         f"--device cuda:0 --output {c3_root(v)}/calibrate/{s}")
+    lines.append(f"# ===== C2 检查（GPU，{len(names)} 条；每个变体在 {CHECK_SCENE} 上 1 条：依赖、设备、完整梯度、100 步成本）=====")
+    for v in names:
+        lines.append(f"python run.py check {ds(CHECK_SCENE, n)} --updates {updates} {c3_flags(v)} --features-root {feats(CHECK_SCENE, n)} "
+                     f"--device cuda:0 --output {c3_root(v)}/check")
+    identity = batch == 1
+    count = len(names)*len(SCENES)*len(conditions)+(len(SCENES) if identity else 0)
+    lines.append(f"# ===== D 训练+评测（GPU，{count} 条，互不依赖" + ("；identity 不训练，只作和 C-2 的逐位核对" if identity else "") + "）=====")
+    for v in names:
+        for s in SCENES:
+            for c in (*conditions, *(("identity",) if identity and v == C3_IDENTITY_VARIANT else ())):
+                lines.append(f"python run.py run {ds(s, n)} --updates {updates} --seed {SEED} --condition {c} {c3_flags(v)} "
+                             f"--features-root {feats(s, n)} --device cuda:0 --output {c3_root(v)}/{s}/seed{SEED}/{c}")
+    if "po_jepa_no_consistency" in conditions:
+        lines.append(f"# ===== D2 同步数对照（GPU，{len(names)*len(SCENES)} 条，只评测）：no_consistency 截到同一变体 po_jepa_full 实际训练的步数 =====")
+        for v in names:
+            for s in SCENES:
+                lines.append(f"python run.py equal-step {ds(s, n)} --updates {updates} --seed {SEED} --condition po_jepa_no_consistency "
+                             f"{c3_flags(v)} --training-run {c3_root(v)}/{s}/seed{SEED}/po_jepa_no_consistency "
+                             f"--limit-run {c3_root(v)}/{s}/seed{SEED}/po_jepa_full --features-root {feats(s, n)} --device cuda:0 "
+                             f"--output {c3_root(v)}/equal-step/{s}/seed{SEED}/po_jepa_no_consistency")
+    # R 段：每个变体各自的结果根，两节（R3 读出、R4 模态）合并成一节，各变体的行同时排
+    r3, r4 = [], []
+    for v in names:
+        part = readout_lines(c3_root(v), f"{c3_root(v)}/readout", conditions, (SEED,), cross_version=False)
+        split = next(i for i, l in enumerate(part) if l.startswith("# ===== R4"))
+        r3 += part[1:split]; r4 += part[split+1:]
+    lines.append(f"# ===== R3 长时程读出、反事实（GPU，{len(r3)} 条，互不依赖）=====")
+    lines += r3
+    lines.append(f"# ===== R4 模态频率对照（GPU，{len(r4)} 条；只有线性场景、PO-JEPA 条件；探索性；方案 B 只对照前 16 个模态）=====")
+    lines += r4
+    if batch == 1:
+        lines.append(f"# ===== G9 收缩检查（GPU，{len(names)*len(SCENES)*len(conditions)} 条，只评测；tools/shrinkage_check.py，和 C-2 的 G9 同一口径）=====")
+        for v in names:
+            for s in SCENES:
+                for c in conditions:
+                    lines.append(f"python tools/shrinkage_check.py --job {c3_root(v)}/{s}/seed{SEED}/{c} --probe {OUT}/readout/probe/{s} "
+                                 f"--truth {OUT}/readout/truth/{s}.json --features {feats(s, n)} "
+                                 f"--output {c3_root(v)}/shrinkage/{s}/seed{SEED}/{c}.json --device cuda:0")
+    lines.append(f"# ===== E 汇总（CPU，{len(names)+1} 条）：每个变体一张 v7 汇总表；再和 C-2（K16、TF+一致性）合起来出方案 §5 的判据表 =====")
+    for v in names:
+        lines.append(f"python tools/summarize_v7.py --results {c3_root(v)} --output {c3_root(v)}/summary")
+    lines.append(f"python tools/summarize_small_validation.py c3 --results {OUT}/c3 --c2-results {c2_root} --output {OUT}/c3/summary")
+    return lines
+
+
+def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4, batch=None):
     if stage != "c1" and v6_features:
         raise ValueError("--v6-features 只用于 --stage c1（只有 C-1 的 double_well 是 200 条）")
     if stage != "c2" and (partition or init):
-        raise ValueError("--temporal-partition / --readout-init 只用于 --stage c2（C-1 四个变体都排）")
+        raise ValueError("--temporal-partition / --readout-init 只用于 --stage c2（C-1 四个变体都排；C-3 固定用 C-2 定下的 dyadic-zero）")
+    if (stage == "c3") != (batch is not None):
+        raise ValueError("--batch 只用于 --stage c3，而且 c3 必须给（1 = K16c、Kfull；2 = K32、K64）")
+    if stage == "c3":
+        if batch not in C3_BATCHES:
+            raise ValueError(f"--batch 只能是 {sorted(C3_BATCHES)}")
+        return c3_lines(batch)
     if stage == "b-v7.1":
         return b_lines(shards)
     if stage == "c1":
@@ -244,14 +331,16 @@ def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("b-v7.1", "c1", "c2"), required=True)
+    p.add_argument("--stage", choices=("b-v7.1", "c1", "c2", "c3"), required=True)
     p.add_argument("--v6-features", default="", help="c1 必须给：v7 试跑用的 v6 double_well-200 特征目录（绝对路径）")
     p.add_argument("--temporal-partition", choices=PARTITIONS, help="c2 必须给：C-1 定下的时间一致性切分")
     p.add_argument("--readout-init", choices=INITS, help="c2 必须给：C-1 定下的 P_out 初始化")
     p.add_argument("--shards", type=int, default=4, help="b-v7.1：长时程测试集的编码切成几片（每片一张卡）")
+    p.add_argument("--batch", type=int, choices=sorted(C3_BATCHES), help="c3 必须给：1 = K16c、Kfull（各 full + no_cons），2 = K32、K64（只 full）")
     a = p.parse_args(argv)
     try:
-        lines = job_lines(a.stage, v6_features=a.v6_features, partition=a.temporal_partition, init=a.readout_init, shards=a.shards)
+        lines = job_lines(a.stage, v6_features=a.v6_features, partition=a.temporal_partition, init=a.readout_init, shards=a.shards,
+                          batch=a.batch)
     except ValueError as error:
         p.error(str(error))
     sys.stdout.write("\n".join(lines)+"\n")

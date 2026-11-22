@@ -15,3 +15,6 @@ def cpu_test_threads():
 def strict_portable_default(monkeypatch):
     """C8：测试一律从严格模式（PO_JEPA_PORTABLE 未设）开始，不受跑测试的机器上残留的环境变量影响。"""
     monkeypatch.delenv('PO_JEPA_PORTABLE',raising=False)
+    # C3：K 消融和补空间的变体开关同样不从外面带进来
+    monkeypatch.delenv('PO_JEPA_MODES',raising=False)
+    monkeypatch.delenv('PO_JEPA_COMPLEMENT',raising=False)

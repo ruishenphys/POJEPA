@@ -2,6 +2,8 @@
 
 P_in/P_out 为 1408↔64 线性投影，采用 Xavier uniform 与零偏置（S28b：readout_init="zero" 时 P_out 权重清零）。
 每次完整 Phi 重建图谱和上下文；零时长也经谱投影与读出，不强制恒等。
+C3（方案 B，dynamics.complement="shared"）：积分状态是 [C; R]，C0 = Psi^T X、R0 = X - Psi Psi^T X（Y0 = X，不丢信息），
+读出合成 Y = Psi C + R；complement="none" 时与以前逐位相同。
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ class ProjectionConfig:
 class QueryContext:
     """单次 Phi 起点的工作量，仅本次查询或内部续算有效。
 
-    X [B,N,64]、C0 [B,K,64] 为模型 float32 并保留梯度；grid 为 CPU
+    X [B,N,64]、C0 [B,K,64]（complement="shared" 时是 [C0; R0] [B,K+N,64]）为模型 float32 并保留梯度；grid 为 CPU
     float64，谱 lambda/Psi 无梯度，g/A/B/两偏置保留图。字段只读，不跨优化步缓存。
     """
 
@@ -162,13 +164,30 @@ class POJEPA(nn.Module):
         if graph.fixed_modes and x.shape[1] < graph.max_modes:
             raise ValueError("fixed_modes requires every grid to have at least K tokens")
         modes = graph.max_modes if graph.fixed_modes else min(graph.max_modes, x.shape[1])
+        complement = self.dynamics.complement_mode
+        if complement and modes >= x.shape[1]:
+            raise ValueError("complement 'shared' needs K < N on every grid (with K = N there is no complement to keep)")
         # affinity 内部只取 detach 副本；encoder 模式用编码器输出 Z 建图，不经过可训练 P_in。
         # 07 §2.1：建图、规范化、求谱由 spectrum_for 按 v7 原顺序一次做完，所以 N<K 的检查提到它前面。
         spectrum = self.spectrum.spectrum_for(raw_z if graph.affinity_source == "encoder" else x, grid,
                                               k=modes, model_device=x.device)
         initial = modal_analysis(x, spectrum.basis)
-        context = self.dynamics.prepare_context(x, spectrum.eigenvalues, spectrum.basis, grid.coords)
+        if complement:
+            if spectrum.complement_eigenvalue is None:
+                raise ValueError("complement 'shared' needs lambda_perp from the graph spectrum (fixed Fourier has none)")
+            # C3：R0 = P_perp X = X - Psi Psi^T X，接在 C0 后面；Y0 = Psi C0 + R0 = X
+            initial = torch.cat((initial, x-modal_synthesis(initial, spectrum.basis)), dim=1)
+            context = self.dynamics.prepare_context(x, spectrum.eigenvalues, spectrum.basis, grid.coords,
+                                                    spectrum.complement_eigenvalue)
+        else:
+            context = self.dynamics.prepare_context(x, spectrum.eigenvalues, spectrum.basis, grid.coords)
         return QueryContext(x, grid, spectrum, initial, context)
+
+    def synthesize(self, state: Tensor, query: QueryContext) -> Tensor:
+        """积分状态→token 场 [B,N,64]：现模型 Psi C；complement="shared" 时 Psi C + R（R 是状态的后 N 行）。"""
+        modes = query.spectrum.basis.shape[2]
+        field = modal_synthesis(state[:, :modes] if self.dynamics.complement_mode else state, query.spectrum.basis)
+        return field+state[:, modes:] if self.dynamics.complement_mode else field
 
     def integrate_internal_continuation(
         self, query: QueryContext, current_coefficients: Tensor,
@@ -199,11 +218,11 @@ class POJEPA(nn.Module):
         query = self.prepare_query(raw_z, grid)
         integration = self.dynamics.integrate_segments(query.initial_coefficients, controls,
             query.dynamics, duration=duration, config=self.integrator, collect_trace=collect_trace)
-        synthesized = modal_synthesis(integration.final, query.spectrum.basis)
+        synthesized = self.synthesize(integration.final, query)
         raw = self.project_out(synthesized)
         if self.readout == "residual":
             # 偏置在两项中精确相消；C_tau=C_0 时差为 0，输出逐位等于输入 Z。
-            initial = modal_synthesis(query.initial_coefficients, query.spectrum.basis)
+            initial = self.synthesize(query.initial_coefficients, query)
             raw = raw_z + (raw - self.project_out(initial))
         return PredictionTrace(raw, query, integration, synthesized)
 

@@ -11,6 +11,15 @@ forcing_space="token"（导师 2026-11-08）：动作驱动与非线性交互改
 F 为 token 间稀疏注意力（内容分数+相对位置偏置）加逐 token 残差 M(Y,X_t,a)。A 仍是阻尼旋转块，只依赖
 (lambda_k,g)，与同一特征值子空间内的任意正交变换 Q（含符号翻转）对易，因此 Psi->Psi Q 时 C->Q^T C、
 Y 与预测不变。默认 "modal" 为 v7 原式，参数、随机数消耗与数值逐位不变。
+
+complement="shared"（C3 方案 B，Jerry 2026-11-22：前 K 个模态照常，被截掉的补空间整体保留并参与演化，不丢信息）：
+状态是模态系数 C [B,K,64] 加补空间场 R [B,N,64]，R 落在 span(Psi) 的正交补里，Y = Psi C + R，P_perp = I - Psi Psi^T，
+    dC/dt = A(Lambda,g) C + Psi^T [ B(X_t,a) + F(Y,X_t,a) ],
+    dR/dt = A(lambda_perp,g) R + P_perp [ B(X_t,a) + F(Y,X_t,a) ],
+lambda_perp = 被截掉的特征值的均值（spectral.SpectralResult.complement_eigenvalue），A_perp 用同一个条件网络、不加参数。
+积分状态把 R 的 N 行接在 C 的 K 行后面，形状 [B,K+N,64]，R 行的阻尼旋转块是 A_perp 广播，所以积分器、指数欧拉步
+都不用改，只改右端。A_perp 对 token 轴是常数（只作用在通道对上），与 P_perp 对易，R 每一步都留在正交补里。
+complement="none"（默认）完全不建 R：没有 P_perp[B+F]、没有 A_perp，F 只看 Psi C，与以前逐位相同。
 """
 
 from dataclasses import dataclass
@@ -46,11 +55,17 @@ class DynamicsConfig:
     head_weight_std: float
     # "modal"：v7 原式 Ac+B(lambda,g)a+N(C,a)；"token"：Ac+Psi^T[B(X,a)+F(Psi C,X,a)]（见模块说明）
     forcing_space: str = "modal"
+    # C3：补空间。"none"（默认）= 现模型；"shared" = 方案 B，补空间场 R 整体保留，用 A(lambda_perp,g) 演化（见模块说明）。只接 token 模式
+    complement: str = "none"
 
     def __post_init__(self) -> None:
         """分配参数前验证严格整数/正有限实数，拒绝bool与未登记宽度。"""
         if self.forcing_space not in ("modal", "token"):
             raise ValueError("forcing_space must be 'modal' or 'token'")
+        if type(self.complement) is not str or self.complement not in ("none", "shared"):
+            raise ValueError("complement must be 'none' or 'shared'")
+        if self.complement == "shared" and self.forcing_space != "token":
+            raise ValueError("complement 'shared' requires forcing_space 'token' (the complement field lives in token space)")
         for name in ("action_dim", "top_r"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -208,6 +223,9 @@ class DynamicsContext:
     token_x: Tensor | None = None
     b_field: Tensor | None = None
     token_bias: Tensor | None = None
+    # 仅 complement="shared"：lambda_perp [B]，模型 float32 无梯度。有它时积分状态是 [B,K+N,64]（C 行后接 R 行），
+    # coefficients 的 gamma/omega/A 也是 K+N 行（后 N 行是 A(lambda_perp,g) 的广播）
+    complement_eigenvalue: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -451,6 +469,17 @@ class ModalDynamics(nn.Module):
         tokens = context.basis.shape[1]
         if context.basis.shape != (batch, tokens, modes) or tokens < modes:
             raise ValueError("context basis must have matching shape [B, N >= K, K]")
+        if self.complement_mode:
+            if context.complement_eigenvalue is None:
+                raise ValueError("complement 'shared' needs lambda_perp in the context")
+            _validate_model_tensor(context.complement_eigenvalue, self.condition_trunk[0], "complement_eigenvalue")
+            if context.complement_eigenvalue.shape != (batch,) or context.complement_eigenvalue.requires_grad:
+                raise ValueError("lambda_perp must be a constant [B] without gradients")
+            if tokens == modes:
+                raise ValueError("complement 'shared' needs K < N (the complement is empty when K = N)")
+        elif context.complement_eigenvalue is not None:
+            raise ValueError("complement 'none' takes no lambda_perp")
+        rows = self.state_rows(context)
         if context.token_x.shape != (batch, tokens, 64) or context.b_field.shape != (batch, tokens, 64, self.config.action_dim):
             raise ValueError("token context X/B field must have shapes [B,N,64]/[B,N,64,m]")
         if context.token_bias.shape != (tokens, tokens) or context.coords.shape != (tokens, 2):
@@ -458,8 +487,31 @@ class ModalDynamics(nn.Module):
         if context.coefficients.b_matrix is not None or context.spectral_bias is not None or context.spatial_bias is not None:
             raise ValueError("token mode has no modal B matrix or modal attention biases")
         for name in ("raw_gamma", "gamma", "omega"):
-            if getattr(context.coefficients, name).shape != (batch, modes, 32):
-                raise ValueError(f"context {name} must have shape [B,K,32]")
+            if getattr(context.coefficients, name).shape != (batch, rows, 32):
+                raise ValueError(f"context {name} must have shape [B,K,32] (K+N rows with the complement)")
+
+    @property
+    def complement_mode(self) -> bool:
+        return self.config.complement == "shared"
+
+    def state_rows(self, context: DynamicsContext) -> int:
+        """积分状态的行数：K（现模型）或 K+N（complement="shared"，C 行后接补空间场 R 的 N 行）。"""
+        modes = context.eigenvalues.shape[1]
+        return modes+context.basis.shape[1] if self.complement_mode else modes
+
+    def token_field(self, state: Tensor, context: DynamicsContext) -> Tensor:
+        """积分状态→完整 token 场 Y [B,N,64]：现模型 Y = Psi C；complement="shared" 时 Y = Psi C + R。"""
+        modes = context.eigenvalues.shape[1]
+        field = torch.bmm(context.basis, state[:, :modes])
+        return field+state[:, modes:] if self.complement_mode else field
+
+    def project_token_forcing(self, forcing: Tensor, context: DynamicsContext) -> Tensor:
+        """token 空间强迫 G [B,N,64]→积分状态的右端：现模型 Psi^T G [B,K,64]；
+        complement="shared" 时 [Psi^T G; P_perp G] [B,K+N,64]，P_perp G = G - Psi Psi^T G。"""
+        modal = torch.bmm(context.basis.transpose(1, 2), forcing)
+        if not self.complement_mode:
+            return modal
+        return torch.cat((modal, forcing-torch.bmm(context.basis, modal)), dim=1)
 
     def _token_pair_bias(self, coords: Tensor) -> Tensor:
         """coords [N,2]→相对位置偏置 [N,N]（接收 i、来源 j；特征 [dx,dy,|dx|,|dy|,dist]，dx=x_j-x_i）。"""
@@ -476,18 +528,19 @@ class ModalDynamics(nn.Module):
             ConditionedCoefficients(*(pick(getattr(fixed, name)) for name in
                 ("raw_gamma", "gamma", "omega", "a_blocks", "b_matrix"))),
             pick(context.spectral_bias), pick(context.spatial_bias),
-            pick(context.token_x), pick(context.b_field), context.token_bias)
+            pick(context.token_x), pick(context.b_field), context.token_bias, pick(context.complement_eigenvalue))
 
     def token_forcing(self, coefficients: Tensor, action: Tensor, context: DynamicsContext) -> RHSResult:
-        """token 模式右端：free=Ac，linear=Psi^T(B(X)a)，interaction=self.nonlinear（Psi^T F(Y,X,a)）。"""
+        """token 模式右端：free=Ac，linear=Psi^T(B(X)a)，interaction=self.nonlinear（Psi^T F(Y,X,a)）。
+        complement="shared"：状态 [C;R]，free 的 R 行用 A_perp，linear/interaction 是 [Psi^T G; P_perp G]。"""
         self._validate_context(context)
-        if coefficients.shape[:2] != context.eigenvalues.shape or coefficients.shape[2] != 64:
+        if coefficients.shape[:2] != (context.eigenvalues.shape[0], self.state_rows(context)) or coefficients.shape[2] != 64:
             raise ValueError("coefficients must match context batch and modes")
         if action.shape != (coefficients.shape[0], self.config.action_dim):
             raise ValueError("action must have shape [matching B, action_dim]")
         free = self.free_rhs(coefficients, context.coefficients.a_blocks)
         drive = torch.einsum("bncd,bd->bnc", context.b_field, action)            # B(X)a [B,N,64]
-        linear = torch.bmm(context.basis.transpose(1, 2), drive)
+        linear = self.project_token_forcing(drive, context)
         interaction = self.nonlinear(coefficients, action, context)
         derivative = free+linear+interaction.nonlinear
         if not torch.isfinite(derivative).all():
@@ -501,12 +554,12 @@ class ModalDynamics(nn.Module):
         spatial_scores 为相对位置偏置；action_residual 为 token 空间 M [B,N,64]；nonlinear 为投影后 [B,K,64]。
         """
         self._validate_context(context)
-        if coefficients.shape[:2] != context.eigenvalues.shape or coefficients.shape[2] != 64:
+        if coefficients.shape[:2] != (context.eigenvalues.shape[0], self.state_rows(context)) or coefficients.shape[2] != 64:
             raise ValueError("coefficients must match context batch and modes")
         if action.shape != (coefficients.shape[0], self.config.action_dim):
             raise ValueError("action must have shape [matching B, action_dim]")
-        basis, x = context.basis, context.token_x
-        field = torch.bmm(basis, coefficients)                                   # Y [B,N,64]
+        x = context.token_x
+        field = self.token_field(coefficients, context)                          # Y [B,N,64]（补空间时含 R）
         joint = torch.cat((field, x), dim=-1)
         query, key, value = self.token_q(joint), self.token_k(joint), self.token_v(field)
         scores = torch.bmm(query, key.transpose(1, 2))/math.sqrt(self.config.query_dim)
@@ -514,7 +567,7 @@ class ModalDynamics(nn.Module):
         attention = self.sparse_attention(total, value)
         tokens = field.shape[1]
         residual = self.token_residual_net(torch.cat((joint, action.unsqueeze(1).expand(-1, tokens, -1)), dim=-1))
-        nonlinear = torch.bmm(basis.transpose(1, 2), attention.aggregate+residual)
+        nonlinear = self.project_token_forcing(attention.aggregate+residual, context)
         if nonlinear.dtype != torch.float32 or not torch.isfinite(nonlinear).all():
             raise ValueError("nonlinear contribution must be finite float32")
         return NonlinearResult(ContentTerms(query, key, value, scores), torch.zeros_like(scores),
@@ -522,6 +575,7 @@ class ModalDynamics(nn.Module):
 
     def prepare_context(
         self, x: Tensor, eigenvalues: Tensor, basis: Tensor, coords: Tensor,
+        complement_eigenvalue: Tensor | None = None,
     ) -> DynamicsContext:
         """起点 X/谱/网格→本次固定 g、A/B 与两项偏置。
 
@@ -529,7 +583,11 @@ class ModalDynamics(nn.Module):
         为同设备无梯度 float32 常量，1<=K<=N。coords 为 CPU float64 [N,2]
         有限无梯度 [0,1] 坐标，在此唯一转模型 float32。依次均值 Pool→A/B→
         谱偏置→空间描述/偏置。保留 g/A/B/偏置图，不重求谱或缓存跨查询量。
+        complement="shared" 时必须给 lambda_perp [B]（同设备 float32 无梯度），A 系数多出 N 行 A(lambda_perp,g)；
+        complement="none" 时必须不给。
         """
+        if self.complement_mode != (complement_eigenvalue is not None):
+            raise ValueError("lambda_perp is required with complement 'shared' and refused otherwise")
         for name, value in (("x", x), ("eigenvalues", eigenvalues), ("basis", basis)):
             _validate_model_tensor(value, self.condition_trunk[0], name)
         if x.ndim != 3 or x.shape[0] < 1 or x.shape[1] < 1 or x.shape[2] != 64:
@@ -550,10 +608,20 @@ class ModalDynamics(nn.Module):
         pooled = self.pool_context(x)
         if self.token_mode:
             free = self._condition_free(eigenvalues, pooled)
-            conditioned = ConditionedCoefficients(free.raw_gamma, free.gamma, free.omega, free.a_blocks, None)
+            fields = (free.raw_gamma, free.gamma, free.omega, free.a_blocks)
+            if self.complement_mode:
+                # A_perp = A(lambda_perp, g)：同一个条件网络，补空间 N 行共用一组阻尼旋转块（广播，梯度回到条件网络）
+                _validate_model_tensor(complement_eigenvalue, self.condition_trunk[0], "complement_eigenvalue")
+                if complement_eigenvalue.shape != (x.shape[0],) or complement_eigenvalue.requires_grad:
+                    raise ValueError("lambda_perp must be a constant [B] without gradients")
+                perp = self._condition_free(complement_eigenvalue.unsqueeze(1), pooled)
+                tokens = x.shape[1]
+                fields = tuple(torch.cat((modal, shared.expand(-1, tokens, *shared.shape[2:])), dim=1)
+                               for modal, shared in zip(fields, (perp.raw_gamma, perp.gamma, perp.omega, perp.a_blocks)))
+            conditioned = ConditionedCoefficients(*fields, None)
             b_field = self.token_b_net(x).reshape(*x.shape[:2], 64, self.config.action_dim)
             context = DynamicsContext(eigenvalues, basis, coords_model, pooled, conditioned, None, None,
-                                      x, b_field, self._token_pair_bias(coords_model))
+                                      x, b_field, self._token_pair_bias(coords_model), complement_eigenvalue)
             self._validate_context(context)
             return context
         conditioned = self.condition(eigenvalues, pooled)
@@ -734,7 +802,7 @@ class ModalDynamics(nn.Module):
         if initial.ndim != 3 or min(initial.shape[:2]) < 1 or initial.shape[2] != 64:
             raise ValueError("initial must have shape [positive B, positive K,64]")
         self._validate_context(context)
-        if initial.shape[:2] != context.eigenvalues.shape:
+        if initial.shape[:2] != (context.eigenvalues.shape[0], self.state_rows(context)):
             raise ValueError("initial must match context batch and modes")
         if not isinstance(controls, ActionSegments):
             raise TypeError("controls must be ActionSegments")

@@ -143,7 +143,9 @@ def _job_env(job_dir):
     # 建模型和预登记，否则多段切分/零初始化的任务目录读不进来；默认变体显式设回默认值，不受外面残留的环境变量影响
     variant = job.get("variant") or {}
     os.environ.update(PO_JEPA_TEMPORAL_PARTITION=variant.get("temporal_partition", "bisection"),
-                      PO_JEPA_READOUT_INIT=variant.get("readout_init", "xavier"))
+                      PO_JEPA_READOUT_INIT=variant.get("readout_init", "xavier"),
+                      # C3：空间基底数 K 和补空间（默认 K=16、不建补空间时 job.json 没有这两个键）
+                      PO_JEPA_MODES=variant.get("modes", "16"), PO_JEPA_COMPLEMENT=variant.get("complement", "none"))
     scene, _, count = job["dataset"].rpartition("-")
     os.environ["PO_JEPA_DATASET"] = f"{scene}:{count}"
     return job_dir, job

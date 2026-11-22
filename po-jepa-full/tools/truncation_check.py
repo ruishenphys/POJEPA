@@ -149,6 +149,9 @@ def _po_model(model, job, what):
     from po_jepa.model import POJEPA
     if not isinstance(model, POJEPA):
         raise SystemExit(f"{what} must be a PO-JEPA job (condition {job['condition']} has no graph spectrum)")
+    if model.dynamics.complement_mode:
+        # C3: the decomposition here (projection onto Psi_16 / Psi_64, modal right-hand side) assumes the truncated model
+        raise SystemExit(f"{what} keeps the spectral complement (C3 scheme B); this tool is for the truncated model only")
     return model
 
 

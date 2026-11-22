@@ -104,6 +104,8 @@ def main(argv=None):
                   cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]), starts=rows,
                   comparison=modal_spectrum.compare(spec.system, spec.knobs, samples),
                   init_reference=modal_spectrum.compare(spec.system, spec.knobs, reference), exploratory=True,
+                  # C3：方案 B 只对照前 K 个模态的阻尼旋转块，补空间 R（共用一组 A_perp）不在里面
+                  **(dict(complement_excluded=True) if model.dynamics.complement_mode else {}),
                   device=str(device), seconds=round(time.perf_counter()-started, 1), scientific_conclusions_verified=False)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     tmp = a.output.with_name(a.output.name+".partial")

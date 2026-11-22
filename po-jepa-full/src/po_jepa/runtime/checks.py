@@ -77,6 +77,15 @@ def v7_updates() -> int:
 PARTITION_ENV = "PO_JEPA_TEMPORAL_PARTITION"
 READOUT_INIT_ENV = "PO_JEPA_READOUT_INIT"
 V7_VARIANT_DEFAULT = dict(temporal_partition="bisection", readout_init="xavier")
+# C3（方案 2026-11-22 `c3-plan/2026-11-22_mode-ablation-plan.md`）：空间基底数 K 和补空间。默认 K=16 固定、不建补空间时
+# 变体 dict 里没有这两个键（C-2 及以前的 job.json、预登记、标定文件名逐键不变）。
+MODES_ENV = "PO_JEPA_MODES"
+COMPLEMENT_ENV = "PO_JEPA_COMPLEMENT"
+MODES = ("16", "32", "64", "full")
+COMPLEMENTS = ("none", "shared")
+COMPLEMENT_MODES = ("16", "32")   # 补空间要求每个网格都 K < N（8×8 只有 64 个 token），所以只接 16、32
+# K 取满：fixed_modes false、K = min(max_modes, N)；max_modes 取 1024，32×32 以内的网格都是 K = N（主实验 16×16/12×12/8×8 即 256/144/64）
+FULL_MAX_MODES = 1024
 
 def v7_variant() -> dict:
     """S28b：当前 v7 变体 dict(temporal_partition, readout_init)，取自两个环境变量，不设取默认（二等分、Xavier）。
@@ -89,14 +98,35 @@ def v7_variant() -> dict:
     if init not in ("xavier", "zero"):
         raise ValueError(f"{READOUT_INIT_ENV} must be xavier or zero")
     variant = dict(temporal_partition=partition, readout_init=init)
+    # C3：K 和补空间，只在非默认时进 dict
+    modes = os.environ.get(MODES_ENV, "16")
+    complement = os.environ.get(COMPLEMENT_ENV, "none")
+    if modes not in MODES:
+        raise ValueError(f"{MODES_ENV} must be one of {MODES}")
+    if complement not in COMPLEMENTS:
+        raise ValueError(f"{COMPLEMENT_ENV} must be one of {COMPLEMENTS}")
+    if complement != "none" and modes not in COMPLEMENT_MODES:
+        raise ValueError(f"{COMPLEMENT_ENV}={complement} needs K < N on every grid: {MODES_ENV} must be one of {COMPLEMENT_MODES}")
+    if modes != "16":
+        variant["modes"] = modes
+    if complement != "none":
+        variant["complement"] = complement
     if variant != V7_VARIANT_DEFAULT and not is_v7():
-        raise ValueError(f"{PARTITION_ENV}/{READOUT_INIT_ENV} only apply to the v7 protocol (PO_JEPA_PROTOCOL=v7)")
+        raise ValueError(f"{PARTITION_ENV}/{READOUT_INIT_ENV}/{MODES_ENV}/{COMPLEMENT_ENV} only apply to the v7 protocol (PO_JEPA_PROTOCOL=v7)")
     return variant
 
+def variant_suffix(variant: dict) -> str:
+    """S28b：变体后缀：默认为空，多段切分加 ~dyadic，零初始化加 ~zeroinit（两者都有时按这个顺序）。
+    C3：再接空间部分，K 改了加 ~K32 / ~K64 / ~Kfull，补空间再加 c（K=16 + 补空间 = ~K16c）。"""
+    suffix = ("~dyadic" if variant["temporal_partition"] == "dyadic" else "")+("~zeroinit" if variant["readout_init"] == "zero" else "")
+    modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
+    if modes != "16" or complement != "none":
+        suffix += f"~K{modes}"+("c" if complement == "shared" else "")
+    return suffix
+
 def v7_variant_suffix() -> str:
-    """S28b：标定文件名里的变体后缀：默认为空，多段切分加 ~dyadic，零初始化加 ~zeroinit（两者都有时按这个顺序）。"""
-    variant = v7_variant()
-    return ("~dyadic" if variant["temporal_partition"] == "dyadic" else "")+("~zeroinit" if variant["readout_init"] == "zero" else "")
+    """标定文件名里的变体后缀（variant_suffix(v7_variant())）。"""
+    return variant_suffix(v7_variant())
 
 def v7_calibration_path() -> Path:
     """每个数据集（系统+条数）和训练步数各自一份标定：λ_time、λ_space、σ_z。
@@ -136,6 +166,18 @@ def load_protocol() -> dict:
             merged = _merge_v4(merged, dict(loss=dict(temporal_partition=variant["temporal_partition"])))
             if variant["readout_init"] != "xavier":
                 merged = _merge_v4(merged, dict(model=dict(projection=dict(readout_init=variant["readout_init"]))))
+            if "modes" in variant or "complement" in variant:
+                # C3：只改空间部分；基础协议必须是导师 10-27 的 K=16 固定（v4.yaml P2），否则变体名和实际 K 对不上
+                graph = merged["model"]["graph"]
+                if graph["max_modes"] != 16 or graph["fixed_modes"] is not True:
+                    raise ValueError("C3 mode variants start from the fixed K=16 protocol (configs/train/v4.yaml)")
+                modes = variant.get("modes", "16")
+                merged = _merge_v4(merged, dict(model=dict(graph=dict(
+                    max_modes=FULL_MAX_MODES if modes == "full" else int(modes), fixed_modes=modes != "full"))))
+                if variant.get("complement", "none") != "none":
+                    if merged["model"]["dynamics"].get("forcing_space") != "token":
+                        raise ValueError("the complement variant needs the token-space dynamics (configs/train/v7.yaml)")
+                    merged = _merge_v4(merged, dict(model=dict(dynamics=dict(complement=variant["complement"]))))
         path = v7_calibration_path()
         if path.exists():
             require_import_record_matches(path)

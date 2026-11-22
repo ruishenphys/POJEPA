@@ -27,6 +27,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G7 | Other evaluation tasks that cannot run yet | **Blocked** (code or decisions missing) | see §8 | see §8 |
 | G8 | AC checks (C7): AC direct prediction with its context cut to the 8 frames it was trained on, and the feature noise floor (same state encoded twice) | **Ready once its pull request is merged** (pull only after the running job files are finished) | ~1–3 GPU-hours *(est.)* for seed 1703 | v7.1 AC checkpoints; the encoder weights and `vjepa2` checkout used for encoding |
 | G9 | C-2 shrinkage check (`tools/shrinkage_check.py`): readout slope / spread / motion gain and LN-feature spread of the C-2 checkpoints on the registered test windows | **Ready once its pull request is merged** | ~1–2 GPU-hours *(est.)*, 21 commands | C-2 checkpoints, readout probes and truth files under `results-small-validation/` (all from G4/G6) |
+| G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the spatial basis (K = 32, 64, all tokens; K = 16 plus the kept complement) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~23 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
 | G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
@@ -290,6 +291,49 @@ done
 ```
 
 The `ceiling` lines can run on the second card (`--device cuda:1`) while the other lines run on the first. Each command refuses to overwrite an existing `--output` and writes it only at the end (via a `.partial` file), so after a failure just rerun that line. `ceiling` keeps one duration's windows (400 × 2 frames, ~1.2 GB) in CPU memory and about 3 GB on the GPU with the default `--batch 100`; lower `--batch` if memory is short (the result does not depend on it). Send back `results-small-validation/c2/dyadic-zero/truncation/` (well under 10 MB), for example `python $TOOL pack results-small-validation/c2/dyadic-zero/truncation nvidia-smi.txt --output c2-truncation.pack.sqlite` (§9).
+
+## 8e. G11: C-3 mode-count ablation and scheme B (`c3` job files)
+
+This one **trains**: 18 new PO-JEPA runs in two batches (plan `small-validation-results/c3-plan/2026-11-22_mode-ablation-plan.md`, decided by Jerry on 2026-11-22). All of them are the C-2 setting `dyadic-zero` (dyadic temporal partition, zero-initialised `P_out`), 2,000 trajectories × 10,000 updates, seed 1703, on the three C-2 scenes; only the spatial part changes, through two new `run.py` options:
+
+| Variant | `--modes` | `--complement` | What it is |
+|---|---|---|---|
+| `K16c` | `16` | `shared` | scheme B: the 16 lowest graph modes as now, plus the whole orthogonal complement kept as a token field that evolves with one shared damped rotation `A(λ_⊥, g)` (λ_⊥ = mean of the cut eigenvalues). No information is dropped. |
+| `Kfull` | `full` | `none` | every grid uses all its tokens as modes (K = 256 / 144 / 64 on 16×16 / 12×12 / 8×8) |
+| `K32` | `32` | `none` | K = 32 on every grid |
+| `K64` | `64` | `none` | K = 64 on every grid (no truncation on 8×8) |
+
+K16 (the current model) and `transformer_consistency` are **not retrained**: the summary reuses the C-2 runs, after checking that the batch-1 `identity` evaluation matches C-2 bit for bit. **Please keep the C-2 job folders.** The parameter count is unchanged (227,617) for every variant.
+
+Pulling: the commit that adds this changes the model code and `MANIFEST.json`. Pull only after every job file running in that clone is finished (§1). The C-2 diagnostics G9 and G10 already use `--cross-version`, so they still read the C-2 checkpoints after the pull.
+
+```bash
+cd $WORK/full-model/po-jepa-full
+git pull
+python tools/make_small_validation_jobs.py --stage c3 --batch 1 > jobs-sv-c3-b1.txt
+python tools/run_jobs.py jobs-sv-c3-b1.txt --gpus 0,1
+```
+
+Batch 1 (`K16c`, `Kfull`; 72 commands): 6 × `calibrate` (σ_z, λ_t, λ_s per variant and scene; the files are written as `configs/calibration/<scene>-2000-u10000~dyadic~zeroinit~K16c.yaml` / `~Kfull.yaml`), 2 × `check`, 12 training runs (`po_jepa_full` and `po_jepa_no_consistency` for each variant and scene) + 3 `identity` evaluations, 6 × `equal-step`, 24 readouts and counterfactuals + 4 modal spectra, 12 × `shrinkage_check.py` (the G9 check on the new runs), 3 summaries. About 55 GPU-hours *(est.)*, ~28 hours on two cards. `Kfull` may take 0–20% longer per run than C-2 (not measured).
+
+Send batch 1 back (§9) and wait: Jerry decides from it whether batch 2 is needed. Only then:
+
+```bash
+python tools/make_small_validation_jobs.py --stage c3 --batch 2 > jobs-sv-c3-b2.txt
+python tools/run_jobs.py jobs-sv-c3-b2.txt --gpus 0,1
+```
+
+Batch 2 (`K32`, `K64`, only `po_jepa_full`; 31 commands): 6 × `calibrate`, 2 × `check`, 6 training runs, 12 readouts + 2 modal spectra, 3 summaries. About 23 GPU-hours *(est.)*, ~12 hours on two cards.
+
+Results go to `results-small-validation/c3/dyadic-zero-<variant>/`; the joint summary (`summarize_small_validation.py c3`) to `results-small-validation/c3/summary/`. Pack command (§9 has the general rules; `configs/calibration` must be included for the new `~K*` files):
+
+```bash
+cd $WORK
+python $TOOL pack results-small-validation/c3 logs-addon/jobs-sv-c3-* full-model/po-jepa-full/configs/calibration \
+    full-model/po-jepa-full/jobs-sv-c3-*.txt nvidia-smi.txt --output c3-batch1.pack.sqlite
+```
+
+(For batch 2 use `--output c3-batch2.pack.sqlite`; the same command picks up both batches.)
 
 ## 9. What to send back
 
