@@ -13,7 +13,8 @@ make_v7_jobs.py 相同，在 工作目录/full-model/po-jepa-full 里用 tools/r
       # C-3 空间基底数 K 消融 + 方案 B（方案 small-validation-results/c3-plan/2026-11-22_mode-ablation-plan.md §4），
       # 都是 C-2 的 dyadic-zero，只改空间部分。第一批：K16c（K=16 + 补空间）、Kfull（每个网格 K = token 数）各
       # po_jepa_full + po_jepa_no_consistency，共 12 条训练，加 3 条 identity（和 C-2 逐位核对）；
-      # 第二批：K32、K64 只训 po_jepa_full，共 6 条。K16 和 transformer_consistency 复用 C-2，不重训。
+      # 第二批：K32c、K64c（K=32/64 + 补空间）只训 po_jepa_full，共 6 条。四个变体都不丢信息（Jerry 2026-11-22：
+      # 只改基底个数，不管 K 取多少都把全部信息存进去）；C-2 的 K16（截断、丢信息）和 transformer_consistency 复用 C-2，不重训。
 
 C-2 的变体必须显式给：由 C-1 的汇总（tools/summarize_small_validation.py c1）按预先写好的规则推荐，Jerry 可以改。
 三个阶段的先后：b-v7.1 和 c1 互不依赖，可以同时排；c2 在 c1 之后，它的 R 段（新检查点的读出）要用 b-v7.1 的探针和真值。
@@ -57,9 +58,9 @@ LONG_HORIZON = 128
 CHECK_SCENE = "van_der_pol"
 FEATURES, LONG_FEATURES = "../../features-v7", "../../features-small-validation"
 RESULTS_V71, OUT = "../../results-v7/full/v7.1", "../../results-small-validation"
-# C-3（2026-11-22 方案 §4）：变体名 → run.py 的 --modes/--complement；分两批，第一批是两个“不丢信息”的候选
-C3_VARIANTS = dict(K16c=("16", "shared"), Kfull=("full", "none"), K32=("32", "none"), K64=("64", "none"))
-C3_BATCHES = {1: ("K16c", "Kfull"), 2: ("K32", "K64")}
+# C-3（2026-11-22 方案 §4，Jerry 当天改成全部不丢信息）：变体名 → run.py 的 --modes/--complement；分两批，四个变体都保留补空间或 K 取满
+C3_VARIANTS = dict(K16c=("16", "shared"), Kfull=("full", "none"), K32c=("32", "shared"), K64c=("64", "shared"))
+C3_BATCHES = {1: ("K16c", "Kfull"), 2: ("K32c", "K64c")}
 C3_CONDITIONS = {1: ("po_jepa_full", "po_jepa_no_consistency"), 2: ("po_jepa_full",)}
 C3_BASE = ("dyadic", "zero")            # C-2 定下的变体（Jerry 2026-11-19），C-3 只改空间部分
 C3_IDENTITY_VARIANT = "K16c"            # 第一批的 3 条 identity 放在这个变体的结果根下（identity 不用模型，和变体无关）
@@ -311,7 +312,7 @@ def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4, bat
     if stage != "c2" and (partition or init):
         raise ValueError("--temporal-partition / --readout-init 只用于 --stage c2（C-1 四个变体都排；C-3 固定用 C-2 定下的 dyadic-zero）")
     if (stage == "c3") != (batch is not None):
-        raise ValueError("--batch 只用于 --stage c3，而且 c3 必须给（1 = K16c、Kfull；2 = K32、K64）")
+        raise ValueError("--batch 只用于 --stage c3，而且 c3 必须给（1 = K16c、Kfull；2 = K32c、K64c）")
     if stage == "c3":
         if batch not in C3_BATCHES:
             raise ValueError(f"--batch 只能是 {sorted(C3_BATCHES)}")
@@ -336,7 +337,7 @@ def main(argv=None):
     p.add_argument("--temporal-partition", choices=PARTITIONS, help="c2 必须给：C-1 定下的时间一致性切分")
     p.add_argument("--readout-init", choices=INITS, help="c2 必须给：C-1 定下的 P_out 初始化")
     p.add_argument("--shards", type=int, default=4, help="b-v7.1：长时程测试集的编码切成几片（每片一张卡）")
-    p.add_argument("--batch", type=int, choices=sorted(C3_BATCHES), help="c3 必须给：1 = K16c、Kfull（各 full + no_cons），2 = K32、K64（只 full）")
+    p.add_argument("--batch", type=int, choices=sorted(C3_BATCHES), help="c3 必须给：1 = K16c、Kfull（各 full + no_cons），2 = K32c、K64c（只 full）")
     a = p.parse_args(argv)
     try:
         lines = job_lines(a.stage, v6_features=a.v6_features, partition=a.temporal_partition, init=a.readout_init, shards=a.shards,

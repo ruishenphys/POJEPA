@@ -83,7 +83,9 @@ MODES_ENV = "PO_JEPA_MODES"
 COMPLEMENT_ENV = "PO_JEPA_COMPLEMENT"
 MODES = ("16", "32", "64", "full")
 COMPLEMENTS = ("none", "shared")
-COMPLEMENT_MODES = ("16", "32")   # 补空间要求每个网格都 K < N（8×8 只有 64 个 token），所以只接 16、32
+# 补空间接 16、32、64（Jerry 2026-11-22：不管 K 取多少都要把全部信息存进去）。K64c 在 8×8 上 K = N，补空间为空、自动不建 R；
+# K 取满本来就不丢信息，不再叠补空间
+COMPLEMENT_MODES = ("16", "32", "64")
 # K 取满：fixed_modes false、K = min(max_modes, N)；max_modes 取 1024，32×32 以内的网格都是 K = N（主实验 16×16/12×12/8×8 即 256/144/64）
 FULL_MAX_MODES = 1024
 
@@ -106,7 +108,7 @@ def v7_variant() -> dict:
     if complement not in COMPLEMENTS:
         raise ValueError(f"{COMPLEMENT_ENV} must be one of {COMPLEMENTS}")
     if complement != "none" and modes not in COMPLEMENT_MODES:
-        raise ValueError(f"{COMPLEMENT_ENV}={complement} needs K < N on every grid: {MODES_ENV} must be one of {COMPLEMENT_MODES}")
+        raise ValueError(f"{COMPLEMENT_ENV}={complement} needs a truncated basis: {MODES_ENV} must be one of {COMPLEMENT_MODES}")
     if modes != "16":
         variant["modes"] = modes
     if complement != "none":
@@ -117,7 +119,7 @@ def v7_variant() -> dict:
 
 def variant_suffix(variant: dict) -> str:
     """S28b：变体后缀：默认为空，多段切分加 ~dyadic，零初始化加 ~zeroinit（两者都有时按这个顺序）。
-    C3：再接空间部分，K 改了加 ~K32 / ~K64 / ~Kfull，补空间再加 c（K=16 + 补空间 = ~K16c）。"""
+    C3：再接空间部分，K 改了加 ~K32 / ~K64 / ~Kfull，补空间再加 c（~K16c、~K32c、~K64c）。"""
     suffix = ("~dyadic" if variant["temporal_partition"] == "dyadic" else "")+("~zeroinit" if variant["readout_init"] == "zero" else "")
     modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
     if modes != "16" or complement != "none":

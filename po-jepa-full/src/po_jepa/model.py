@@ -164,9 +164,8 @@ class POJEPA(nn.Module):
         if graph.fixed_modes and x.shape[1] < graph.max_modes:
             raise ValueError("fixed_modes requires every grid to have at least K tokens")
         modes = graph.max_modes if graph.fixed_modes else min(graph.max_modes, x.shape[1])
-        complement = self.dynamics.complement_mode
-        if complement and modes >= x.shape[1]:
-            raise ValueError("complement 'shared' needs K < N on every grid (with K = N there is no complement to keep)")
+        # 补空间只在 K < N 时存在；K = N（例如 K64c 在 8×8 上）时 Psi 张满 token 空间，不建 R，和同 K 的现模型一样
+        complement = self.dynamics.complement_mode and modes < x.shape[1]
         # affinity 内部只取 detach 副本；encoder 模式用编码器输出 Z 建图，不经过可训练 P_in。
         # 07 §2.1：建图、规范化、求谱由 spectrum_for 按 v7 原顺序一次做完，所以 N<K 的检查提到它前面。
         spectrum = self.spectrum.spectrum_for(raw_z if graph.affinity_source == "encoder" else x, grid,
@@ -186,8 +185,9 @@ class POJEPA(nn.Module):
     def synthesize(self, state: Tensor, query: QueryContext) -> Tensor:
         """积分状态→token 场 [B,N,64]：现模型 Psi C；complement="shared" 时 Psi C + R（R 是状态的后 N 行）。"""
         modes = query.spectrum.basis.shape[2]
-        field = modal_synthesis(state[:, :modes] if self.dynamics.complement_mode else state, query.spectrum.basis)
-        return field+state[:, modes:] if self.dynamics.complement_mode else field
+        complement = self.dynamics.complement_mode and query.spectrum.basis.shape[1] > modes
+        field = modal_synthesis(state[:, :modes] if complement else state, query.spectrum.basis)
+        return field+state[:, modes:] if complement else field
 
     def integrate_internal_continuation(
         self, query: QueryContext, current_coefficients: Tensor,

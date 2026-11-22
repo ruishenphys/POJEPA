@@ -469,14 +469,14 @@ class ModalDynamics(nn.Module):
         tokens = context.basis.shape[1]
         if context.basis.shape != (batch, tokens, modes) or tokens < modes:
             raise ValueError("context basis must have matching shape [B, N >= K, K]")
-        if self.complement_mode:
+        if self.complement_mode and tokens > modes:
             if context.complement_eigenvalue is None:
-                raise ValueError("complement 'shared' needs lambda_perp in the context")
+                raise ValueError("complement 'shared' needs lambda_perp in the context when K < N")
             _validate_model_tensor(context.complement_eigenvalue, self.condition_trunk[0], "complement_eigenvalue")
             if context.complement_eigenvalue.shape != (batch,) or context.complement_eigenvalue.requires_grad:
                 raise ValueError("lambda_perp must be a constant [B] without gradients")
-            if tokens == modes:
-                raise ValueError("complement 'shared' needs K < N (the complement is empty when K = N)")
+        elif self.complement_mode and context.complement_eigenvalue is not None:
+            raise ValueError("complement 'shared' takes no lambda_perp when K = N (the complement is empty)")
         elif context.complement_eigenvalue is not None:
             raise ValueError("complement 'none' takes no lambda_perp")
         rows = self.state_rows(context)
@@ -494,22 +494,27 @@ class ModalDynamics(nn.Module):
     def complement_mode(self) -> bool:
         return self.config.complement == "shared"
 
+    def has_complement(self, context: DynamicsContext) -> bool:
+        """这个上下文有没有补空间场 R：complement="shared" 且 K < N。K = N（例如 K64c 在 8×8 上）补空间是空的，
+        Psi 已经张满整个 token 空间、不丢信息，这时不建 R，和同 K 的现模型完全一样。"""
+        return self.complement_mode and context.basis.shape[1] > context.eigenvalues.shape[1]
+
     def state_rows(self, context: DynamicsContext) -> int:
-        """积分状态的行数：K（现模型）或 K+N（complement="shared"，C 行后接补空间场 R 的 N 行）。"""
+        """积分状态的行数：K（现模型，或补空间为空）或 K+N（有补空间，C 行后接补空间场 R 的 N 行）。"""
         modes = context.eigenvalues.shape[1]
-        return modes+context.basis.shape[1] if self.complement_mode else modes
+        return modes+context.basis.shape[1] if self.has_complement(context) else modes
 
     def token_field(self, state: Tensor, context: DynamicsContext) -> Tensor:
-        """积分状态→完整 token 场 Y [B,N,64]：现模型 Y = Psi C；complement="shared" 时 Y = Psi C + R。"""
+        """积分状态→完整 token 场 Y [B,N,64]：现模型 Y = Psi C；有补空间时 Y = Psi C + R。"""
         modes = context.eigenvalues.shape[1]
         field = torch.bmm(context.basis, state[:, :modes])
-        return field+state[:, modes:] if self.complement_mode else field
+        return field+state[:, modes:] if self.has_complement(context) else field
 
     def project_token_forcing(self, forcing: Tensor, context: DynamicsContext) -> Tensor:
         """token 空间强迫 G [B,N,64]→积分状态的右端：现模型 Psi^T G [B,K,64]；
-        complement="shared" 时 [Psi^T G; P_perp G] [B,K+N,64]，P_perp G = G - Psi Psi^T G。"""
+        有补空间时 [Psi^T G; P_perp G] [B,K+N,64]，P_perp G = G - Psi Psi^T G。"""
         modal = torch.bmm(context.basis.transpose(1, 2), forcing)
-        if not self.complement_mode:
+        if not self.has_complement(context):
             return modal
         return torch.cat((modal, forcing-torch.bmm(context.basis, modal)), dim=1)
 
@@ -586,8 +591,9 @@ class ModalDynamics(nn.Module):
         complement="shared" 时必须给 lambda_perp [B]（同设备 float32 无梯度），A 系数多出 N 行 A(lambda_perp,g)；
         complement="none" 时必须不给。
         """
-        if self.complement_mode != (complement_eigenvalue is not None):
-            raise ValueError("lambda_perp is required with complement 'shared' and refused otherwise")
+        needs_perp = self.complement_mode and x.ndim == 3 and eigenvalues.ndim == 2 and eigenvalues.shape[1] < x.shape[1]
+        if needs_perp != (complement_eigenvalue is not None):
+            raise ValueError("lambda_perp is required with complement 'shared' when K < N and refused otherwise")
         for name, value in (("x", x), ("eigenvalues", eigenvalues), ("basis", basis)):
             _validate_model_tensor(value, self.condition_trunk[0], name)
         if x.ndim != 3 or x.shape[0] < 1 or x.shape[1] < 1 or x.shape[2] != 64:
@@ -609,7 +615,7 @@ class ModalDynamics(nn.Module):
         if self.token_mode:
             free = self._condition_free(eigenvalues, pooled)
             fields = (free.raw_gamma, free.gamma, free.omega, free.a_blocks)
-            if self.complement_mode:
+            if needs_perp:
                 # A_perp = A(lambda_perp, g)：同一个条件网络，补空间 N 行共用一组阻尼旋转块（广播，梯度回到条件网络）
                 _validate_model_tensor(complement_eigenvalue, self.condition_trunk[0], "complement_eigenvalue")
                 if complement_eigenvalue.shape != (x.shape[0],) or complement_eigenvalue.requires_grad:

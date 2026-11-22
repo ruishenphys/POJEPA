@@ -1,4 +1,4 @@
-"""C3：空间基底数 K 消融（K32、K64、K 取满）和方案 B（K=16 + 补空间整体保留，代号 K16c）。
+"""C3：空间基底数 K 消融，全部不丢信息（Jerry 2026-11-22）：K16c/K32c/K64c（前 K 个模态 + 补空间整体保留）和 K 取满。
 
 对照：方案 `small-validation-results/c3-plan/2026-11-22_mode-ablation-plan.md` §1、§3；诊断报告
 `small-validation-results/c2/2026-11-22_direct-prediction-diagnosis.md` §5。方案 B：
@@ -207,13 +207,34 @@ def test_zero_duration_is_identity_and_zero_init_starts_at_identity(variant):
     assert torch.equal(make_model(readout_init="zero", **kwargs)(z, ctl, durations(3., 3.), GRID), z)
 
 
-def test_complement_with_full_basis_or_fourier_is_refused():
-    """补空间为空时（K = N）组合无意义，直接报错；fixed_fourier 没有 lambda_perp，也报错；modal 模式不接补空间。"""
+@pytest.mark.parametrize("modes,fixed", [(64, True), (1024, False)])
+def test_complement_is_empty_when_the_basis_is_full(modes, fixed):
+    """K = N（K64c 在 8×8 上、或 K 取满）时补空间为空：不建 R，状态 K 行，预测和不加补空间的同 K 模型逐位相同。"""
+    z, ctl = make_z(2), make_controls([3., 3.])
+    plain, kept = make_model(modes=modes, fixed=fixed), make_model(modes=modes, fixed=fixed, complement="shared")
+    kept.load_state_dict(plain.state_dict())
+    q = kept.prepare_query(z, GRID)
+    assert q.initial_coefficients.shape == (2, N, 64) and q.dynamics.complement_eigenvalue is None
+    assert kept.dynamics.state_rows(q.dynamics) == N and not kept.dynamics.has_complement(q.dynamics)
+    with torch.no_grad():
+        assert torch.equal(kept(z, ctl, durations(3., 3.), GRID), plain(z, ctl, durations(3., 3.), GRID))
+    with pytest.raises(ValueError, match="lambda_perp"):
+        kept.dynamics.prepare_context(q.projected, q.spectrum.eigenvalues, q.spectrum.basis, GRID.coords,
+                                      torch.zeros(2, device=q.projected.device))
+
+
+def test_complement_on_a_mixed_pair_of_grids():
+    """K64c 的 16×16 → 8×8 那种情形（这里 K=16：8×8 有补空间，4×4 的 K = N 没有）：两个网格各自走对的分支。"""
+    model = make_model(modes=16, complement="shared")
+    fine = model.prepare_query(make_z(1), GRID)
+    coarse = model.prepare_query(torch.randn(1, 16, E), regular_grid(4, 4))
+    assert fine.initial_coefficients.shape == (1, 16+N, 64) and fine.dynamics.complement_eigenvalue is not None
+    assert coarse.initial_coefficients.shape == (1, 16, 64) and coarse.dynamics.complement_eigenvalue is None
+
+
+def test_complement_with_fourier_or_modal_forcing_is_refused():
+    """fixed_fourier 没有 lambda_perp，报错；modal 模式不接补空间。"""
     z = make_z(1)
-    with pytest.raises(ValueError, match="K < N"):
-        make_model(modes=1024, fixed=False, complement="shared").prepare_query(z, GRID)
-    with pytest.raises(ValueError, match="K < N"):
-        make_model(modes=64, complement="shared").prepare_query(z, GRID)
     with pytest.raises(ValueError, match="forcing_space"):
         DynamicsConfig(**{**checks.load_protocol()["model"]["dynamics"], "forcing_space": "modal", "complement": "shared"})
     with pytest.raises(ValueError, match="complement"):
@@ -247,7 +268,9 @@ def test_spectrum_stays_stopped_and_gradient_reaches_a_perp():
 
 # ---------- 7. 训练损失、理论界在新变体下能跑通 ----------
 
-VARIANTS = dict(K16c=dict(complement="shared"), K32=dict(modes=32), Kfull=dict(modes=1024, fixed=False))
+# K16c_mixed：K=16 + 补空间，细网格 8×8 有补空间、粗网格 4×4 的 K = N 没有（对应 K64c 的 16×16 → 8×8）
+VARIANTS = dict(K16c=dict(complement="shared"), K16c_mixed=dict(modes=16, complement="shared"), K32=dict(modes=32),
+                Kfull=dict(modes=1024, fixed=False))
 
 
 @pytest.mark.parametrize("name", list(VARIANTS))
@@ -305,7 +328,7 @@ def test_default_protocol_is_k16_fixed_and_unchanged(v7):
 
 @pytest.mark.parametrize("modes,complement,suffix,max_modes,fixed", [
     ("32", "none", "~K32", 32, True), ("64", "none", "~K64", 64, True), ("full", "none", "~Kfull", checks.FULL_MAX_MODES, False),
-    ("16", "shared", "~K16c", 16, True)])
+    ("16", "shared", "~K16c", 16, True), ("32", "shared", "~K32c", 32, True), ("64", "shared", "~K64c", 64, True)])
 def test_mode_variants_set_protocol_calibration_and_job_record(v7, monkeypatch, modes, complement, suffix, max_modes, fixed):
     """变体写进协议（graph.max_modes/fixed_modes、dynamics.complement），标定文件、job.json、预登记按变体分开；参数量不变。"""
     from po_jepa.runtime import comparison, v7jobs, workflow
@@ -333,9 +356,9 @@ def test_mode_variant_env_contract(v7, monkeypatch):
     monkeypatch.setenv(checks.MODES_ENV, "48")
     with pytest.raises(ValueError, match=checks.MODES_ENV):
         checks.v7_variant()
-    monkeypatch.setenv(checks.MODES_ENV, "64")
+    monkeypatch.setenv(checks.MODES_ENV, "full")
     monkeypatch.setenv(checks.COMPLEMENT_ENV, "shared")
-    with pytest.raises(ValueError, match="K < N"):
+    with pytest.raises(ValueError, match="truncated basis"):
         checks.v7_variant()
     monkeypatch.setenv(checks.MODES_ENV, "16")
     monkeypatch.setenv(checks.COMPLEMENT_ENV, "mean")
@@ -448,7 +471,8 @@ def test_c3_training_lines_follow_the_plan():
             seen.setdefault((batch, name), set()).add(a[a.index("--condition")+1])
     assert seen == {(1, "K16c"): {"po_jepa_full", "po_jepa_no_consistency", "identity"},
                     (1, "Kfull"): {"po_jepa_full", "po_jepa_no_consistency"},
-                    (2, "K32"): {"po_jepa_full"}, (2, "K64"): {"po_jepa_full"}}
+                    (2, "K32c"): {"po_jepa_full"}, (2, "K64c"): {"po_jepa_full"}}
+    assert all(c == "shared" for name, (_, c) in jobs.C3_VARIANTS.items() if name != "Kfull")   # 四个变体都不丢信息
 
 
 def test_c3_every_run_py_line_is_accepted_and_sets_the_variant(tmp_path, monkeypatch):
@@ -526,7 +550,7 @@ def c3_tree(tmp_path, values=None, identity=None, batches=(1, 2)):
     root, c2 = tmp_path/"c3", tmp_path/"c2"
     base = {"K16c": dict(P, f16=1.3, r12=2.0), "K16c/no_cons": dict(P, f16=1.31, r12=2.5),
             "Kfull": dict(P, f16=1.34, r12=2.05), "Kfull/no_cons": dict(P, f16=1.35, r12=2.6),
-            "K32": dict(P, f16=1.42), "K64": dict(P, f16=1.38)}
+            "K32c": dict(P, f16=1.32), "K64c": dict(P, f16=1.33)}
     ref = dict(po_jepa_full=dict(P, f16=1.45, r12=2.2), po_jepa_no_consistency=dict(P, f16=1.46, r12=2.6),
                transformer_consistency=dict(P, f16=1.31, r12=2.1), identity=IDENTITY)
     values = values or {}
@@ -560,16 +584,18 @@ def test_c3_summary_constructed_case(tmp_path):
     assert h["H4"]["K16c"]["one"] is True and h["H4"]["K16c"]["two"] is True   # 2.0 ≤ 0.95·2.5、≤ 2.1
     assert h["H4"]["Kfull"]["one"] is True and h["H4"]["Kfull"]["two"] is True
     assert h["H5"]["pass_"] is True
-    assert h["H6"]["pass_"] is True                                   # 1.45 → 1.42 → 1.38 → 1.34：单调
+    assert h["H6"]["pass_"] is False                                  # 1.30 → 1.32 → 1.33 → 1.34：基底越多越差，不单调
+    assert h["H6"]["scenes"][0]["curve"] == pytest.approx(dict(K16c=1-1.3/2, K32c=1-1.32/2, K64c=1-1.33/2, Kfull=1-1.34/2))
     md = summary_tool.markdown(s)
     assert "## H1" in md and "dyadic-zero" in md
 
 
 def test_c3_h6_curve_tolerance(tmp_path):
-    """K 取满比 K64 差 0.5 pp 以内算单调（噪声），差 1 pp 不算。"""
-    s = summary_tool.c3_summary(*c3_tree(tmp_path, values={(sc, "Kfull"): dict(f16=1.388) for sc in SCENES}))
+    """K16c → K32c → K64c 变好；K 取满比 K64c 差 0.5 pp 以内算单调（噪声），差 1 pp 不算。"""
+    curve = {(sc, v): dict(f16=f) for sc in SCENES for v, f in (("K16c", 1.42), ("K32c", 1.40), ("K64c", 1.38))}
+    s = summary_tool.c3_summary(*c3_tree(tmp_path, values={**curve, **{(sc, "Kfull"): dict(f16=1.388) for sc in SCENES}}))
     assert s["hypotheses"]["H6"]["pass_"] is True                     # gain 差 −0.4 pp
-    s = summary_tool.c3_summary(*c3_tree(tmp_path/"b", values={(sc, "Kfull"): dict(f16=1.40) for sc in SCENES}))
+    s = summary_tool.c3_summary(*c3_tree(tmp_path/"b", values={**curve, **{(sc, "Kfull"): dict(f16=1.40) for sc in SCENES}}))
     assert s["hypotheses"]["H6"]["pass_"] is False                    # gain 差 −1 pp
 
 
@@ -595,7 +621,7 @@ def test_c3_identity_mismatch_blocks_the_c2_references(tmp_path):
 def test_c3_only_first_batch_and_wrong_variant(tmp_path):
     root, c2 = c3_tree(tmp_path, batches=(1,))
     s = summary_tool.c3_summary(root, c2)
-    assert {(m["variant"], m["condition"]) for m in s["missing"]} == {("K32", "po_jepa_full"), ("K64", "po_jepa_full")}
+    assert {(m["variant"], m["condition"]) for m in s["missing"]} == {("K32c", "po_jepa_full"), ("K64c", "po_jepa_full")}
     assert s["hypotheses"]["H6"]["pass_"] is None and s["hypotheses"]["H1"]["pass_"] is True
     # 结果根里放了别的变体的任务：无效，不进判定
     bad = root/"dyadic-zero-Kfull"/"double_well"/"seed1703"/"po_jepa_full"

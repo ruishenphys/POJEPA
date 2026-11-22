@@ -27,7 +27,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G7 | Other evaluation tasks that cannot run yet | **Blocked** (code or decisions missing) | see §8 | see §8 |
 | G8 | AC checks (C7): AC direct prediction with its context cut to the 8 frames it was trained on, and the feature noise floor (same state encoded twice) | **Ready once its pull request is merged** (pull only after the running job files are finished) | ~1–3 GPU-hours *(est.)* for seed 1703 | v7.1 AC checkpoints; the encoder weights and `vjepa2` checkout used for encoding |
 | G9 | C-2 shrinkage check (`tools/shrinkage_check.py`): readout slope / spread / motion gain and LN-feature spread of the C-2 checkpoints on the registered test windows | **Ready once its pull request is merged** | ~1–2 GPU-hours *(est.)*, 21 commands | C-2 checkpoints, readout probes and truth files under `results-small-validation/` (all from G4/G6) |
-| G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the spatial basis (K = 32, 64, all tokens; K = 16 plus the kept complement) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~23 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
+| G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the number of spatial basis vectors and never drop information (K = 16, 32, 64 plus the kept complement; all tokens) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~25 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
 | G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
@@ -300,8 +300,10 @@ This one **trains**: 18 new PO-JEPA runs in two batches (plan `small-validation-
 |---|---|---|---|
 | `K16c` | `16` | `shared` | scheme B: the 16 lowest graph modes as now, plus the whole orthogonal complement kept as a token field that evolves with one shared damped rotation `A(λ_⊥, g)` (λ_⊥ = mean of the cut eigenvalues). No information is dropped. |
 | `Kfull` | `full` | `none` | every grid uses all its tokens as modes (K = 256 / 144 / 64 on 16×16 / 12×12 / 8×8) |
-| `K32` | `32` | `none` | K = 32 on every grid |
-| `K64` | `64` | `none` | K = 64 on every grid (no truncation on 8×8) |
+| `K32c` | `32` | `shared` | scheme B with K = 32: 32 lowest modes plus the kept complement. No information is dropped. |
+| `K64c` | `64` | `shared` | scheme B with K = 64. On 8×8 (64 tokens) the complement is empty, so it is the same as all modes there. No information is dropped. |
+
+Every variant keeps all the information (Jerry, 2026-11-22: only the number of explicit basis vectors changes). The truncated K16 from C-2 stays in the summary as the information-losing reference.
 
 K16 (the current model) and `transformer_consistency` are **not retrained**: the summary reuses the C-2 runs, after checking that the batch-1 `identity` evaluation matches C-2 bit for bit. **Please keep the C-2 job folders.** The parameter count is unchanged (227,617) for every variant.
 
@@ -323,7 +325,7 @@ python tools/make_small_validation_jobs.py --stage c3 --batch 2 > jobs-sv-c3-b2.
 python tools/run_jobs.py jobs-sv-c3-b2.txt --gpus 0,1
 ```
 
-Batch 2 (`K32`, `K64`, only `po_jepa_full`; 31 commands): 6 × `calibrate`, 2 × `check`, 6 training runs, 12 readouts + 2 modal spectra, 3 summaries. About 23 GPU-hours *(est.)*, ~12 hours on two cards.
+Batch 2 (`K32c`, `K64c`, only `po_jepa_full`; 31 commands): 6 × `calibrate`, 2 × `check`, 6 training runs, 12 readouts + 2 modal spectra, 3 summaries. About 25 GPU-hours *(est.)*, ~13 hours on two cards (the kept complement makes each run about as heavy as `Kfull`).
 
 Results go to `results-small-validation/c3/dyadic-zero-<variant>/`; the joint summary (`summarize_small_validation.py c3`) to `results-small-validation/c3/summary/`. Pack command (§9 has the general rules; `configs/calibration` must be included for the new `~K*` files):
 

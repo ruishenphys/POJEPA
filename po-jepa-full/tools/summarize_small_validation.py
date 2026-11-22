@@ -175,7 +175,7 @@ def variant_of(job) -> dict:
 
 
 def variant_label(variant) -> str:
-    """bisection-xavier 这种写法；C3 的空间变体（K、补空间）再接 -K32、-Kfull、-K16c（和结果目录名一致）。"""
+    """bisection-xavier 这种写法；C3 的空间变体（K、补空间）再接 -K32c、-Kfull、-K16c（和结果目录名一致）。"""
     label = f"{variant['temporal_partition']}-{variant['readout_init']}"
     modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
     if modes != "16" or complement != "none":
@@ -598,12 +598,14 @@ def readout_summary(root, actions=None) -> dict:
 # 各条件登记的评测查询相同，不同就不拿 C-2 比。
 
 C3_BASE = dict(temporal_partition="dyadic", readout_init="zero")
-C3_SPACE = dict(K16c=dict(complement="shared"), Kfull=dict(modes="full"), K32=dict(modes="32"), K64=dict(modes="64"))
+C3_SPACE = dict(K16c=dict(complement="shared"), Kfull=dict(modes="full"),
+                K32c=dict(modes="32", complement="shared"), K64c=dict(modes="64", complement="shared"))
 C3_CONDITIONS = dict(K16c=("po_jepa_full", "po_jepa_no_consistency"), Kfull=("po_jepa_full", "po_jepa_no_consistency"),
-                     K32=("po_jepa_full",), K64=("po_jepa_full",))
+                     K32c=("po_jepa_full",), K64c=("po_jepa_full",))
 C3_IDENTITY_VARIANT = "K16c"
 C3_LOSSLESS = ("K16c", "Kfull")
-C3_CURVE = ("K16", "K32", "K64", "Kfull")
+# Jerry 2026-11-22：四个变体都不丢信息，只改显式基底个数；H6 看这条曲线（K16 截断版只作 H1、H5 的“丢信息”对照）
+C3_CURVE = ("K16c", "K32c", "K64c", "Kfull")
 C3_TIMES = (1., 2., 4., 8.)
 C3_RULES = dict(h1_gain=.03, h1_scenes=("double_well", "van_der_pol"), h2_tie=.01, h3_tolerance=.01, h3_inconclusive=.02,
                 h4_rollout=.05, h5_tolerance=.01, h6_noise=.005, majority=2)
@@ -768,7 +770,7 @@ def c3_hypotheses(scenes) -> dict:
             h5.append(dict(variant=v, scene=s, checks=checks_, finite=finite))
     flags = [c["ok"] for x in h5 for c in x["checks"].values()] + [x["finite"] for x in h5]
     out["H5"] = dict(rows=h5, pass_=None if None in flags or not flags else all(flags))
-    # H6：K16 → K32 → K64 → K 取满（T=8）单调不降，允许 0.5 个百分点噪声
+    # H6：K16c → K32c → K64c → K 取满（T=8，都不丢信息，只改显式基底个数）单调不降，允许 0.5 个百分点噪声
     h6 = []
     for s in SCENES:
         curve = [(v, _get(scenes, s, v, "direct", "8")) for v in C3_CURVE]
@@ -967,7 +969,7 @@ def c3_markdown(summary) -> list:
     lines += ["", f"## H5 别处有没有变差（不比 K16 差 1 pp 以上、有限）：{v(h['H5']['pass_'])}", ""]
     lines += [f"- {x['variant']} {x['scene']}：" + "，".join(f"{m} {_pp(c['minus_k16'])}" for m, c in x["checks"].items())
               + f"，有限 {_f(x['finite'])}" for x in h["H5"]["rows"]]
-    lines += ["", f"## H6 截断曲线 K16 → K32 → K64 → K 取满（T=8，单调不降，允许 0.5 pp）：{v(h['H6']['pass_'])}", ""]
+    lines += ["", f"## H6 基底数曲线 K16c → K32c → K64c → K 取满（T=8，单调不降，允许 0.5 pp）：{v(h['H6']['pass_'])}", ""]
     lines += [f"- {x['scene']}：" + " → ".join(f"{k} {_pct(g)}" for k, g in x["curve"].items()) for x in h["H6"]["scenes"]]
     if summary["readout"]:
         lines += ["", "## 读出（只报告）", "", "| 变体 | 场景 | full nmse | no_cons nmse | full VPT@0.1 | no_cons VPT@0.1 | full gain | no_cons gain |",
