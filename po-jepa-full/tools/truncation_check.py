@@ -34,8 +34,12 @@ project  --job <any trained job, normally transformer_consistency> --spectrum-jo
     d_identity, d_model = d(Z + Delta, Z*), d_proj_K = d(Z + Pi_K Delta, Z*) and d_perp_16 = d(Z + (I - Pi_16) Delta, Z*)
     energy_in_span_K = sum_w ||Pi_K Delta||^2 / sum_w ||Delta||^2
   and the same for --spectrum-job's own prediction, where it is a check: its change must lie in span(Psi_16)
-  (offspan_16 = max_w ||(I - Pi_16) Delta|| / ||Delta|| ~ float32 rounding). If the Transformer's gain drops to PO-JEPA's
-  level after Pi_16, the truncation explains the whole gap. When <job>/evaluation/<condition>/rows exist, d_model is
+  (offspan_16 = max_w ||(I - Pi_16) Delta|| / ||Delta|| ~ float32 rounding; it sees only the directions the prediction
+  uses, so it does not prove the two subspaces are equal). How to read it (G10 review P2-2): Pi_K Delta is the Euclidean
+  projection of the change, not the best point of span(Psi_K) under the LN-L1 metric. A drop of the Transformer's gain
+  after Pi_16 shows that what it learned depends on the removed directions and supports the truncation explanation; it
+  does not by itself prove that the truncation explains the whole gap, and it is not a capacity bound (that is the
+  ceiling, whose optimised value is itself only a lower bound of the true optimum). When <job>/evaluation/<condition>/rows exist, d_model is
   compared window by window with the stored future_jepa_distance (evaluation_check: max |difference|, not an error).
 
 dynamics --job <a PO-JEPA job with forcing_space: token>
@@ -308,6 +312,9 @@ def ceiling_batch(z, target, psi16, psi64, q_out, u, loss, steps, lr, d_identity
         if name == "modal_K16":
             left, right, init = psi16, None, torch_bmm_t(psi16, delta)
         elif name == "modal_K16_pout":
+            if q_out.shape[1] == 0:                  # W_out = 0: the trained readout can make no change at all
+                out[name] = d_identity.clone(), d_identity.clone()
+                continue
             left, right, init = psi16, q_out, torch_bmm_t(psi16, delta)@q_out
         elif name == "modal_K64":
             left, right, init = psi64, None, torch_bmm_t(psi64, delta)
@@ -316,6 +323,21 @@ def ceiling_batch(z, target, psi16, psi64, q_out, u, loss, steps, lr, d_identity
         start, best = optimise(z, target, init, left, right, loss, steps, lr)
         out[name] = start, torch.minimum(best, d_identity)
     return out
+
+
+def readout_basis(weight):
+    """Orthonormal basis [E, r] of col-span(W_out), r = numerical rank (G10 review P2-1: a thin QR of a rank-deficient
+    W returns 64 columns, most of them outside the span). Left singular vectors with s > max(E, 64) * eps * s_max, eps of
+    the stored dtype (float32: torch.linalg.matrix_rank's default tolerance on the stored weight), SVD in float64,
+    returned as float32."""
+    import torch
+    eps = torch.finfo(weight.dtype).eps
+    w = weight.detach().double().cpu()
+    u, singular, _ = torch.linalg.svd(w, full_matrices=False)
+    if singular.numel() == 0 or float(singular[0]) == 0.:
+        return torch.zeros(w.shape[0], 0), 0
+    keep = singular > max(w.shape)*eps*singular[0]
+    return u[:, keep].contiguous().float(), int(keep.sum())
 
 
 def torch_bmm_t(psi, delta):
@@ -330,8 +352,8 @@ def cmd_ceiling(a, job_dir, job, model, loss, selected, registration, device):
     model = _po_model(model, job, "--job")
     keys = window_keys()
     started = time.perf_counter()
-    q_out = torch.linalg.qr(model.p_out.weight.detach().double())[0].float()       # [E, 64], col-span(W_out)
-    rank = int(torch.linalg.matrix_rank(model.p_out.weight.detach().double()))
+    q_out, rank = readout_basis(model.p_out.weight)                                 # [E, rank], col-span(W_out)
+    q_out = q_out.to(device)
     results, channel = {}, {}
     cpu = torch.device("cpu")
     grid16 = load_window(a.features, keys[0], cpu).inputs.grid

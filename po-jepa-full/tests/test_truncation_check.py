@@ -371,3 +371,41 @@ def test_cross_version_flag_uses_the_cross_version_loader(caches, real, env, tmp
     r = json.loads(out.read_text())
     assert seen == dict(condition="po_jepa_full", features=base, dataset=BASE.tag)
     assert r["registration_sha256"] is None and r["cross_version"]["best"]["step"] == 3 and r["best"]["step"] == 3
+
+
+def test_readout_basis_spans_exactly_the_column_space_of_w_out():
+    """G10 review P2-1: a rank-deficient W_out (thin QR would return 64 columns) and W_out = 0."""
+    tool = _tool("truncation_check")
+    g = torch.Generator().manual_seed(8)
+    w = torch.zeros(1408, 64); w[0, 0] = 1.
+    q, rank = tool.readout_basis(w)
+    assert rank == 1 and q.shape == (1408, 1)
+    np.testing.assert_allclose((q@q.T).numpy(), (w@w.T).numpy(), atol=1e-7)          # projector onto e_0
+    low = torch.randn(1408, 3, generator=g)@torch.randn(3, 64, generator=g)
+    q, rank = tool.readout_basis(low)
+    a = low.double().numpy(); u = np.linalg.svd(a, full_matrices=False)[0][:, :3]
+    assert rank == 3 and q.shape == (1408, 3)
+    np.testing.assert_allclose((q@q.T).double().numpy(), u@u.T, atol=1e-6)
+    full = torch.randn(1408, 64, generator=g)
+    q, rank = tool.readout_basis(full)
+    assert rank == 64 and float((q.T@q-torch.eye(64)).abs().max()) < 1e-5
+    q, rank = tool.readout_basis(torch.zeros(1408, 64))
+    assert rank == 0 and q.shape == (1408, 0)
+
+
+def test_ceiling_with_a_zero_readout_is_the_identity(env):
+    tool = _tool("truncation_check")
+    loss = comparison.build_condition("identity", "cpu")[1]
+    g = torch.Generator().manual_seed(9)
+    z, target = torch.randn(2, 16, 1408, generator=g), torch.randn(2, 16, 1408, generator=g)
+    psi = torch.linalg.qr(torch.randn(2, 16, 16, generator=g))[0]
+    u = torch.linalg.qr(torch.randn(1408, 64, generator=g))[0]
+    d0 = torch.tensor([_d(z[i].numpy(), target[i].numpy()) for i in range(2)], dtype=torch.float64)
+    out = tool.ceiling_batch(z, target, psi, psi, torch.zeros(1408, 0), u, loss, 3, .01, d0)
+    start, best = out["modal_K16_pout"]
+    assert torch.allclose(start, d0) and torch.allclose(best, d0)
+    # rank 1: the start point is the projection onto that one channel direction
+    e = torch.zeros(1408, 1); e[5, 0] = 1.
+    start, _ = tool.ceiling_batch(z, target, psi, psi, e, u, loss, 1, .01, d0)["modal_K16_pout"]
+    p = (z+psi@(psi.transpose(1, 2)@(target-z))@e@e.T).numpy()
+    assert [float(x) for x in start] == pytest.approx([_d(p[i], target[i].numpy()) for i in range(2)], rel=1e-5)
