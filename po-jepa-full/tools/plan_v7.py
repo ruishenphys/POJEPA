@@ -154,6 +154,25 @@ def _parse():
     return p.parse_args()
 
 
+def training_root(job_dir, job, condition, base_tag, read):
+    """选中 checkpoint 所在的训练目录（在建模型、读 checkpoint 之前调用）。任务目录自己的 training/<条件> 完成了就用它；
+    否则跟 job.json 的 training_run 到来源任务。S25b2（Codex 审核 F1）：来源任务的条件、数据集、种子必须和这个任务的
+    job.json 一致。数据集名带调节项（含 tubelet），所以声明是两帧、实际指向单帧复制上训练的来源（或反过来）会在这里拒绝；
+    原来只读来源的 report.json，不核它是哪个数据集上训练的。"""
+    root = job_dir/"training"/condition
+    if (root/"COMPLETE.json").exists() or not job.get("training_run"):
+        return root
+    source = Path(job["training_run"])/"run"/"job"
+    if not (source/"job.json").exists():
+        raise SystemExit(f"training_run {job['training_run']} 下没有 run/job/job.json：核不了训练来源是哪个数据集")
+    record = read(source/"job.json")
+    want = dict(condition=condition, dataset=base_tag, seed=job["seed"])
+    got = {k: record.get(k) for k in want}
+    if got != want:
+        raise SystemExit(f"训练来源 {source} 是 {got}，这个任务是 {want}：条件、数据集（含 tubelet）、种子必须相同")
+    return source/"training"/condition
+
+
 def _job_env(job_dir):
     for sub in ("run/job", "job", "run", "."):
         if (job_dir/sub/"job.json").exists():
@@ -212,11 +231,9 @@ def main():
     check_same_tubelet(base, test_spec)
     paired = base.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景）
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
+    root = None if condition == "identity" else training_root(job_dir, job, condition, base.tag, read)   # 先核训练来源，再建模型
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":
-        root = job_dir/"training"/condition
-        if not (root/"COMPLETE.json").exists() and job.get("training_run"):
-            root = Path(job["training_run"])/"run"/"job"/"training"/condition
         selected = read(root/"report.json")["best"]
         opt = comparison.make_optimizer(model)
         evaluation.load_selected_checkpoint(condition, selected, model=model, optimizer=opt, config=loss,

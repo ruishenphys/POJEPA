@@ -334,9 +334,10 @@ def _plan_in_process(tmp_path, monkeypatch, active, dataset_knobs, *extra, fake=
     return json.loads(out.read_text(encoding="utf-8")), encoded, paths, plan
 
 
-@pytest.mark.parametrize("replan", [1, 2])
-def test_plan_encodes_goal_start_and_replan_frames_with_the_one_tick_earlier_frame(tmp_path, monkeypatch, active, replan):
-    rep, encoded, paths, plan = _plan_in_process(tmp_path, monkeypatch, active, "tubelet=pair", "--replan", str(replan))
+@pytest.mark.parametrize("knobs,replan", [("tubelet=pair", 1), ("tubelet=pair", 2), ("delay=1,tubelet=pair", 1),
+                                          ("delay=1,tubelet=pair", 2)])
+def test_plan_encodes_goal_start_and_replan_frames_with_the_one_tick_earlier_frame(tmp_path, monkeypatch, active, knobs, replan):
+    rep, encoded, paths, plan = _plan_in_process(tmp_path, monkeypatch, active, knobs, "--replan", str(replan))
     S = systems.get(); v = datasets.active().knobs
     tid, start, H = 180, 0, 3                                    # 第一个回合：测试段第一条、START_TICKS[0]
     ep, = rep["episodes"]
@@ -366,9 +367,20 @@ def test_plan_encodes_goal_start_and_replan_frames_with_the_one_tick_earlier_fra
     # 重规划：--no-baselines 时最后 ⌈H/replan⌉ 次续算就是模型规划实际执行的那几段（之前的是“不动”参照和目标），
     # 首尾相接地从起点走到 tick start+H；前一帧是执行轨迹在每段终点前 1 tick 的状态
     executed, t, state = paths[-(-(-H//replan)):], start, full[start]
+    # 每一段独立续算（Codex 审核 F2）：命令表自己累计（已下达的规划动作留在表里，带 delay 时下一段开头执行的是它们），
+    # 不用被测的 history；被测 rollout_path 返回的路径必须和它逐位相同
+    issued = np.zeros((32, 2))
     for q in executed:
         assert q["tid"] == tid and q["start"] == t and np.array_equal(q["path"][0], state) and len(q["actions"]) == min(replan, start+H-t)
-        t += len(q["actions"]); state = q["path"][-1]
+        k = len(q["actions"])
+        issued[t:t+k] = np.clip(q["actions"], -.5, .5)
+        want_path = S.variant_trajectory(tid, v, controls=_tick_controls(tid, issued), start=t, state=state, ticks=k)
+        assert np.array_equal(q["path"], want_path)
+        t += k; state = want_path[-1]
+    if "delay" in knobs:      # 有分辨力：把前面已下达的命令清零重算最后一段，结果不同（延迟确实在用排队的命令）
+        last = executed[-1]; cleared = np.zeros((32, 2)); cleared[last["start"]:last["start"]+len(last["actions"])] = np.clip(last["actions"], -.5, .5)
+        other = S.variant_trajectory(tid, v, controls=_tick_controls(tid, cleared), start=last["start"], state=last["path"][0], ticks=len(last["actions"]))
+        assert not np.array_equal(other, last["path"])
     assert t == start+H and len(executed) == -(-H//replan)
     for k, p in enumerate(executed[:-1]):
         end = p["start"]+len(p["actions"])
@@ -510,3 +522,73 @@ def test_floor_tool_on_dup_second_order_cache_is_single_frame(caches, real, acti
         with pytest.raises((SystemExit, ValueError, RuntimeError)):
             tool.main([*_floor_args(features, tmp_path, variant=variant), "--output", str(tmp_path/"x.json")])
         assert not (tmp_path/"x.json").exists()
+
+
+# ———————————————————————————— Codex 审核 S25b2 的补充 ————————————————————————————
+
+def _source_job(tmp_path, dataset, condition="po_jepa_full", seed=1703):
+    """一个只有 job.json 和训练报告的来源任务目录（<dir>/run/job/…）。"""
+    run = tmp_path/f"source-{dataset}"/"run"/"job"
+    (run/"training"/condition).mkdir(parents=True, exist_ok=True)
+    (run/"job.json").write_text(json.dumps(dict(seed=seed, updates=2000, dataset=dataset, condition=condition)))
+    (run/"training"/condition/"report.json").write_text(json.dumps(dict(best=dict(step=1, checkpoint_provenance={}))))
+    return run.parents[1]
+
+
+def test_plan_training_source_must_be_the_same_dataset_condition_and_seed(tmp_path):
+    """F1：wrapper 任务跟 training_run 取 checkpoint 时，来源任务的条件、数据集（含 tubelet）、种子必须和它自己的一致。"""
+    plan = _load("plan_v7")
+    read = lambda path: json.loads(Path(path).read_text())
+    pair, dup = "pendulum~tubelet=pair-200", "pendulum-200"
+    job_dir = tmp_path/"wrapper"; job_dir.mkdir()
+    link = lambda dataset, **kw: dict(seed=1703, condition="po_jepa_full", training_run=str(_source_job(tmp_path, dataset, **kw)))
+    source = _source_job(tmp_path, pair)
+    assert plan.training_root(job_dir, dict(seed=1703, training_run=str(source)), "po_jepa_full", pair, read) \
+        == source/"run"/"job"/"training"/"po_jepa_full"
+    for base, job in ((pair, link(dup)), (dup, link(pair)), (pair, link("pendulum~gain=2,tubelet=pair-200")),
+                      (pair, dict(link(pair), seed=1704))):
+        with pytest.raises(SystemExit, match="训练来源"):
+            plan.training_root(job_dir, job, "po_jepa_full", base, read)
+    other = tmp_path/"other"; other.mkdir()
+    with pytest.raises(SystemExit, match="训练来源"):
+        plan.training_root(job_dir, dict(seed=1703, training_run=str(_source_job(other, pair, condition="po_jepa_no_consistency"))),
+                           "po_jepa_full", pair, read)
+    with pytest.raises(SystemExit, match="job.json"):
+        plan.training_root(job_dir, dict(seed=1703, training_run=str(tmp_path/"nowhere")), "po_jepa_full", pair, read)
+    # 自己的训练已完成：用自己的，不跟 training_run
+    own = job_dir/"training"/"po_jepa_full"; own.mkdir(parents=True); (own/"COMPLETE.json").write_text("{}")
+    assert plan.training_root(job_dir, link(dup), "po_jepa_full", pair, read) == own
+
+
+def test_plan_cli_refuses_mismatched_training_source_before_building_the_model(tmp_path):
+    """F1 整机：声明两帧、来源是单帧复制上训练的任务，在建模型和读 checkpoint 之前退出。"""
+    source = _source_job(tmp_path, "pendulum-200")
+    job = tmp_path/"job"; job.mkdir()
+    (job/"job.json").write_text(json.dumps(dict(seed=1703, updates=2000, dataset="pendulum~tubelet=pair-200", condition="po_jepa_full",
+                                                training_run=str(source))))
+    r = _run("plan_v7.py", "--job", str(job), "--fake-encoder", "--device", "cpu", *SMALL, "--output", str(tmp_path/"x.json"))
+    assert r.returncode != 0 and "训练来源" in r.stderr and "pendulum-200" in r.stderr and not (tmp_path/"x.json").exists()
+    text = (ROOT/"tools/plan_v7.py").read_text(encoding="utf-8")
+    assert text.index("training_root(job_dir, job, condition, base.tag, read)") < text.index("comparison.build_condition(condition, device)")
+
+
+def test_floor_real_encoder_builder_picks_the_class_by_tubelet(tmp_path, monkeypatch):
+    """F3：不替换 _real_encoder 本身，只替换权重载入和两个编码器类的构造：pair 建 FrozenClipEncoder，否则建 FrozenFrameEncoder。"""
+    from po_jepa import vjepa
+    tool = _load("ac_context_check")
+    built = []
+    monkeypatch.setattr(vjepa, "build_encoder_architecture", lambda **kw: "build")
+    monkeypatch.setattr(vjepa, "load_local_encoder", lambda build, checkpoint: "loaded")
+    def maker(name):
+        def make(loaded, *, preprocess, encoder_device, autocast_dtype):
+            assert loaded == "loaded" and preprocess == cache.preprocess_spec() and autocast_dtype is None
+            built.append(name)
+            return name
+        return make
+    monkeypatch.setattr(tubelet_probe, "FrozenClipEncoder", maker("clip"))
+    monkeypatch.setattr(vjepa, "FrozenFrameEncoder", maker("frame"))
+    device = torch.device("cpu")
+    assert tool._real_encoder(tmp_path, tmp_path/"x.pt", device, paired=True) == "clip"
+    assert tool._real_encoder(tmp_path, tmp_path/"x.pt", device) == "frame"
+    assert tool._real_encoder(tmp_path, tmp_path/"x.pt", device, paired=False) == "frame"
+    assert built == ["clip", "frame", "frame"]
