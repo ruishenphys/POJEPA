@@ -12,8 +12,10 @@ d 是 PO-JEPA 统一的 JEPA 距离（双侧无仿射 LayerNorm 后的 MAE）。
 方块中心 4 个位置坐标的 L2 × 48（不含朝向角），gray_scott 是 U、V 池化场（512 维）的 L2（不是像素，注入点不计入）；
 S25a 二阶场景只比画面上看得到的位置（构形，见 po_jepa.configuration）：pendulum 摆锤 × 80、cart_pole 小车和摆锤 × 36、
 spring_chain 和 bouncing_balls 全部质点/球 × 48，wave 是 u 的 16×16 池化场（256 维）的 L2（不是像素）。
-二阶场景在这里按单帧复制（dup）编码，和不带 tubelet=pair 的 encode_v7 一致：特征里看不到速度；两帧编码（tubelet=pair）的数据集
-这里先拒绝，反事实终点的在线两帧编码在 S25b 第二段接。
+二阶场景的编码跟数据集的调节项走，和 encode_v7 写的缓存是同一条规则：不带 tubelet=pair 是单帧复制（dup，特征里看不到速度）；
+带 tubelet=pair 是两帧编码（S25b，docs/segments/S25b2.md）：Z_t = E([P(I_{t−1}), P(I_t)])，前一帧永远是 1 tick（0.25 s）前的画面。
+真实轨迹取 frames_with_prev 的 34 帧；反事实终点（tick start+τ）的前一帧是同一条反事实轨迹在 tick start+τ−1 的画面
+（τ = 1 时就是真实起点那一帧），所以 Z_cf 里的速度也是换了动作以后的速度。
 D_cf 大说明在这个模拟状态下，换动作会让终点特征可以区分（数据里有动作信号）。它不是模型 delta_act 的一般上限：
 D_cf 用完整物理状态续算，模型只看到起点画面；画面推不出完整状态时（例如二阶场景 dup 编码看不到速度，同一画面、同一动作
 可以有不同的未来），模型达不到它。所以 D_cf 大、训练好的模型 delta_act≈1e-6，本身不能断定是训练没学会用动作，
@@ -69,8 +71,10 @@ def _parse():
     return p.parse_args()
 
 
-def counterfactual_end(system, simulation, tid, donor, start, duration):
-    """从 tid 的真实起点状态出发，用 donor 在 [start, start+duration) 的控制仿真 → (真实终点状态, 反事实终点状态, 反事实终点画面)。"""
+def counterfactual_end(system, simulation, tid, donor, start, duration, with_prev=False):
+    """从 tid 的真实起点状态出发，用 donor 在 [start, start+duration) 的控制仿真 → (真实终点状态, 反事实终点状态, 反事实终点画面)。
+    with_prev（S25b 两帧编码，只有二阶场景）：第三项换成 [2,256,256,3]，按时间顺序是反事实轨迹在 tick start+duration−1、
+    start+duration 的两帧（duration = 1 时前一帧是真实起点 tick start 的状态）。"""
     import numpy as np
     from po_jepa import datasets, systems
     from po_jepa import variants
@@ -82,9 +86,17 @@ def counterfactual_end(system, simulation, tid, donor, start, duration):
         if (tid, datasets.active().tag) not in _FULL:
             _FULL.clear(); _FULL[tid, datasets.active().tag] = system.variant_trajectory(tid, v)
         full = _FULL[tid, datasets.active().tag]
-        q = system.variant_trajectory(tid, v, controls=swapped, start=start, state=full[start], ticks=duration)[-1]
+        path = system.variant_trajectory(tid, v, controls=swapped, start=start, state=full[start], ticks=duration)
+        q = path[-1]                                  # path[j] 是 tick start+j 的状态，path[0] = 真实起点
+        if with_prev:
+            if system.name not in variants.SECOND_ORDER or duration < 1 or len(path) != duration+1:
+                raise ValueError("with_prev 只用于二阶场景、时长 ≥ 1")
+            return (system.hidden(full[start+duration][None])[0], system.hidden(q[None])[0],
+                    system.draw(path[-2:], tid, v, ticks=[start+duration-1, start+duration]))
         return (system.hidden(full[start+duration][None])[0], system.hidden(q[None])[0],
                 system.draw(q[None], tid, v, ticks=[start+duration])[0])
+    if with_prev:
+        raise ValueError("with_prev 只用于二阶场景")
     if not v.is_default:      # v7 可调数据集：同一套可调仿真与渲染
         controls = swapped
         if system.name == "advection_diffusion":
@@ -141,12 +153,11 @@ def main():
     if spec.knobs.changes_space():
         # S24c：探针按单帧重画（systems.draw，不经过相机）；空间采样的探针在第 6 阶段接
         raise SystemExit(f"{spec.scene} 带空间采样调节项：动作探针还没接（S24c 只做数据生成）")
-    if spec.knobs.tubelet == "pair":
-        # S25b 第一段只接了 encode_v7 的两帧缓存；这里的在线编码（反事实终点画面）还是单帧复制，
-        # 和两帧缓存、两帧特征上训练的模型对不上，先拒绝（S25b 第二段接，docs/segments/S25b.md §5）
-        raise SystemExit(f"{spec.scene} 是两帧编码（tubelet=pair）的数据集：动作探针的在线两帧编码还没接（S25b 第二段）")
+    paired = spec.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景）
+    if paired:
+        from po_jepa import tubelet_probe
     if a.fake_encoder:
-        encoder = encode_v7._fake_encoder(torch)
+        encoder = tubelet_probe.fake_tubelet_encoder() if paired else encode_v7._fake_encoder(torch)
     else:
         if a.upstream_root is None or a.checkpoint is None:
             raise SystemExit("需要 --upstream-root 和 --checkpoint（与 encode_v7.py 相同）")
@@ -156,11 +167,15 @@ def main():
         build = vjepa.build_encoder_architecture(upstream_root=a.upstream_root, architecture=arch, initialization_seed=0)
         loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
             a.checkpoint, cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder", ("module.", "backbone."), True, (), ()))
-        encoder = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
+        # 两帧数据集用 encode_v7 写缓存时的同一个类（tubelet_probe.FrozenClipEncoder）
+        encoder = (tubelet_probe.FrozenClipEncoder if paired else vjepa.FrozenFrameEncoder)(
+            loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
 
     def encode(frames, tid):
+        """dup：frames [L] → [L,256,1408]。pair：frames 是按时间顺序、相隔 1 tick 的 L+1 帧（前一帧在最前）→ [L,256,1408]，
+        第 k 个 = tubelet(第 k 帧, 第 k+1 帧)，与 encode_v7 写缓存是同一个函数。"""
         return torch.from_numpy(encode_v7._encode_trajectory(encoder, frames, tid, simulation, cache, torch, np,
-                                                             33, a.fake_encoder)).float()
+                                                             33, a.fake_encoder, pair=paired)).float()
 
     def d(x, y):
         return float((F.layer_norm(x, (x.shape[-1],), eps=1e-5)-F.layer_norm(y, (y.shape[-1],), eps=1e-5)).abs().mean())
@@ -171,8 +186,18 @@ def main():
     params = dict(spec.knobs.params)            # S25a：二阶场景的构形要用物理参数（cart_pole 的摆长、质点数 n）
     for i, tid in enumerate(test):
         donor = datasets.donor_id(tid)
-        states, frames = system.frames(tid)
-        z = encode(frames, tid)                                     # [33,256,1408]
+        if paired:
+            # 34 帧，下标 f = tick f−1；送编码器的是全部帧（tick t 的前一帧是下标 t），状态和下面用的 frames 只留 tick 0…32
+            states, clip = system.frames_with_prev(tid)
+            if clip.shape[0] != systems.TICKS+2:
+                raise SystemExit(f"轨迹 {tid}: frames_with_prev 给了 {clip.shape[0]} 帧，应为 {systems.TICKS+2}")
+            states, frames = states[1:], clip[1:]
+        else:
+            states, frames = system.frames(tid)
+            clip = frames
+        z = encode(clip, tid)                                       # [33,256,1408]，第 t 行是 tick t
+        if z.shape[0] != systems.TICKS+1:
+            raise SystemExit(f"轨迹 {tid}: 编出 {z.shape[0]} 个时刻，应为 {systems.TICKS+1}")
         if a.features_root is not None:
             path = a.features_root/f"{tid:04d}"/"raw_z.npy"
             if path.exists():
@@ -184,10 +209,16 @@ def main():
             for tau in DURATIONS:
                 if start+tau > 32:
                     continue
-                true_end, cf_state, cf_frame = counterfactual_end(system, simulation, tid, donor, start, tau)
+                true_end, cf_state, cf_frame = counterfactual_end(system, simulation, tid, donor, start, tau, with_prev=paired)
                 if not np.allclose(true_end, states[start+tau], atol=1e-6):
                     raise SystemExit("真实终点重新仿真不一致")
-                z_cf = encode(cf_frame[None], tid)[0]
+                if paired:
+                    # cf_frame = (tick start+τ−1, tick start+τ) 两帧；τ = 1 时前一帧是真实起点，必须和数据集那一帧逐位相同
+                    if cf_frame.shape[0] != 2 or (tau == 1 and not np.array_equal(cf_frame[0], frames[start])):
+                        raise SystemExit("反事实终点的前一帧不对（τ = 1 时应是真实起点那一帧）")
+                    z_cf = encode(cf_frame, tid)[0]
+                else:
+                    z_cf = encode(cf_frame[None], tid)[0]
                 rows.append(dict(trajectory_id=tid, donor_id=donor, start_tick=start, duration_cycles=tau,
                                  identity=d(z[start], z[start+tau]), oracle_delta_act=d(z_cf, z[start+tau]),
                                  motion_px=motion(system.name, states[start+tau], states[start], scale, params),
@@ -202,7 +233,9 @@ def main():
                   overall=summary(rows), by_duration={str(t): summary([r for r in rows if r["duration_cycles"] == t]) for t in DURATIONS},
                   rows=rows, note=("oracle_delta_act（字段名沿用）= 反事实终点特征可分性 d(Z_cf, Z_true)：从完整物理状态续算、只换窗口内的动作；"
                         "不是模型 delta_act 的一般上限（模型只看起点画面，部分可观测时达不到），不能单凭它把小 delta_act 归因于训练"),
-                  **({"tubelet": "dup", "motion_units": "构形（po_jepa.configuration），二阶场景单帧复制编码看不到速度"}
+                  **({"tubelet": variants.tubelet_label(spec.system, spec.knobs),
+                      "motion_units": ("构形（po_jepa.configuration）；两帧编码：特征带速度，反事实终点的前一帧取反事实轨迹上一个 tick"
+                                       if paired else "构形（po_jepa.configuration），二阶场景单帧复制编码看不到速度")}
                      if spec.system in variants.SECOND_ORDER else {}))
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False))

@@ -11,7 +11,8 @@ T = 12 时上下文最长 12 帧、时间位置到 11；而 AC 训练用 9 帧�
            W = 8 正好是训练时的最长上下文。T ≤ W 时滑动窗口不截断，和直接预测是同一串运算，直接记直接预测的值。
            W = 1 和逐步滚动只差每步对预测帧多做的一次 LayerNorm（unit_rollout 每步走 forward，forward 先做 LN），数值上应几乎相同。
            指标和 v7.1 主表同一个：future_jepa_distance（式 14，逐 token LN 后的 L1），只用 16×16 单点（6 个时长）。
-  floor    特征噪声下限：同一状态编码两次的距离。重画前 K 条测试轨迹（核画面哈希等于缓存记的，保证是同一状态的同一画面），
+  floor    特征噪声下限：同一状态编码两次的距离。二阶场景的两帧编码数据集（--variant tubelet=pair，S25b）按写缓存的同一条规则
+           重编码（frames_with_prev 的 34 帧、第 t 个特征 = tubelet(tick t−1, tick t)），batch 一项是每次 1 个 tubelet。重画前 K 条测试轨迹（核画面哈希等于缓存记的，保证是同一状态的同一画面），
            用和 encode_v7.py 完全相同的冻结编码器和预处理重新编码，和缓存比；同时拆开三个来源：
              rerun     同一进程同一批大小编两次（GPU 运行间不确定性）；
              batch     每次 1 帧 vs 缓存的批大小（分批改变浮点结果，encode_v7 文件头 S25-fix3）；
@@ -220,8 +221,9 @@ def floor_values(first, again, single, stored, stored_dtype, loss):
     return {k: dict(mean=float(v.mean()), max=float(v.max())) for k, v in parts.items()}
 
 
-def _real_encoder(upstream_root, checkpoint, device):
-    """和 tools/encode_v7.py encode（不带空间采样）完全相同的冻结编码器。"""
+def _real_encoder(upstream_root, checkpoint, device, paired=False):
+    """和 tools/encode_v7.py encode（不带空间采样）完全相同的冻结编码器。paired（S25b，tubelet=pair 的数据集）：
+    同一份权重，类换成 encode_v7 写两帧缓存用的 tubelet_probe.FrozenClipEncoder。"""
     from po_jepa import vjepa
     from po_jepa.runtime import cache
     arch = vjepa.EncoderArchitectureSpec(vjepa.UPSTREAM_COMMIT, "configs/train/vitg16/droid-256px-8f.yaml",
@@ -229,6 +231,9 @@ def _real_encoder(upstream_root, checkpoint, device):
     build = vjepa.build_encoder_architecture(upstream_root=upstream_root, architecture=arch, initialization_seed=0)
     loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
         checkpoint, cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder", ("module.", "backbone."), True, (), ()))
+    if paired:
+        from po_jepa import tubelet_probe
+        return tubelet_probe.FrozenClipEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
     return vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
 
 
@@ -237,15 +242,15 @@ def cmd_floor(a):
     import numpy as np
     import torch
     from dataclasses import fields
-    from po_jepa import datasets, simulation, systems
+    from po_jepa import datasets, simulation, systems, variants
     from po_jepa.runtime import cache, checks, comparison, data
     import encode_v7
     import state_readout as sr
     spec = datasets.active()
     sr._refuse_sampling(spec, "特征噪声下限")
-    if spec.knobs.tubelet == "pair":
-        # S25b（Codex 审核 F2）：这里的重编码是单帧复制（FrozenFrameEncoder、frames() 的 33 帧），和两帧缓存比出来的不是噪声下限
-        raise SystemExit(f"{spec.scene} 是两帧编码（tubelet=pair）的数据集：特征噪声下限的重编码还是单帧复制，没接两帧（S25b 第二段）")
+    # S25b：两帧编码（tubelet=pair）的数据集按写缓存的同一条规则重编码：frames_with_prev 的 34 帧、FrozenClipEncoder、
+    # 第 t 个特征 = tubelet(tick t−1, tick t)。单帧复制地重编码再和两帧缓存比，比出来的不是噪声下限（Codex 审核 S25b1a F2）
+    paired = spec.knobs.tubelet == "pair"
     if a.output.exists():
         raise SystemExit(f"{a.output} 已存在，不覆盖")
     if a.count < 1:
@@ -255,7 +260,8 @@ def cmd_floor(a):
     config = checks.load_protocol()
     loss = comparison.LossConfig(**{f.name: config["loss"][f.name] for f in fields(comparison.LossConfig)})
     device = torch.device(a.device)
-    encoder = _real_encoder(a.upstream_root.resolve(), a.checkpoint.resolve(), device)
+    encoder = (_real_encoder(a.upstream_root.resolve(), a.checkpoint.resolve(), device, paired=True) if paired else
+               _real_encoder(a.upstream_root.resolve(), a.checkpoint.resolve(), device))
     system = systems.get()
     started = time.perf_counter()
     rows = []
@@ -265,7 +271,21 @@ def cmd_floor(a):
             raise SystemExit(f"轨迹 {tid}：主实验缓存身份不符")
         if m.get("schema_version") != cache.V7_SCHEMA:
             raise SystemExit(f"轨迹 {tid}：不是 encode_v7.py 写的缓存（v6 缓存的编码流程不同，floor 不接）")
-        _, frames = system.frames(tid)
+        try:        # tubelet=pair ⇔ manifest 有逐项正确的 tubelet 记录（缓存确实是按数据集的那种编码写的）
+            variants.check_tubelet_record(m, spec.knobs)
+        except ValueError as error:
+            raise SystemExit(f"轨迹 {tid}：缓存的 tubelet 记录和数据集不一致：{error}") from None
+        if paired:
+            # 34 帧，下标 f = tick f−1：全部送编码器，和缓存逐帧哈希比的是 tick 0…32（下标 1…33），t = −1 那一帧比 tubelet.first_prev
+            clip = system.frames_with_prev(tid)[1]
+            if len(clip) != len(m["frames"])+1:
+                raise SystemExit(f"轨迹 {tid}：frames_with_prev 给了 {len(clip)} 帧，缓存记了 {len(m['frames'])} 个时刻")
+            if hashlib.sha256(clip[0].tobytes()).hexdigest() != m["tubelet"]["first_prev"]["image_sha256"]:
+                raise SystemExit(f"轨迹 {tid}：重画的 t = −1 画面和缓存记的哈希不符（不是同一状态的同一画面）")
+            frames = clip[1:]
+        else:
+            _, frames = system.frames(tid)
+            clip = frames
         if len(frames) != len(m["frames"]) or any(hashlib.sha256(frames[k].tobytes()).hexdigest() != m["frames"][k]["image_sha256"]
                                                   for k in range(len(frames))):
             raise SystemExit(f"轨迹 {tid}：重画的画面和缓存记的哈希不符（不是同一状态的同一画面）")
@@ -273,7 +293,7 @@ def cmd_floor(a):
         recorded = m["generation"].get("encode_batch")
         batch = int(recorded) if recorded is not None else DEFAULT_ENCODE_BATCH
         stored = np.asarray(raw)
-        enc = lambda size: encode_v7._encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, size, False)
+        enc = lambda size: encode_v7._encode_trajectory(encoder, clip, tid, simulation, cache, torch, np, size, False, pair=paired)
         first, again, single = enc(batch), enc(batch), enc(1)
         rows.append(dict(trajectory_id=tid, manifest_sha256=sha, encode_batch_recorded=recorded, encode_batch_used=batch,
                          encode_batch_source="manifest" if recorded is not None else "assumed_default", stored_dtype=str(stored.dtype),
@@ -294,7 +314,8 @@ def cmd_floor(a):
                   cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]), summary=summary, rows=rows,
                   encoder=dict(checkpoint_sha256=cache.CHECKPOINT_SHA, device=str(device),
                                device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"),
-                  seconds=round(time.perf_counter()-started, 1), scientific_conclusions_verified=False)
+                  seconds=round(time.perf_counter()-started, 1), scientific_conclusions_verified=False,
+                  **({"tubelet": "pair"} if paired else {}))
     sr._write(a.output, report)
     print(f"{spec.tag} 特征噪声下限（{len(rows)} 条）：同一状态编码两次 {summary['vs_cache']['mean']:.3g}，"
           f"相邻两帧 {summary['adjacent']['mean']:.3g} → {a.output}")

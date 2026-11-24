@@ -22,8 +22,15 @@ S25a 二阶场景（po_jepa.configuration）：状态摘要是画面上看得到
 每 2 tick 一段）。“不动”在二阶场景里不是停住：惯性和振荡照样在走，成功判据照旧是“误差 ≤ 0.5 × 不动时的误差”。
 spring_chain 的目标门槛是 0.03（GOAL_GAP）：弹簧硬（k = 16），8 个 tick 的随机动作只把受控质点推开约 0.04（≈ 2 像素），
 0.15 根本够不着（S25a 实测，docs/segments/S25a.md §3）。
-二阶场景在这里按单帧复制（dup）编码（与不带 tubelet=pair 的 encode_v7 一致，特征看不到速度）；两帧编码（tubelet=pair）的数据集
-这里先拒绝，目标和重规划画面的在线两帧编码在 S25b 第二段接。
+二阶场景的编码跟训练数据集的调节项走，和 encode_v7 写的缓存是同一条规则：不带 tubelet=pair 是单帧复制（dup，特征看不到速度）；
+带 tubelet=pair 是两帧编码（S25b，docs/segments/S25b2.md）：每个送进模型的特征都是 Z_t = E([P(I_{t−1}), P(I_t)])，前一帧永远是
+1 tick（0.25 s）前的画面：
+  起点（tick start）    ：前一帧是测试轨迹自己在 tick start−1 的画面（start = 0 时是 t = −1 那一帧），与缓存里那一行同一个输入；
+  目标（tick start+H）  ：前一帧是目标动作序列走到 tick start+H−1 的状态（H = 1 时是起点状态）；
+  重规划（执行到 tick t）：前一帧是实际执行轨迹在 tick t−1 的状态（--replan 1 时就是上一次执行后的状态）。
+所以目标特征里带着“按目标动作到达时”的速度；代价仍是到目标特征的 JEPA 距离，状态误差和成功判据仍只看位置（构形）。
+--test-variant 是整个替换训练数据集的调节项：训练和测试两边的 tubelet 必须相同，否则两帧特征上训练的模型会读到单帧复制的
+特征（或反过来），直接拒绝。
 
 用法（GPU，需要冻结编码器做目标与重规划编码）：
   python tools/plan_v7.py --job ../results-v7/full/double_well/seed1703/po_jepa_full \
@@ -91,14 +98,27 @@ def episode_commands(history, start, actions):
     return vals
 
 
-def rollout(system, v, field_scene, tid, state, start, actions, history):
-    """从 state（tick=start）起执行下达动作 actions[k,2]（窗口前的命令见 episode_commands），返回新状态。"""
+def rollout_path(system, v, field_scene, tid, state, start, actions, history):
+    """从 state（tick=start）起执行下达动作 actions[k,2]（窗口前的命令见 episode_commands），返回整段状态 [k+1, …]：
+    第 j 个是 tick start+j 的状态，第 0 个就是 state。S25b：两帧编码要用倒数第二个（终点前 1 tick）。"""
     from po_jepa import systems
     c = systems.tick_controls(tid, episode_commands(history, start, actions))
     k = len(actions)
     if field_scene:
-        return system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)[-1]
-    return system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)[-1]
+        return system.variant_fields(tid, v, controls=c, start=start, field=state, ticks=k)
+    return system.variant_trajectory(tid, v, controls=c, start=start, state=state, ticks=k)
+
+
+def rollout(system, v, field_scene, tid, state, start, actions, history):
+    """rollout_path 的终点状态。"""
+    return rollout_path(system, v, field_scene, tid, state, start, actions, history)[-1]
+
+
+def check_same_tubelet(base, test_spec):
+    """S25b：--test-variant 整个替换调节项，训练和测试数据集的 tubelet 必须相同（在建模型、读 checkpoint 之前调用）。"""
+    if base.knobs.tubelet != test_spec.knobs.tubelet:
+        raise SystemExit(f"训练数据集 {base.scene} 是 tubelet={base.knobs.tubelet}，测试数据集 {test_spec.scene} 是 "
+                         f"tubelet={test_spec.knobs.tubelet}：两帧和单帧复制的特征不能跨着规划，--test-variant 里要写相同的 tubelet")
 
 
 GOAL_GAP = {"spring_chain": .03}        # S25a：非场场景的绝对门槛，默认 0.15（见文件头）
@@ -132,6 +152,25 @@ def _parse():
     p.add_argument("--no-baselines", action="store_true", help="不跑 zero/random/oracle 参照（它们与模型无关，每个场景只需在一个任务里跑）")
     p.add_argument("--fake-encoder", action="store_true", help="仅 CPU 流程测试")
     return p.parse_args()
+
+
+def training_root(job_dir, job, condition, base_tag, read):
+    """选中 checkpoint 所在的训练目录（在建模型、读 checkpoint 之前调用）。任务目录自己的 training/<条件> 完成了就用它；
+    否则跟 job.json 的 training_run 到来源任务。S25b2（Codex 审核 F1）：来源任务的条件、数据集、种子必须和这个任务的
+    job.json 一致。数据集名带调节项（含 tubelet），所以声明是两帧、实际指向单帧复制上训练的来源（或反过来）会在这里拒绝；
+    原来只读来源的 report.json，不核它是哪个数据集上训练的。"""
+    root = job_dir/"training"/condition
+    if (root/"COMPLETE.json").exists() or not job.get("training_run"):
+        return root
+    source = Path(job["training_run"])/"run"/"job"
+    if not (source/"job.json").exists():
+        raise SystemExit(f"training_run {job['training_run']} 下没有 run/job/job.json：核不了训练来源是哪个数据集")
+    record = read(source/"job.json")
+    want = dict(condition=condition, dataset=base_tag, seed=job["seed"])
+    got = {k: record.get(k) for k in want}
+    if got != want:
+        raise SystemExit(f"训练来源 {source} 是 {got}，这个任务是 {want}：条件、数据集（含 tubelet）、种子必须相同")
+    return source/"training"/condition
 
 
 def _job_env(job_dir):
@@ -189,16 +228,12 @@ def main():
         base.system, base.count, variants.format(base.system, variants.parse(base.system, a.test_variant)))
     for checked in (base, test_spec):
         _refuse_unsupported(checked.knobs, systems.TICKS)
-        if checked.knobs.tubelet == "pair":
-            # S25b 第一段只接了 encode_v7 的两帧缓存；这里的在线编码（目标和重规划画面）还是单帧复制，和两帧特征上训练的
-            # 模型对不上。训练数据集或测试数据集任何一个带 tubelet=pair 都先拒绝（S25b 第二段接，docs/segments/S25b.md §5）
-            raise SystemExit(f"{checked.scene} 是两帧编码（tubelet=pair）的数据集：规划的在线两帧编码还没接（S25b 第二段）")
+    check_same_tubelet(base, test_spec)
+    paired = base.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景）
     # —— 模型：与 transfer 相同，按任务目录里验证集选中的 checkpoint 载入 ——
+    root = None if condition == "identity" else training_root(job_dir, job, condition, base.tag, read)   # 先核训练来源，再建模型
     model, loss = comparison.build_condition(condition, device)
     if condition != "identity":
-        root = job_dir/"training"/condition
-        if not (root/"COMPLETE.json").exists() and job.get("training_run"):
-            root = Path(job["training_run"])/"run"/"job"/"training"/condition
         selected = read(root/"report.json")["best"]
         opt = comparison.make_optimizer(model)
         evaluation.load_selected_checkpoint(condition, selected, model=model, optimizer=opt, config=loss,
@@ -211,8 +246,10 @@ def main():
     assert spec == test_spec
 
     # —— 编码器 ——
+    if paired:
+        from po_jepa import tubelet_probe
     if a.fake_encoder:
-        encoder = encode_v7._fake_encoder(torch)
+        encoder = tubelet_probe.fake_tubelet_encoder() if paired else encode_v7._fake_encoder(torch)
     else:
         from po_jepa import vjepa
         arch = vjepa.EncoderArchitectureSpec(vjepa.UPSTREAM_COMMIT, "configs/train/vitg16/droid-256px-8f.yaml",
@@ -220,10 +257,18 @@ def main():
         build = vjepa.build_encoder_architecture(upstream_root=a.upstream_root, architecture=arch, initialization_seed=0)
         loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
             a.checkpoint, cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder", ("module.", "backbone."), True, (), ()))
-        encoder = vjepa.FrozenFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
+        # 两帧数据集用 encode_v7 写缓存时的同一个类（tubelet_probe.FrozenClipEncoder）
+        encoder = (tubelet_probe.FrozenClipEncoder if paired else vjepa.FrozenFrameEncoder)(
+            loaded, preprocess=cache.preprocess_spec(), encoder_device=device, autocast_dtype=None)
 
     def encode(frame, tid):
-        z = encode_v7._encode_trajectory(encoder, frame[None], tid, simulation, cache, torch, np, 1, a.fake_encoder)
+        """dup：frame 是一帧 [256,256,3]。pair：frame 是 [2,256,256,3]，按时间顺序（前一帧 = 1 tick 前，这一帧）。"""
+        if paired:
+            if frame.shape != (2, 256, 256, 3):
+                raise ValueError("两帧编码要 [2,256,256,3]（前一帧，这一帧）")
+            z = encode_v7._encode_trajectory(encoder, frame, tid, simulation, cache, torch, np, 1, a.fake_encoder, pair=True)
+        else:
+            z = encode_v7._encode_trajectory(encoder, frame[None], tid, simulation, cache, torch, np, 1, a.fake_encoder)
         return torch.from_numpy(z).float().to(device)            # [1,256,1408]
 
     field_scene = spec.system == "advection_diffusion"
@@ -233,8 +278,16 @@ def main():
     def simulate(tid, state, start, actions, history, render=True):
         """从 state（tick=start）起执行下达动作 actions[k,2]，返回 (新状态, 新画面)。history：这一回合已下达的命令
         （episode_commands）。render=False 不画（真值规划的代价只看状态）。"""
-        q = rollout(system, v, field_scene, tid, state, start, actions, history)
-        return q, picture(q, tid, start+len(actions)) if render else None
+        path = rollout_path(system, v, field_scene, tid, state, start, actions, history)
+        q, end = path[-1], start+len(actions)
+        if not render:
+            return q, None
+        if paired:
+            # S25b：终点（tick end）的前一帧 = 同一段续算在 tick end−1 的状态（只走 1 个 tick 时就是 state 本身）
+            if len(path) != len(actions)+1 or len(actions) < 1:
+                raise ValueError("两帧编码的画面至少要续算 1 个 tick")
+            return q, np.stack((picture(path[-2], tid, end-1), picture(q, tid, end)))
+        return q, picture(q, tid, end)
 
     def picture(state, tid, tick):
         """与数据集同一套渲染：基础场景用原渲染函数，有调节项时用可调渲染。tick：这一帧的时刻（会动的干扰光点、像素噪声要用）。"""
@@ -309,6 +362,14 @@ def main():
                 break
         # S21b（Codex 审核）：20 次都没达到门槛的目标记为无效，不进成功率和误差统计（规划照常跑，随机流消耗不变）
         z_goal = encode(goal_frame, tid); g_oracle = oracle_state(goal_state)
+        first_frame = picture(s0, tid, start)
+        if paired:
+            # S25b：起点的前一帧是测试轨迹自己在 tick start−1 的画面。frames_with_prev 的下标 f = tick f−1，
+            # 所以 (tick start−1, tick start) = 下标 (start, start+1)；start = 0 时前一帧是 t = −1 那一帧
+            clip = system.frames_with_prev(tid)[1]
+            if clip.shape[0] != systems.TICKS+2 or not np.array_equal(clip[start+1], first_frame):
+                raise SystemExit(f"轨迹 {tid}：frames_with_prev 的第 {start+1} 帧和重画的起点画面不一致")
+            first_frame = clip[start:start+2]
         result = {}
         for planner in ("model",) if a.no_baselines else ("model", "oracle", "random"):
             state, t, frame, history = s0, start, None, history0.copy()
@@ -316,7 +377,7 @@ def main():
                 state = simulate(tid, s0, start, rng.uniform(-.5, .5, (a.horizon, 2)), history, render=False)[0]
             else:
                 left = a.horizon
-                frame_z = encode(picture(s0, tid, start), tid) if planner == "model" else None
+                frame_z = encode(first_frame, tid) if planner == "model" else None
                 while left > 0:
                     if planner == "model":
                         plan = cem(lambda u: model_cost(frame_z, z_goal, torch.from_numpy(u)), left, rng, a.samples)
@@ -360,7 +421,9 @@ def main():
                              rule="与“不动”的差 ≥ 0.05 × 目标范数（场）或 ≥ 0.15（其他）；20 次重抽都不够的回合不计分"
                                   + (f"；本场景门槛 {GOAL_GAP[spec.system]}" if spec.system in GOAL_GAP else "")),
                   encoder="fake" if a.fake_encoder else "vjepa2-vitg", scientific_conclusions_verified=False,
-                  **({"tubelet": "dup"} if spec.system in variants.SECOND_ORDER else {}))
+                  **({"tubelet": variants.tubelet_label(spec.system, spec.knobs)} if spec.system in variants.SECOND_ORDER else {}),
+                  **({"tubelet_prev_frame": "1 tick（0.25 s）前：起点取测试轨迹的上一帧，目标取目标动作序列上一个 tick 的状态，"
+                                            "重规划取实际执行轨迹上一个 tick 的状态"} if paired else {}))
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({k: report[k] for k in ("condition", "dataset", "model", "oracle", "random", "zero")}, ensure_ascii=False, indent=1))
