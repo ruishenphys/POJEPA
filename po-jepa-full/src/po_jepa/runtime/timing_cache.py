@@ -18,6 +18,9 @@ cache.py 一个字节不改（S18a 钉了它的 SHA）。cache._read_v7_cache �
   目标物理秒 = 起点 + T·0.25，与 data._window_boundary 的精确等式一致）。
 
 时间采样的缓存只用来评测（runtime/timing_eval.py），训练和普通窗口（cache.read_window）都不收它。
+
+S25b3：tubelet=pair 的时间采样缓存（第 k 个特征 = tubelet(t_k − 1 tick 的画面, 第 k 帧)）多核 manifest 的 tubelet 记录
+（variants.check_tubelet_record → 时间采样版：逐帧的前一帧时刻 = 这一帧时刻 − 1 tick）；不带 tubelet=pair 的不能有这条记录。
 """
 
 from pathlib import Path
@@ -142,6 +145,12 @@ def check_manifest(path, m, manifest_sha, spec):
                 or f.get("time_seconds") != f["time_ticks"]*.25 or type(f.get("image_sha256")) is not str
                 or len(f["image_sha256"]) != 64):
             raise ValueError("endpoint source/time mismatch")
+    # S25b3：两帧编码（tubelet=pair）的时间采样缓存要有逐帧记前一帧（t_k − 1 tick）的 tubelet 记录，其余数据集不能有
+    from po_jepa import variants
+    try:
+        variants.check_tubelet_record(m, v)
+    except ValueError as error:
+        raise ValueError(f"time-sampling cache tubelet record does not match the active dataset's tubelet knob: {error}") from None
     return raw, m, manifest_sha
 
 

@@ -36,6 +36,8 @@ S24c 新增流 12 = 相机（pan 的方向角）。
   在 pair 和 dup 下的状态、画面逐位相同。pair 只用于二阶场景（SECOND_ORDER；S22 探针 2026-11-19：单摆 θ̇ 的 R²
   pair 0.962、dup 0.003）。它是调节项而不是二阶场景的默认，是因为缓存读取（runtime/cache.py，SHA 被钉住）按调节项字符串
   核缓存：写成调节项后 pair 与 dup 的特征目录、结果目录自动分开，互相读不到（docs/segments/S25b.md §2）。
+  S25b3：pair 可以和时间采样、空间采样一起用，前一帧始终是 0.25 s（1 tick）前的画面（不是视频流里的上一帧）；
+  时间采样下前一帧另画（po_jepa.timing.pair_frames），新增流 13 = 前一帧落在既不是整 tick、也不是任何一帧时刻上时的像素噪声。
 """
 from dataclasses import dataclass, field, fields
 import math
@@ -250,10 +252,9 @@ def validate(system: str, v: Variant) -> None:
         if system not in SECOND_ORDER:
             # 一阶场景一帧就能看全状态，继续用 v7 的单帧复制（与已有缓存逐位一致）
             raise ValueError(f"{system} 是一阶场景：tubelet=pair 只用于二阶场景 {SECOND_ORDER}")
-        if v.changes_timing() or v.changes_space():
-            # 时间采样：前一帧固定取 0.25 s（1 tick）前的画面，不取视频流里的上一帧（Jerry 2026-11-22 定），要另画这些帧；
-            # 空间采样要原生分辨率的两帧编码器。两者都在 S25b 第二段接，这里先拒绝，免得编出和这个口径不符的缓存
-            raise ValueError("tubelet=pair 还没接时间采样（fps/jitter/exposure/switch_offset）和空间采样（resolution/zoom/pan/drift）调节项")
+        # S25b3：时间采样、空间采样可以和 pair 一起用。前一帧固定取 0.25 s（1 tick）前的画面，不取视频流里的上一帧
+        # （Jerry 2026-11-22 定；时间采样由 timing.pair_frames 另画，空间采样的帧都在整 tick 上，就是 frames_with_prev 的上一帧），
+        # 空间采样用原生分辨率的两帧编码器（native_encoder.NativeClipEncoder），docs/segments/S25b3.md
     if system == "cart_pole" and v.axes == "y":
         raise ValueError("cart_pole 只受水平推力（u_y 不起作用）：axes=y 等于没有控制")
 
@@ -284,14 +285,57 @@ def tubelet_record(first_prev_image_sha256: str) -> dict:
                 first_prev=dict(tick=-1, time_seconds=-.25, image_sha256=first_prev_image_sha256))
 
 
+# S25b3：时间采样（fps/jitter/exposure/switch_offset）下第 k 帧在 t_k（timing.frame_times），前一帧在 t_k − 1 tick，
+# 一般不是视频流里的任何一帧，所以逐帧记前一帧的时刻和画面 SHA
+PAIR_CLIP_TIMED = ("(time t_k - 1 tick, time t_k) in time order; t_k = actual frame time (timing.frame_times); "
+                   "the earlier frame is drawn 0.25 s before, not the previous video frame")
+
+
+def timed_tubelet_record(prev_frames: list) -> dict:
+    """时间采样数据集的 tubelet 记录。prev_frames[k] = dict(frame=k, time_ticks=t_k − 1, time_seconds=(t_k − 1)·0.25,
+    image_sha256=前一帧画面的 SHA)；frames[k] 仍是 tubelet 的后一帧（第 k 帧）。"""
+    return dict(mode="pair", clip=PAIR_CLIP_TIMED, prev_offset_ticks=-1, prev_offset_seconds=-.25, preprocess=PAIR_PREPROCESS,
+                prev_frames=prev_frames)
+
+
+def _is_sha(x) -> bool:
+    return type(x) is str and len(x) == 64 and all(c in "0123456789abcdef" for c in x)
+
+
+def _check_timed_record(manifest: dict) -> None:
+    """S25b3：时间采样数据集的 tubelet 记录逐项等于 timed_tubelet_record，prev_frames 与 manifest 的 frames 一一对应：
+    帧号相同，前一帧的时刻 = 这一帧的时刻 − 1 tick（float64 精确比较），秒 = tick·0.25，SHA 是 64 位小写十六进制。
+    这一帧的时刻本身由 runtime/timing_cache.check_manifest 对 timing.frame_times 核。"""
+    record, frames = manifest.get("tubelet"), manifest.get("frames")
+    bad = ValueError("manifest 的 tubelet 记录与时间采样下 tubelet=pair 的编码定义不一致（variants.timed_tubelet_record）")
+    if not isinstance(record, dict) or type(frames) is not list or type(record.get("prev_frames")) is not list:
+        raise bad
+    prev = record["prev_frames"]
+    if len(prev) != len(frames) or record != timed_tubelet_record(prev):
+        raise bad
+    if type(record["prev_offset_ticks"]) is not int or type(record["prev_offset_seconds"]) is not float:
+        raise bad
+    for k, (p, f) in enumerate(zip(prev, frames)):
+        if (not isinstance(p, dict) or set(p) != {"frame", "time_ticks", "time_seconds", "image_sha256"}
+                or type(p["frame"]) is not int or p["frame"] != k or not isinstance(f, dict) or f.get("frame") != k
+                or type(p["time_ticks"]) is not float or type(f.get("time_ticks")) is not float
+                or p["time_ticks"] != f["time_ticks"]-1. or type(p["time_seconds"]) is not float
+                or p["time_seconds"] != p["time_ticks"]*.25 or not _is_sha(p["image_sha256"])):
+            raise bad
+
+
 def check_tubelet_record(manifest: dict, v: Variant) -> None:
     """manifest 的 tubelet 记录要和调节项一致：tubelet=pair ⇔ 有记录，且记录逐项等于 tubelet_record（时间顺序、
     −1 tick / −0.25 s、预处理规则、first_prev 的 tick 和时刻），first_prev 的画面 SHA 是 64 位小写十六进制。
-    S25b 修改（Codex 审核 F3）：原来只核有没有记录和 mode。"""
+    S25b 修改（Codex 审核 F3）：原来只核有没有记录和 mode。
+    S25b3：带时间采样调节项时记录是 timed_tubelet_record（逐帧的前一帧），由 _check_timed_record 核；空间采样的帧都在
+    整 tick 上，仍是 tubelet_record。"""
     if v.tubelet != "pair":
         if "tubelet" in manifest:
             raise ValueError("manifest 有 tubelet 记录，但数据集不是 tubelet=pair")
         return
+    if v.changes_timing():
+        return _check_timed_record(manifest)
     record = manifest.get("tubelet")
     sha = record.get("first_prev", {}).get("image_sha256") if isinstance(record, dict) and isinstance(record.get("first_prev"), dict) else None
     if (type(sha) is not str or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)

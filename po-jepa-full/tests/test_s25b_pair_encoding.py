@@ -115,14 +115,6 @@ def test_tubelet_knob_parse_format_and_scope():
     assert variants.coverage()["tubelet"] == variants.SECOND_ORDER
 
 
-@pytest.mark.parametrize("knob", ["fps=8", "jitter=0.2", "exposure=0.5", "switch_offset=0.5", "resolution=384", "zoom=0.75"])
-def test_pair_refuses_time_and_space_sampling(knob):
-    """时间采样的前一帧要另画（固定 0.25 s 前，Jerry 2026-11-22 定）、空间采样要原生分辨率的两帧编码器：第二段接，这里拒绝。"""
-    assert variants.parse("pendulum", knob) is not None          # 不带 pair 时这些调节项本身可用
-    with pytest.raises(ValueError, match="还没接"):
-        variants.parse("pendulum", f"{knob},tubelet=pair")
-
-
 @pytest.mark.parametrize("system", variants.SECOND_ORDER)
 def test_pair_knob_changes_no_state_frame_or_control(system, active):
     """tubelet 只改编码：同一编号的轨迹在 pair、dup 数据集下的状态、34 帧画面、下达动作逐位相同。"""
@@ -287,10 +279,8 @@ def test_pair_path_argument_checks():
     enc = tubelet_probe.fake_tubelet_encoder()
     with pytest.raises(ValueError, match="至少要 2 帧"):
         encode_v7._encode_trajectory(enc, one, 0, simulation, cache, torch, np, 33, True, pair=True)
-    with pytest.raises(ValueError, match="没接"):
+    with pytest.raises(ValueError, match="不收帧时刻"):      # S25b3：时间采样的两帧编码给的是前一帧（prev），不是帧时刻
         encode_v7._encode_trajectory(enc, two, 0, simulation, cache, torch, np, 33, True, np.array([0., 1.]), pair=True)
-    with pytest.raises(ValueError, match="没接"):
-        encode_v7._encode_trajectory(enc, two, 0, simulation, cache, torch, np, 33, True, None, 384, pair=True)
     assert encode_v7._encode_trajectory(enc, two, 0, simulation, cache, torch, np, 33, True, pair=True).shape == (1, 256, 1408)
 
 

@@ -17,6 +17,9 @@ cache.py 一个字节不改（S18a 钉了它的 SHA）。这里是 cache._read_c
 - window_boundary(window)：data._window_boundary 的 G×G 版（那个写死 16×16）。
 
 空间采样的缓存只用来评测（runtime/space_eval.py），训练、cache.read_window、run.py transfer 都不收它。
+
+S25b3：tubelet=pair 的空间采样缓存（第 t 个特征 = 原生分辨率的 tubelet(tick t−1, tick t)）多核 manifest 的 tubelet 记录
+（variants.check_tubelet_record，与 33 帧主缓存同一条）；不带 tubelet=pair 的不能有这条记录。
 """
 
 import hashlib
@@ -137,6 +140,12 @@ def check_manifest(path, m, manifest_sha, spec):
         if (f.get("tick") != tick or f.get("time_seconds") != tick*.25 or type(f.get("image_sha256")) is not str
                 or len(f["image_sha256"]) != 64):
             raise ValueError("endpoint source mismatch")
+    # S25b3：两帧编码（tubelet=pair）的空间采样缓存要有逐项等于编码定义的 tubelet 记录，其余数据集不能有
+    from po_jepa import variants
+    try:
+        variants.check_tubelet_record(m, spec.knobs)
+    except ValueError as error:
+        raise ValueError(f"space-sampling cache tubelet record does not match the active dataset's tubelet knob: {error}") from None
     return raw, m, manifest_sha
 
 
