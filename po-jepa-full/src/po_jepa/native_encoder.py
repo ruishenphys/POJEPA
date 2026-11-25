@@ -15,9 +15,14 @@ v7 的编码（vjepa.preprocess_rgb + vjepa.FrozenFrameEncoder）写死 256×256
   Conv3d，与分辨率无关。所以 192 的位置是 256 的子集，320、384 的位置超出 256 训练时见过的 0…15（外推）。
   R = 256 时与 FrozenFrameEncoder 逐位相同（测试核）。
 
+- 两帧编码 `NativeClipEncoder`（S25b3，tubelet=pair 的二阶场景）：同一个冻结编码器，输入是两张原生分辨率的预处理图
+  按时间顺序组成的 tubelet [B,3,2,R,R]（tubelet_probe.FrozenClipEncoder 的原生分辨率版），输出 raw [B,(R/16)²,1408]。
+  R = 256 时与 FrozenClipEncoder 逐位相同；两帧相同时与 NativeFrameEncoder 逐位相同（测试核）。
+
 只用于空间采样测试集的编码（tools/encode_v7.py，--splits test）；训练、v7 缓存和 cache.py 都不经过这里。
 """
 
+import math
 import random
 
 import numpy as np
@@ -110,6 +115,50 @@ class NativeFrameEncoder(vjepa.FrozenFrameEncoder):
                 or not raw_z.is_floating_point() or not torch.isfinite(raw_z).all()):
             raise ValueError("encoder must return one finite raw spatial block [B,(R/16)^2,1408]")
         return raw_z
+
+
+class NativeClipEncoder(NativeFrameEncoder):
+    """S25b3：同一个冻结编码器按原生分辨率 R 编码两帧 tubelet：(prev [B,3,R,R], cur [B,3,R,R]) → raw [B,(R/16)²,1408]。
+    视频张量 = stack((prev, cur), 时间维)，时间顺序（前，后），与 tubelet_probe.FrozenClipEncoder.encode_clip 相同。"""
+
+    def encode_clip(self, prev: Tensor, cur: Tensor) -> Tensor:
+        r, tokens = self.resolution, (self.resolution//PATCH)**2
+        if any(m.training for m in self.encoder.modules()):
+            raise ValueError("encoder must remain in eval mode")
+        if any(p.requires_grad for p in self.encoder.parameters()):
+            raise ValueError("encoder parameters must remain frozen")
+        if any(p.dtype != torch.float32 or p.device != self.encoder_device for p in self.encoder.parameters()):
+            raise ValueError("encoder parameter device/dtype was changed")
+        for frame in (prev, cur):
+            if (not isinstance(frame, Tensor) or frame.device.type != "cpu" or frame.dtype != torch.float32
+                    or frame.ndim != 4 or frame.shape[0] <= 0 or tuple(frame.shape[1:]) != (3, r, r)
+                    or not torch.isfinite(frame).all()):
+                raise ValueError("preprocessed frames must be finite CPU float32 [B,3,R,R] at the encoder's native resolution")
+        if prev.shape != cur.shape:
+            raise ValueError("prev and cur must have the same batch")
+        with torch.inference_mode(False), torch.no_grad(), torch.autocast(self.encoder_device.type, enabled=False):
+            video = torch.stack((prev, cur), 2).to(self.encoder_device)
+            raw_z = self.encoder(video)
+        if (not isinstance(raw_z, Tensor) or raw_z.shape != (prev.shape[0], tokens, ENCODER_DIM)
+                or not raw_z.is_floating_point() or not torch.isfinite(raw_z).all()):
+            raise ValueError("encoder must return one finite raw spatial block [B,(R/16)^2,1408]")
+        return raw_z.detach()
+
+
+def fake_clip_encoder():
+    """S25b3，仅供 CPU 流程测试：确定性随机 2×16×16 tubelet 投影 + LayerNorm，[B,3,2,R,R] → [B,(R/16)²,1408]。
+    权重与 tubelet_probe.fake_tubelet_encoder 相同（R = 256 时逐位相同）。"""
+    g = torch.Generator().manual_seed(0)
+    weight = torch.randn(3*2*PATCH*PATCH, ENCODER_DIM, generator=g)/math.sqrt(3*2*PATCH*PATCH)
+
+    def encode(video):
+        side = grid_side(int(video.shape[-1]))
+        b = video.shape[0]
+        if tuple(video.shape[1:]) != (3, 2, side*PATCH, side*PATCH):
+            raise ValueError("fake clip encoder expects square [B,3,2,R,R]")
+        patches = video.reshape(b, 3, 2, side, PATCH, side, PATCH).permute(0, 3, 5, 1, 2, 4, 6).reshape(b, side*side, -1)
+        return torch.nn.functional.layer_norm(patches@weight, (ENCODER_DIM,))
+    return encode
 
 
 def fake_encoder():

@@ -30,7 +30,11 @@ S25b 两帧编码（--variant 带 tubelet=pair，只用于二阶场景）：每�
 用的 tubelet_probe.FrozenClipEncoder（同一个冻结编码器；两帧相同时与 dup 逐元素相同）。缓存格式不变（[帧数,256,1408]、
 states.npy、frames 逐帧来源都与 dup 相同），manifest 多一个 tubelet 记录；物理、动作、画面和随机流与不带 tubelet=pair 时
 逐位相同。长时程（horizon=64/128）照样分批：第 k 批是第 33k…33k+32 个 tubelet，前 33 个与主实验缓存同一批。
-时间采样、空间采样加 tubelet=pair 还没接（variants.validate 拒绝，docs/segments/S25b.md §5）。
+S25b3 两帧编码加时间采样、空间采样（docs/segments/S25b3.md）：前一帧始终是 0.25 s（1 tick）前的画面（Jerry 2026-11-22 定），
+不是视频流里的上一帧。时间采样：第 k 个特征 = tubelet(t_k − 1 tick 的画面, 第 k 帧)，前一帧由 timing.pair_frames 另画，manifest 的
+tubelet 记录逐帧记前一帧的时刻和画面 SHA（variants.timed_tubelet_record）；编码器仍是 FrozenClipEncoder（256）。空间采样：帧都在
+整 tick 上，前一帧就是 frames_with_prev 的上一帧（各按自己时刻的相机画），按原生分辨率两帧编码（native_encoder.NativeClipEncoder），
+tubelet 记录与 33 帧主缓存相同。分批都按 tubelet 计（每批 --batch 个）。
 
 S25-fix3：每条 manifest 的 generation.encode_batch 记 --batch，finalize 的 report.json 汇总（encode_batches）。
 
@@ -98,7 +102,7 @@ def main():
         # S25e：空间采样测试集只用来评测（tools/space_eval.py），只编码测试段；模型在 256、相机不动的基础场景上训练
         raise SystemExit(f"{spec.scene} 带空间采样调节项：只能 --splits test（只用来评测，见 tools/space_eval.py）")
     resolution = spec.knobs.resolution
-    paired = spec.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景、不带时间/空间采样）
+    paired = spec.knobs.tubelet == "pair"            # S25b：两帧编码（variants.validate 保证只有二阶场景；S25b3 起可带时间或空间采样）
     out = args.output.resolve()
 
     if args.mode == "finalize":
@@ -122,7 +126,7 @@ def main():
 
     if args.fake_encoder:
         from po_jepa import native_encoder
-        encoder = (native_encoder.fake_encoder() if spaced else
+        encoder = (native_encoder.fake_clip_encoder() if spaced and paired else native_encoder.fake_encoder() if spaced else
                    tubelet_probe.fake_tubelet_encoder() if paired else _fake_encoder(torch))
         load_report, role = dict(sha256=None, encoder_key=None, strict=None,
                                    missing_keys=[], unexpected_keys=[]), "synthetic_development_only"
@@ -135,9 +139,9 @@ def main():
         loaded = vjepa.load_local_encoder(build, checkpoint=vjepa.LocalCheckpointSpec(
             args.checkpoint, cache.CHECKPOINT_SHA, cache.PUBLICATION, "target_encoder",
             ("module.", "backbone."), True, (), ()))
-        if spaced:     # S25e：同一个冻结编码器按原生分辨率编码（[B,3,R,R] → [B,(R/16)²,1408]）
+        if spaced:     # S25e：同一个冻结编码器按原生分辨率编码（[B,3,R,R] → [B,(R/16)²,1408]）；S25b3：两帧时是两帧 tubelet 版
             from po_jepa import native_encoder
-            frozen = native_encoder.NativeFrameEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
+            frozen = (native_encoder.NativeClipEncoder if paired else native_encoder.NativeFrameEncoder)(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
                                                        autocast_dtype=None, resolution=resolution)
         elif paired:   # S25b：同一个冻结编码器，输入换成两张预处理图组成的 tubelet（S22 探针用的、测过的那个类）
             frozen = tubelet_probe.FrozenClipEncoder(loaded, preprocess=cache.preprocess_spec(), encoder_device=device,
@@ -170,8 +174,16 @@ def main():
         if folder.exists():
             shutil.rmtree(folder)       # 上次中断留下的半成品
         folder.mkdir()
-        if paired:
+        prev_frames = None
+        if paired and timed:
+            # S25b3：第 k 个 tubelet =（t_k − 1 tick 的画面, 第 k 帧）；画面和状态与不带 tubelet=pair 时的 frames() 逐位相同
+            states, prev_frames, frames = timing.pair_frames(system, tid)
+            if prev_frames.shape != frames.shape:
+                raise ValueError(f"trajectory {tid}: {prev_frames.shape[0]} previous frames for {frames.shape[0]} frames")
+            clip_frames = frames
+        elif paired:
             # S25b：多 t = −1 一帧在最前（下标 f = tick f−1）；送编码器的是全部帧，存下来的状态和逐帧来源只记 tick 0…H（同 dup）
+            # S25b3 空间采样：帧都在整 tick 上，frames_with_prev 的上一帧就是 1 tick 前的画面（R×R，按各自时刻的相机画）
             states, clip_frames = system.frames_with_prev(tid)
             if clip_frames.shape[0] != frames_per_trajectory+1 or states.shape[0] != frames_per_trajectory+1:
                 raise ValueError(f"trajectory {tid}: {clip_frames.shape[0]} frames with prev, expected {frames_per_trajectory+1}")
@@ -185,8 +197,8 @@ def main():
         ticks = timing.frame_times(tid) if timed else np.arange(frames_per_trajectory, dtype=np.float64)
         if spaced and frames.shape[1:] != (resolution, resolution, 3):
             raise ValueError(f"trajectory {tid}: frames {frames.shape[1:]}, expected {resolution}x{resolution}")
-        raw = _encode_trajectory(encoder, clip_frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder, ticks if timed else None,
-                                 resolution if spaced else None, pair=paired)
+        raw = _encode_trajectory(encoder, clip_frames, tid, simulation, cache, torch, np, args.batch, args.fake_encoder,
+                                 ticks if timed and not paired else None, resolution if spaced else None, pair=paired, prev=prev_frames)
         if raw.shape[0] != frames_per_trajectory:
             raise ValueError(f"trajectory {tid}: {raw.shape[0]} encoded frames, expected {frames_per_trajectory}")
         stored = raw.astype(dtype)
@@ -213,7 +225,11 @@ def main():
             **({"timing": dict(fps=spec.knobs.fps, jitter=spec.knobs.jitter, exposure=spec.knobs.exposure,
                                switch_offset=spec.knobs.switch_offset)} if timed else {}),
             **({"space": space_cache.space_record(spec)} if spaced else {}),
-            **({"tubelet": variants.tubelet_record(hashlib.sha256(clip_frames[0].tobytes()).hexdigest())} if paired else {}),
+            **({"tubelet": variants.timed_tubelet_record(
+                    [dict(frame=k, time_ticks=float(ticks[k])-1., time_seconds=(float(ticks[k])-1.)*.25,
+                          image_sha256=hashlib.sha256(prev_frames[k].tobytes()).hexdigest()) for k in range(frames_per_trajectory)])}
+               if paired and timed else
+               {"tubelet": variants.tubelet_record(hashlib.sha256(clip_frames[0].tobytes()).hexdigest())} if paired else {}),
             feature_stats=dict(max_abs=float(np.abs(raw).max()), relative_rounding_error=rounding),
             rng=dict(seed_entropy=simulation.seed_entropy(tid, 0), preprocess_seed=simulation.preprocess_seed(tid)),
             generation=dict(evidence_role=role, encoder_checkpoint_sha256=None if args.fake_encoder else cache.CHECKPOINT_SHA,
@@ -245,40 +261,58 @@ def _controls_record(controls, systems):
                 values=controls.values.tolist(), units="simulation_position_per_second")
 
 
-def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None, resolution=None, pair=False):
+def _encode_trajectory(encoder, frames, tid, simulation, cache, torch, np, batch, fake, ticks=None, resolution=None, pair=False,
+                       prev=None):
     """按 v3 规则：每帧前把同一条轨迹的预处理 generator 重置到同一初始状态，再单帧预处理并编码。
     ticks：每帧的时刻（tick，S25d 时间采样时不是 0…L−1）；编码器只把它当元数据（vjepa._encode 不用它算特征）。
     resolution：S25e 空间采样时的原生分辨率 R（预处理输出 R×R，native_encoder.preprocess_native）；None = v7 的 256。
     pair（S25b）：frames 是 L+1 帧（按时间顺序，相邻两帧相隔 1 tick），第 k 个输出 = tubelet(第 k 帧, 第 k+1 帧)，
     k = 0…L−1，返回 [L,256,1408]；encoder 是 tubelet_probe.FrozenClipEncoder（fake 时是 fake_tubelet_encoder）。
-    分批按 tubelet 计：第 s…s+batch−1 个 tubelet 一批。"""
+    分批按 tubelet 计：第 s…s+batch−1 个 tubelet 一批。
+    S25b3：pair 时 resolution 可以给（空间采样，按原生分辨率预处理，encoder 是 native_encoder.NativeClipEncoder）；
+    prev（时间采样）：frames 是 L 帧、prev 是对应的 L 张前一帧（t_k − 1 tick 的画面），第 k 个输出 = tubelet(prev[k], frames[k])。
+    pair 时不收 ticks：两帧编码器只看两张图（时刻不进特征）。"""
     rgb = torch.from_numpy(frames)
+    if prev is not None and not pair:
+        raise ValueError("prev（前一帧）只用于两帧编码")
     if pair:
-        if ticks is not None or resolution is not None:
-            raise ValueError("两帧编码没接时间采样和空间采样")
-        if rgb.shape[0] < 2:
+        if ticks is not None:
+            raise ValueError("两帧编码不收帧时刻（编码器只看两张图）")
+        if prev is None and rgb.shape[0] < 2:
             raise ValueError("两帧编码至少要 2 帧（前一帧在最前）")
+        if prev is not None and (prev.shape != frames.shape or prev.dtype != frames.dtype):
+            raise ValueError("前一帧要与画面一一对应（同形状、同 dtype）")
     if fake:
         x = rgb.permute(0, 3, 1, 2).float()/255.
+        if pair and prev is not None:
+            p = torch.from_numpy(prev).permute(0, 3, 1, 2).float()/255.
+            return encoder(torch.stack((p, x), 2)).numpy().astype(np.float64)
         if pair:
             return encoder(torch.stack((x[:-1], x[1:]), 2)).numpy().astype(np.float64)
         return encoder(x).numpy().astype(np.float64)
     from po_jepa import vjepa
     seed = simulation.preprocess_seed(tid)
-    pre = []
-    for t in range(rgb.shape[0]):
-        g = torch.Generator(device="cpu").manual_seed(seed)
-        if resolution is None:
-            pre.append(vjepa.preprocess_rgb(rgb[t:t+1], spec=cache.preprocess_spec(), generator=g))
-        else:
-            from po_jepa import native_encoder
-            pre.append(native_encoder.preprocess_native(rgb[t:t+1], resolution=resolution, spec=cache.preprocess_spec(), generator=g))
-    pre = torch.cat(pre)
+
+    def preprocess(images):
+        pre = []
+        for t in range(images.shape[0]):
+            g = torch.Generator(device="cpu").manual_seed(seed)
+            if resolution is None:
+                pre.append(vjepa.preprocess_rgb(images[t:t+1], spec=cache.preprocess_spec(), generator=g))
+            else:
+                from po_jepa import native_encoder
+                pre.append(native_encoder.preprocess_native(images[t:t+1], resolution=resolution, spec=cache.preprocess_spec(),
+                                                            generator=g))
+        return torch.cat(pre)
+
+    pre = preprocess(rgb)
     out = []
     if pair:
-        for s in range(0, pre.shape[0]-1, batch):
-            e = min(s+batch, pre.shape[0]-1)
-            out.append(encoder.encode_clip(pre[s:e], pre[s+1:e+1]).cpu().double())
+        # 前一帧、后一帧各自的预处理图（每张图前都重置同一个 generator，所以裁剪相同）
+        before, after = (preprocess(torch.from_numpy(prev)), pre) if prev is not None else (pre[:-1], pre[1:])
+        for s in range(0, after.shape[0], batch):
+            e = min(s+batch, after.shape[0])
+            out.append(encoder.encode_clip(before[s:e], after[s:e]).cpu().double())
         return torch.cat(out).numpy()
     for s in range(0, pre.shape[0], batch):
         chunk = pre[s:s+batch]

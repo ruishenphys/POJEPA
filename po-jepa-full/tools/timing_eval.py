@@ -12,7 +12,7 @@
       --output ../features-v8/double_well~fps=8-2000
   python tools/timing_eval.py --job ../results-v8/full/double_well/seed1703/po_jepa_full --test-variant fps=8 \\
       --features ../features-v8/double_well~fps=8-2000 --output ../results-v8/full/timing/double_well~fps=8/seed1703/po_jepa_full.json --device cuda:0
-二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。tubelet=pair 加时间采样、空间采样还没接（variants.validate 拒绝）。
+二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。带 tubelet=pair 时测试集也是两帧编码（前一帧固定在 0.25 s 前，S25b3），测试集的特征目录要用 --variant tubelet=pair,<采样调节项> 编。
 """
 import argparse
 import hashlib

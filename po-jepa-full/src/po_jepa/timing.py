@@ -27,6 +27,13 @@ S24c 空间采样（resolution、zoom、pan、drift，po_jepa.camera）也走这
 流 4 按块 [R,R,3] 顺序抽；R = 256 时与原来逐位相同）。
 
 只做数据生成：编码、缓存、探针、规划遇到时间采样、空间采样调节项直接报错，接入在第 6 阶段。
+
+S25b3 两帧编码（tubelet=pair）的前一帧：第 k 帧（时刻 t_k）的 tubelet 是（t_k − 1 tick 的画面，第 k 帧），前一帧固定在
+0.25 s 前（Jerry 2026-11-22 定），不是视频流里的上一帧，也不是 frames(prev=True) 的“往前一个帧间隔”。pair_frames 给出它们：
+状态照上面的主链 + 旁支取（同一时刻的状态与别的取样时刻无关），曝光窗口长度 E 与主帧相同（[t_k − 1 − E, t_k − 1]，早于
+t = −1 的取 −1），相机照同一套规则。像素噪声按“同一时刻同一张图”取：前一帧落在整 tick 上用流 4 那个 tick 的那份；正好落在
+某一帧的时刻上（帧率 8、16 不抖动时就是第 k − fps/4 帧；或 frames(prev=True) 的 t = −Δ 那一帧）用那一帧的流 11；
+都不是（抖动时）用流 13 按帧号 k 另起。所以 fps = 4 不抖动时前一帧就是第 k − 1 帧（k = 0 时是 frames(prev=True) 的第 0 帧）。
 """
 import math
 
@@ -39,6 +46,8 @@ SUBTICKS = systems.SUBTICKS
 EXPOSURE_SAMPLES_PER_TICK = 8      # 曝光窗口里取样时刻的最大间隔 = 1/8 tick
 STREAM_JITTER = 10
 STREAM_OFFGRID_NOISE = 11
+STREAM_PREV_NOISE = 13             # S25b3：两帧编码的前一帧既不在整 tick、也不在任何一帧时刻上时的像素噪声（按帧号）
+PAIR_PREV_TICKS = 1.               # S25b3：两帧编码的前一帧在 1 tick（0.25 s）前
 
 
 def frame_period(v) -> float:
@@ -495,8 +504,8 @@ class _NoiseBlocks:
         return self.last
 
 
-def _offgrid_noise(trajectory_id, key, sigma, size=systems.SIZE):
-    entropy = simulation.seed_entropy(trajectory_id, STREAM_OFFGRID_NOISE)+[int(key)]
+def _offgrid_noise(trajectory_id, key, sigma, size=systems.SIZE, stream=STREAM_OFFGRID_NOISE):
+    entropy = simulation.seed_entropy(trajectory_id, stream)+[int(key)]
     g = np.random.Generator(np.random.PCG64(np.random.SeedSequence(entropy)))
     return g.normal(0., sigma, (size, size, 3))
 
@@ -556,3 +565,42 @@ def frames(system, trajectory_id: int, *, prev: bool = False):
                 image = image+_offgrid_noise(trajectory_id, keys[i], v.pixel_noise, R)
         images[i] = np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
     return hidden, images
+
+
+def pair_frames(system, trajectory_id: int):
+    """S25b3：两帧编码（tubelet=pair）在时间采样数据集上的画面。→ (隐藏状态 [L, d], 前一帧 [L,R,R,3] uint8, 画面 [L,R,R,3] uint8)，
+    第 k 个 tubelet 是（前一帧[k]，画面[k]）。隐藏状态和画面就是 frames() 的（逐位）；前一帧[k] 是时刻 t_k − 1 tick 的画面，
+    规则见文件头。只用于二阶场景（预跑让 t = −1 有状态，t_k ≥ 0 所以 t_k − 1 ≥ −1，fps = 2 也取得到）。"""
+    if system.name not in variants.SECOND_ORDER:
+        raise ValueError("只有二阶场景有前一帧")
+    hidden, images = frames(system, trajectory_id)
+    v = datasets.active().knobs
+    T = v.horizon
+    commanded = systems.commanded_controls(trajectory_id)
+    u4 = systems.applied_subticks(trajectory_id, v, commanded)
+    sc = _scene(system, trajectory_id, v, T)
+    times = frame_times(trajectory_id, v)
+    prev_times = times-PAIR_PREV_TICKS
+    samples = exposure_times(prev_times, v, sc.t_min)
+    states = simulate(sc, u4, samples.ravel())
+    L, M = samples.shape
+    offset = 1 if sc.pre_run else 0
+    R = v.resolution
+    # 这条轨迹上已经有画面的非整 tick 时刻 → 流 11 的帧号键（frames() 第 j 帧 = j+1；frames(prev=True) 的 t = −Δ 那一帧 = 0）
+    on_frame = {float(t): j+1 for j, t in enumerate(times)}
+    if frame_period(v) <= 1:
+        on_frame.setdefault(-frame_period(v), 0)
+    noise4 = _NoiseBlocks(simulation._rng(trajectory_id, 4), v.pixel_noise, R) if v.pixel_noise else None
+    prev = np.empty((L, R, R, 3), dtype=np.uint8)
+    for i in range(L):
+        image = _draw_raw(sc, states[i*M:(i+1)*M], samples[i], trajectory_id, v)
+        if v.pixel_noise:
+            t = float(prev_times[i])
+            if t == math.floor(t):
+                image = image+noise4.block(int(t)+offset)
+            elif t in on_frame:
+                image = image+_offgrid_noise(trajectory_id, on_frame[t], v.pixel_noise, R)
+            else:
+                image = image+_offgrid_noise(trajectory_id, i, v.pixel_noise, R, stream=STREAM_PREV_NOISE)
+        prev[i] = np.rint(np.clip(image, 0., 255.)).astype(np.uint8)
+    return hidden, prev, images
