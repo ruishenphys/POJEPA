@@ -219,7 +219,10 @@ def _job_env(job_dir):
     os.environ.update(PO_JEPA_TEMPORAL_PARTITION=variant.get("temporal_partition", "bisection"),
                       PO_JEPA_READOUT_INIT=variant.get("readout_init", "xavier"),
                       # C3：空间基底数 K 和补空间（默认 K=16、不建补空间时 job.json 没有这两个键）
-                      PO_JEPA_MODES=variant.get("modes", "16"), PO_JEPA_COMPLEMENT=variant.get("complement", "none"))
+                      PO_JEPA_MODES=variant.get("modes", "16"), PO_JEPA_COMPLEMENT=variant.get("complement", "none"),
+                      # G14：一致性权重缩放（默认 1 时 job.json 没有这两个键）
+                      PO_JEPA_TIME_WEIGHT_SCALE=variant.get("time_weight_scale", "1"),
+                      PO_JEPA_SPACE_WEIGHT_SCALE=variant.get("space_weight_scale", "1"))
     scene, _, count = job["dataset"].rpartition("-")
     os.environ["PO_JEPA_DATASET"] = f"{scene}:{count}"
     return job_dir, job

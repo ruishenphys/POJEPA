@@ -277,6 +277,9 @@ def _variant_suffix(job):
     modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
     if modes != "16" or complement != "none":
         suffix += f"~K{modes}"+("c" if complement == "shared" else "")
+    # G14：一致性权重缩放，和 runtime.checks.weight_scale_suffix 同一写法
+    suffix += "".join(f"~{tag}{variant[key]}" for key, tag in (("time_weight_scale", "lt"), ("space_weight_scale", "ls"))
+                      if variant.get(key, "1") != "1")
     return suffix
 
 
