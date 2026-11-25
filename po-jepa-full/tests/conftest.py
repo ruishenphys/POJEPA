@@ -18,3 +18,6 @@ def strict_portable_default(monkeypatch):
     # C3：K 消融和补空间的变体开关同样不从外面带进来
     monkeypatch.delenv('PO_JEPA_MODES',raising=False)
     monkeypatch.delenv('PO_JEPA_COMPLEMENT',raising=False)
+    # G14：一致性权重缩放同样不从外面带进来
+    monkeypatch.delenv('PO_JEPA_TIME_WEIGHT_SCALE',raising=False)
+    monkeypatch.delenv('PO_JEPA_SPACE_WEIGHT_SCALE',raising=False)

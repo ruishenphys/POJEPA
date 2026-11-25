@@ -38,6 +38,9 @@ def main(argv=None):
     # C3（2026-11-22 K 消融 + 方案 B）：同一写法，参数和已设的环境变量不同时报错
     parser.add_argument('--modes',choices=('16','32','64','full'),help='C3：空间基底数 K（默认 16 固定；full = 每个网格 K = token 数）；设 PO_JEPA_MODES')
     parser.add_argument('--complement',choices=('none','shared'),help='C3：补空间（默认 none；shared = 方案 B，前 K 个模态照常、补空间整体保留并参与演化）；设 PO_JEPA_COMPLEMENT')
+    # G14（2026-11-25，导师建议试更小的一致性系数）：λ_t / λ_s 在本变体标定值上再乘 0.5 或 0.25；同一写法，和已设的环境变量不同时报错
+    parser.add_argument('--time-weight-scale',choices=('1','0.5','0.25'),help='G14：λ_t 乘这个系数（默认 1）；设 PO_JEPA_TIME_WEIGHT_SCALE')
+    parser.add_argument('--space-weight-scale',choices=('1','0.5','0.25'),help='G14：λ_s 乘这个系数（默认 1）；设 PO_JEPA_SPACE_WEIGHT_SCALE')
     args=parser.parse_args(argv)
     # 子进程的工作目录是代码根目录，相对路径须先按调用者当前目录解析成绝对路径。
     if not Path(args.features_root).resolve().is_dir():parser.error(f'--features-root不存在：{Path(args.features_root).resolve()}')
@@ -66,6 +69,11 @@ def main(argv=None):
     if args.command=='spectral-gap' and (args.condition is not None or args.training_run is not None or args.seed!=1703):
         parser.error('spectral-gap 每个场景只跑一次：不接受 --condition、--training-run，种子只用 1703')
     if args.command=='spectral-gap' and args.device!='cpu':parser.error('spectral-gap 只在 CPU 上跑：--device cpu')
+    scaled=any(v not in (None,'1') for v in (args.time_weight_scale,args.space_weight_scale))
+    if scaled and args.command in ('calibrate','sweep','calibrate-addon','check-addon'):
+        parser.error(f'{args.command} 不收 --time-weight-scale/--space-weight-scale：缩放乘在同一变体的标定值上，不另标定')
+    if scaled and args.condition not in (None,'po_jepa_full','po_jepa_time_only','po_jepa_space_only'):
+        parser.error('--time-weight-scale/--space-weight-scale 只用于 po_jepa_full、po_jepa_time_only、po_jepa_space_only（其他条件的 λ 不来自基础标定或恒为 0）')
     root=Path(__file__).resolve().parent
     # 子进程固定使用本目录的 src，避免环境里以前 pip install -e 过的旧版本（如 code-v4）被导入。
     env=dict(os.environ)
@@ -76,7 +84,9 @@ def main(argv=None):
     env['PO_JEPA_UPDATES']=str(args.updates)
     for flag,name,value in (('--temporal-partition','PO_JEPA_TEMPORAL_PARTITION',args.temporal_partition),
                             ('--readout-init','PO_JEPA_READOUT_INIT',args.readout_init),
-                            ('--modes','PO_JEPA_MODES',args.modes),('--complement','PO_JEPA_COMPLEMENT',args.complement)):
+                            ('--modes','PO_JEPA_MODES',args.modes),('--complement','PO_JEPA_COMPLEMENT',args.complement),
+                            ('--time-weight-scale','PO_JEPA_TIME_WEIGHT_SCALE',args.time_weight_scale),
+                            ('--space-weight-scale','PO_JEPA_SPACE_WEIGHT_SCALE',args.space_weight_scale)):
         if value is None:continue
         if env.get(name,value)!=value:parser.error(f'{flag} {value} 和环境变量 {name}={env[name]} 不一致：去掉其中一个')
         env[name]=value

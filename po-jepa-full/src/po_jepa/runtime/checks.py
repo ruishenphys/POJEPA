@@ -88,6 +88,12 @@ COMPLEMENTS = ("none", "shared")
 COMPLEMENT_MODES = ("16", "32", "64")
 # K 取满：fixed_modes false、K = min(max_modes, N)；max_modes 取 1024，32×32 以内的网格都是 K = N（主实验 16×16/12×12/8×8 即 256/144/64）
 FULL_MAX_MODES = 1024
+# G14（2026-11-25，导师 Tomas 建议试更小的一致性系数）：在本变体标定出的 λ_t / λ_s 上再乘一个缩放系数。只有 1、0.5、0.25
+# 三档（都是 2 的幂，乘法在 float64 里精确）；默认 1 时变体 dict 里没有这两个键（以前的 job.json、预登记、标定逐键不变）。
+# 缩放不改标定文件名：λ 是同一变体的标定值乘系数，不另标定；calibrate 在缩放下拒跑（workflow.write_v7_calibration）。
+TIME_SCALE_ENV = "PO_JEPA_TIME_WEIGHT_SCALE"
+SPACE_SCALE_ENV = "PO_JEPA_SPACE_WEIGHT_SCALE"
+WEIGHT_SCALES = ("1", "0.5", "0.25")
 
 def v7_variant() -> dict:
     """S28b：当前 v7 变体 dict(temporal_partition, readout_init)，取自两个环境变量，不设取默认（二等分、Xavier）。
@@ -113,18 +119,32 @@ def v7_variant() -> dict:
         variant["modes"] = modes
     if complement != "none":
         variant["complement"] = complement
+    # G14：一致性权重缩放，只在不是 1 时进 dict
+    for env, key in ((TIME_SCALE_ENV, "time_weight_scale"), (SPACE_SCALE_ENV, "space_weight_scale")):
+        scale = os.environ.get(env, "1")
+        if scale not in WEIGHT_SCALES:
+            raise ValueError(f"{env} must be one of {WEIGHT_SCALES}")
+        if scale != "1":
+            variant[key] = scale
     if variant != V7_VARIANT_DEFAULT and not is_v7():
-        raise ValueError(f"{PARTITION_ENV}/{READOUT_INIT_ENV}/{MODES_ENV}/{COMPLEMENT_ENV} only apply to the v7 protocol (PO_JEPA_PROTOCOL=v7)")
+        raise ValueError(f"{PARTITION_ENV}/{READOUT_INIT_ENV}/{MODES_ENV}/{COMPLEMENT_ENV}/{TIME_SCALE_ENV}/{SPACE_SCALE_ENV} "
+                         "only apply to the v7 protocol (PO_JEPA_PROTOCOL=v7)")
     return variant
 
 def variant_suffix(variant: dict) -> str:
     """S28b：变体后缀：默认为空，多段切分加 ~dyadic，零初始化加 ~zeroinit（两者都有时按这个顺序）。
-    C3：再接空间部分，K 改了加 ~K32 / ~K64 / ~Kfull，补空间再加 c（~K16c、~K32c、~K64c）。"""
+    C3：再接空间部分，K 改了加 ~K32 / ~K64 / ~Kfull，补空间再加 c（~K16c、~K32c、~K64c）。
+    G14：一致性权重缩放不进这个后缀（它是标定文件名；缩放沿用同一变体的标定），汇总分组用 weight_scale_suffix。"""
     suffix = ("~dyadic" if variant["temporal_partition"] == "dyadic" else "")+("~zeroinit" if variant["readout_init"] == "zero" else "")
     modes, complement = variant.get("modes", "16"), variant.get("complement", "none")
     if modes != "16" or complement != "none":
         suffix += f"~K{modes}"+("c" if complement == "shared" else "")
     return suffix
+
+def weight_scale_suffix(variant: dict) -> str:
+    """G14：一致性权重缩放的标签后缀（汇总分组、结果目录名用），默认为空，否则 ~lt0.5、~ls0.25 这样，时间在前。"""
+    return "".join(f"~{tag}{variant[key]}" for key, tag in (("time_weight_scale", "lt"), ("space_weight_scale", "ls"))
+                   if variant.get(key, "1") != "1")
 
 def v7_variant_suffix() -> str:
     """标定文件名里的变体后缀（variant_suffix(v7_variant())）。"""
@@ -186,7 +206,11 @@ def load_protocol() -> dict:
             cal = yaml.safe_load(path.read_text(encoding="utf-8"))
             merged = _merge_v4(merged, dict(model=dict(graph=dict(sigma_z=cal["sigma_z"]))))
             if cal.get("time_weight") is not None:
-                merged = _merge_v4(merged, dict(loss=dict(time_weight=cal["time_weight"], space_weight=cal["space_weight"])))
+                # G14：缩放乘在本变体标定出的 λ 上（float(1/2^k) 精确）；默认 1 时逐位不变
+                scale_t = float(variant.get("time_weight_scale", "1"))
+                scale_s = float(variant.get("space_weight_scale", "1"))
+                merged = _merge_v4(merged, dict(loss=dict(time_weight=cal["time_weight"]*scale_t if scale_t != 1. else cal["time_weight"],
+                                                          space_weight=cal["space_weight"]*scale_s if scale_s != 1. else cal["space_weight"])))
             else:
                 merged = _merge_v4(merged, dict(v7_uncalibrated=True))
         else:

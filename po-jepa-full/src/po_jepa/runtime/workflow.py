@@ -252,7 +252,10 @@ def write_calibrated_weights(time_weight,space_weight,tag,rho=None):
 
 
 def write_v7_calibration(values,source):
-    """v7：把 σ_z / λ 写进本数据集的标定文件（整份重写，保留已有键）。"""
+    """v7：把 σ_z / λ 写进本数据集的标定文件（整份重写，保留已有键）。
+    G14：一致性权重缩放下拒绝写（缩放后的 λ 会被当成同一变体的标定值写回去）。"""
+    if any(k in checks.v7_variant() for k in ('time_weight_scale','space_weight_scale')):
+        raise ValueError('一致性权重缩放（PO_JEPA_TIME_WEIGHT_SCALE/PO_JEPA_SPACE_WEIGHT_SCALE）下不能标定：去掉缩放再跑 calibrate')
     path=checks.v7_calibration_path();path.parent.mkdir(parents=True,exist_ok=True)
     current=yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {}
     current={**dict(time_weight=None,space_weight=None,sigma_z=None),**current,**values}
