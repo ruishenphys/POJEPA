@@ -293,12 +293,12 @@ def test_make_v8_jobs_addon_stage():
     check = [l for l in commands if " check-addon " in l]
     runs = [l for l in commands if l.startswith("python run.py run ")]
     k = len(conditions.ADDON_CONDITIONS)
-    assert k == 6 and len(cal) == len(protocols.SCENES) == 7 and len(check) == 1 and len(runs) == 7*3*k
+    assert k == 6 and len(cal) == len(protocols.DEFAULT_SCENES) == 12 and len(check) == 1 and len(runs) == 12*3*k   # S25b4
     assert len(commands) == len(cal)+len(check)+len(runs)+1 and commands[-1].startswith("python tools/summarize_v7.py --results ../results-v8/full ")
     assert all("--base-calibration local" in l and "--trajectories 2000 --updates 10000" in l for l in cal+check)
     assert not any("--base-calibration" in l for l in runs)
     expected = {f"../results-v8/full/{scene}/seed{seed}/{c}"
-                for scene in protocols.SCENES for seed in (1703, 1704, 1705) for c in conditions.ADDON_CONDITIONS}
+                for scene in protocols.DEFAULT_SCENES for seed in (1703, 1704, 1705) for c in conditions.ADDON_CONDITIONS}
     outputs = {shlex.split(l)[shlex.split(l).index("--output")+1] for l in runs}
     assert outputs == expected
     assert {shlex.split(l)[shlex.split(l).index("--condition")+1] for l in runs} == set(conditions.ADDON_CONDITIONS)
@@ -307,7 +307,7 @@ def test_make_v8_jobs_addon_stage():
             if l.startswith("python tools/long_rollout.py")]
     assert {shlex.split(l)[shlex.split(l).index("--job")+1] for l in long} == expected
     pilot = [l for l in _jobs("--stage", "addon-pilot") if not l.startswith("#")]
-    assert len([l for l in pilot if l.startswith("python run.py run ")]) == 7*1*k
+    assert len([l for l in pilot if l.startswith("python run.py run ")]) == 12*1*k
     assert all("--trajectories 200 --updates 2000" in l and "../results-v8/pilot/" in l for l in pilot if l.startswith("python run.py"))
     second = _jobs("--stage", "addon", "--scenes", "pendulum")
     assert second[0].startswith("# 注意：二阶场景 pendulum") and len([l for l in second if " run.py run " in f" {l}"]) == 3*k

@@ -10,8 +10,13 @@
 例如场方程没有光点、push 不加过程噪声）在表里是空的，不评。
 
 S25a：五个二阶场景（SECOND_ORDER_SCENES）加进协议（P1、P2 各自的物理参数档位，其余通用协议照 variants.validate 适用），
-ALL_SCENES = SCENES + SECOND_ORDER_SCENES。SCENES（v8 任务表默认的 7 个场景）和它的测试格不变：二阶场景现在只能按
-单帧复制（dup）编码，看不到速度；两帧（pair）编码等 S22 探针结果在 S25b 接，接好以后再并进默认任务表。
+ALL_SCENES = SCENES + SECOND_ORDER_SCENES。SCENES（7 个一阶场景）和它的测试格不变。
+
+S25b 第二段之三（S25b4）：二阶场景按两帧编码并进默认任务表。PAIR_SCENES 是 `<场景>~tubelet=pair`，
+DEFAULT_SCENES = SCENES + PAIR_SCENES（12 个，make_v8_jobs 的默认）。二阶场景的测试格和单帧复制时一样（validate 对两种
+tubelet 接受同一组调节项，测试核），测试数据集是 merged(<场景>~tubelet=pair, 测试项)，名字里带 tubelet=pair，所以编码、
+特征目录、评测都是两帧的。不带 tubelet=pair 的二阶场景（ALL_SCENES 里的写法）仍能显式 --scenes 排，是“看不到速度”的单帧
+复制对照。
 """
 from dataclasses import dataclass
 
@@ -21,9 +26,14 @@ LEVELS = ("轻", "标准", "重")
 # v8 的 7 个基础场景（训练场景）：v7 的 5 个（landscape 取多势阱地形，与 v7 相同）+ S20 的两个新场景
 SCENES = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", "landscape~shape=multi_well",
           "gray_scott", "push")
-# S25a：二阶场景（S23b 登记，序号 7–11）。make_v8_jobs 要显式 --scenes 才排它们（见文件头）
+# S25a：二阶场景（S23b 登记，序号 7–11）。这种不带调节项的写法是单帧复制对照，make_v8_jobs 要显式 --scenes 才排（见文件头）
 SECOND_ORDER_SCENES = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
 ALL_SCENES = SCENES+SECOND_ORDER_SCENES
+# S25b4：二阶场景的两帧编码写法（S25b 的调节项 tubelet=pair）；任务表默认 = 7 个一阶场景 + 这 5 个
+PAIR_SCENES = tuple(f"{s}~tubelet=pair" for s in SECOND_ORDER_SCENES)
+DEFAULT_SCENES = SCENES+PAIR_SCENES
+# make_v8_jobs --scenes 接受的场景：默认的 12 个，加上二阶场景的单帧复制对照
+JOB_SCENES = DEFAULT_SCENES+SECOND_ORDER_SCENES
 # S25d：时间采样测试集（S24b 的四个调节项；不进 P1–P13 的协议表，按帧评测走 runtime/timing_eval.py、tools/timing_eval.py）
 TIMING_TESTS = ("fps=2", "fps=8", "fps=16", "jitter=0.4", "exposure=1", "switch_offset=0.5")
 # S25e：空间采样测试集（S24c 的四个调节项；同样不进协议表，评测走 runtime/space_eval.py、tools/space_eval.py）。
@@ -152,29 +162,34 @@ def tests(scene: str, levels=("标准",), ids=None) -> list[tuple[str, str, str]
 
 
 def table() -> str:
-    """DATASET.md 的协议表（Markdown，tools/protocol_table.py 写入）：一张协议总表，一张各场景物理参数的档位表。"""
+    """DATASET.md 的协议表（Markdown，tools/protocol_table.py 写入）：一张协议总表，一张各场景物理参数的档位表。
+    S25b4：适用与否按任务表默认的场景（DEFAULT_SCENES，二阶场景带 tubelet=pair）判断。"""
     def cell(protocol, system, level):
         return protocol.levels.get(system, {}).get(level)
 
     lines = ["| 协议 | 类别 | 变什么 | 轻 | 标准 | 重 | 不适用的场景 |", "|---|---|---|---|---|---|---|"]
     for p in PROTOCOLS:
-        same = {tuple(cell(p, system_of(s), level) for level in LEVELS) for s in ALL_SCENES}
+        same = {tuple(cell(p, system_of(s), level) for level in LEVELS) for s in DEFAULT_SCENES}
         if len(same) == 1:
             shown = [f"`{x}`" if x else "—" for x in next(iter(same))]
         else:
             shown = ["见下表"]*3
-        missing = [system_of(s) for s in ALL_SCENES if not any(applicable(p, s, level) for level in LEVELS)]
+        missing = [system_of(s) for s in DEFAULT_SCENES if not any(applicable(p, s, level) for level in LEVELS)]
         lines.append(f"| {p.id} {p.name} | {p.group} | {p.what} | " + " | ".join(shown) +
                      f" | {'、'.join(f'`{m}`' for m in missing) or '—'} |")
     lines += ["", "P1、P2 各场景的档位（P13 用 P1 的同一档）：", "",
               "| 场景 | P1 轻 | P1 标准 | P1 重 | P2 轻 | P2 标准 | P2 重 |", "|---|---|---|---|---|---|---|"]
-    for s in ALL_SCENES:
+    for s in DEFAULT_SCENES:
         row = [f"`{cell(BY_ID[i], system_of(s), level)}`" for i in ("P1", "P2") for level in LEVELS]
         lines.append(f"| `{system_of(s)}` | " + " | ".join(row) + " |")
     def counts(scenes):
         c = {level: sum(len(tests(s, (level,))) for s in scenes) for level in LEVELS}
         return f"标准档 {c['标准']} 个，轻档 {c['轻']} 个，重档 {c['重']} 个"
-    lines += ["", f"适用的测试格：一阶 {len(SCENES)} 个场景（v8 任务表默认）合计{counts(SCENES)}；"
-              f"二阶 {len(SECOND_ORDER_SCENES)} 个场景合计{counts(SECOND_ORDER_SCENES)}（S25a；现在是单帧复制编码，"
-              "要显式 `make_v8_jobs.py --scenes` 才排）。P0 分布内就是基础场景的测试段，不另编码。"]
+    example = PAIR_SCENES[0]
+    lines += ["", f"适用的测试格：一阶 {len(SCENES)} 个场景合计{counts(SCENES)}；"
+              f"二阶 {len(PAIR_SCENES)} 个场景合计{counts(PAIR_SCENES)}。两者都在任务表默认里（S25b4）。"
+              "二阶场景在任务表里写成 `<场景>~tubelet=pair`（两帧编码，S25b），测试数据集是基础调节项叠上测试项，"
+              f"所以也是两帧的，例如 P1 标准档 `{system_of(example)}~{merged(example, BY_ID['P1'].levels[system_of(example)]['标准'])}`。"
+              f"不带 `tubelet=pair` 的单帧复制对照（{counts(SECOND_ORDER_SCENES)}，测试格相同）要显式 `make_v8_jobs.py --scenes` 才排。"
+              "P0 分布内就是基础场景的测试段，不另编码。"]
     return "\n".join(lines)

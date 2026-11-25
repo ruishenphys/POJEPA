@@ -30,6 +30,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the number of spatial basis vectors and never drop information (K = 16, 32, 64 plus the kept complement; all tokens) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~25 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
 | G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
 | G12 | C-1 2×2 readout (§8f): physical readout and counterfactual action response of the 12 C-1 checkpoints (bisection/dyadic × Xavier/zero `P_out`), evaluation only, probes and truth fitted on the 200-trajectory datasets | **Ready** (`full-model` c379bc4 or later; #14 and #15 are merged) | ~1 GPU-hour *(est.)*, 48 commands (12 of them optional) | C-1 job folders under `results-small-validation/c1/` with their selected checkpoints; the v6 `double_well-200` features (`$V6`, as for C-1) |
+| G13 | Second-order scenes in the formal-training job file (§8g): `tools/make_v8_jobs.py` now lists all 12 scenes by default, the 5 second-order scenes encoded from two frames (`<scene>~tubelet=pair`) | **Nothing to run now**: it runs with the formal training of the simulation dataset (advisor's cluster) | part of the formal training; the 5 scenes add about 70% to every stage, see §8g | formal training; `full-model` with S25b4 merged |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -214,7 +215,7 @@ Non-training lines (63 of 84; counted from the tool's output): 3 × `calibrate` 
 |---|---|
 | Simulation add-on extra evaluations and D3 (official-scale AC planning, 256 samples, ~7.5 h *(est.)*) | The add-on code reads `results-v7/full/<scene>` from v7 0ac45fe, but v7.1 writes `results-v7/full/v7.1/`; a code segment has to adapt it first |
 | Evaluation-only stages of the simulation dataset (`variants`, `strength`, `long`, `timing` = frame-rate and timing changes, `space`, `readout` in `tools/make_v8_jobs.py`) | They read the formal-training checkpoints; planned for the advisor's cluster after the formal training |
-| S25b: re-encoding the 5 second-order scenes from two frames | Waits for the G2 result and a code segment |
+| S25b: encoding the 5 second-order scenes from two frames | **Code done** (S25b, S25b2, S25b3, S25b4); it is part of the formal-training job file now, see §8g (G13) |
 | DROID encoding, `check/env`, calibration, evaluation, and the S16 five-episode smoke test | Waits for decisions (DROID in the submission, cluster information) and segments S15/S16 (`configs/droid/pilot.yaml` now sets `resources.train.time_limit_minutes: 20`, C9) |
 
 ## 8b. G8: AC checks (C7, `tools/ac_context_check.py`)
@@ -395,6 +396,34 @@ python $TOOL pack results-small-validation/c1-readout logs-addon/jobs-sv-c1-read
 ```
 
 Do not include `features-small-validation/` in the pack (only the readouts are needed).
+
+## 8g. G13: second-order scenes in the formal-training job file (two-frame encoding, S25b4)
+
+Nothing to run now. This section records what changed in the formal-training job file of the simulation dataset, so that whoever generates it later gets the two-frame scenes.
+
+- `tools/make_v8_jobs.py` without `--scenes` now lists **12 scenes**: the 7 first-order ones as before, plus `pendulum~tubelet=pair`, `bouncing_balls~tubelet=pair`, `wave~tubelet=pair`, `cart_pole~tubelet=pair`, `spring_chain~tubelet=pair` (`po_jepa.protocols.DEFAULT_SCENES`).
+- `tubelet=pair` means every feature is the frozen V-JEPA 2 encoding of (the frame 1 tick = 0.25 s earlier, this frame), so velocity is visible (G2: θ̇ readout R² 0.962 with two frames, 0.003 with one duplicated frame). The encoder cost per feature is the same as before; each trajectory renders one extra frame (t = −1).
+- The knob travels with the scene name, so every stage is two-frame: `--variant tubelet=pair` on encoding, training, calibration and probes; feature and result folders are named `<scene>~tubelet=pair` (test sets `<scene>~<test knob>,tubelet=pair`); `run.py transfer`, `timing_eval.py` and `space_eval.py` add their `--test-variant` to the training knobs (so `--test-variant` never contains `tubelet`); the V4 planning lines plan on the base scene and read the dataset from `--job`.
+- The old one-frame (duplicated) encoding of the second-order scenes is still available as a control, only when asked for explicitly (`--scenes pendulum,...`); the job file then starts with a warning line.
+- The first-order scenes and their lines are unchanged.
+
+Commands per stage (counted with `grep -c '^python'` on the tool's output; 2,000 trajectories, 3 seeds; `pilot` is 200 trajectories, 1 seed; `addon` lists all 6 add-on conditions):
+
+| Stage | 7 first-order scenes | 5 two-frame second-order scenes | Default (12 scenes) |
+|---|---|---|---|
+| pilot | 86 | 62 | 146 |
+| full | 177 | 127 | 302 |
+| variants | 945 | 614 | 1558 |
+| strength | 1673 | 1112 | 2784 |
+| long | 162 | 116 | 277 |
+| timing | 967 | 691 | 1657 |
+| space | 967 | 691 | 1657 |
+| readout | 272 | 202 | 474 |
+| addon | 135 | 97 | 230 |
+
+(The default column is slightly less than the sum: the check and summary lines are shared.) The `full` stage has 12 × 3 × 6 = 216 training runs, matching the formal-training plan.
+
+Not decided yet (Jerry): whether the planning success criterion of the second-order scenes should also count velocity (now position only), and whether the readout should add acceleration. Until then the job file uses the current position-only criteria.
 
 ## 9. What to send back
 

@@ -672,7 +672,7 @@ def test_make_v8_jobs_space_stage():
     encode = [c for c in commands if "encode_v7.py encode" in c]
     final = [c for c in commands if "encode_v7.py finalize" in c]
     evals = [c for c in commands if "tools/space_eval.py" in c]
-    assert len(encode) == 7*6*4 and len(final) == 7*6 and len(evals) == 7*6*3*6 and commands[-1].startswith("python tools/summarize_v7.py")
+    assert len(encode) == 12*6*4 and len(final) == 12*6 and len(evals) == 12*6*3*6 and commands[-1].startswith("python tools/summarize_v7.py")
     assert all("--splits test" in c and "--trajectories 2000" in c for c in encode+final)
     assert "--variant drift=0.5,pan=1,shape=multi_well,zoom=0.75" in next(c for c in encode if "landscape" in c and "drift" in c)
     c = next(c for c in evals if "landscape" in c and "resolution=384" in c and "seed1704/vjepa2_ac " in c)
