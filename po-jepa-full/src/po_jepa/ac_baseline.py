@@ -24,6 +24,14 @@ DROID（S08b，docs/design/09-droid-training.md §6.2）另有 7 维动作和“
   前向时起点状态由调用者给（[B, 7] 物理单位），第 k+1 帧的状态 = compute_new_pose(第 k 帧, 第 k 个物理动作)，
   CPU float64 上算、转模型精度送入；"learned_constant" 是 v7 的可学习常向量；
 - 7 维时时长放宽到任意正数：非整数 t 取相邻两步的线性插值 (1 − r)·ẑ_⌊t⌋ + r·ẑ_⌊t⌋+1（半整数就是 v7 的平均）。
+
+DINO-WM、JEPA-WM 参数匹配版（Jerry 2026-11-25 定两个都加；报告 baseline-eval-jepa-wm/2026-11-25_jepa-wm-dino-wm-assessment.md）
+是同一个包装的另外两种条件方式（ACSpec.conditioning），核心在 wm_baselines.py，上游代码 third_party/jepa_wms.py（CC BY-NC 4.0）：
+- dino_wm_small：conditioning = "feature"（动作嵌入拼到每个 patch 通道 + sincos），jepa-wms pred_type=dino_wm；
+- jepa_wm_small：conditioning = "adaln"（动作经 AdaLN 调制每层 + RoPE），jepa-wms pred_type=AdaLN，no-prop；
+- 两者都没有状态 token；输入输出的 LayerNorm、动作 token（tick_actions）、半整数时长取平均、8×8/12×12 的位置缩放和 AC 相同；
+- 上下文窗口 context_frames = 3（两者上游 num_hist = 3）：滚动时每一步只把最近 3 帧（和它们的动作）送进预测器，
+  AC 的 context_frames = 0 表示看全部历史帧（原样不变）。
 """
 from dataclasses import asdict, dataclass
 from functools import partial
@@ -37,9 +45,14 @@ from .actions import ActionSegments, validate_action_segments
 from .geometry import GridSpec
 from .third_party import vjepa2_ac
 
-AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small")
+AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", "dino_wm_small", "jepa_wm_small")
+WM_CONDITIONS = ("dino_wm_small", "jepa_wm_small")   # 2026-11-25：DINO-WM、JEPA-WM 参数匹配版（只走仿真路径，DROID 另开一段）
 STATE_INPUTS = ("learned_constant", "true_state")
+CONDITIONINGS = ("token", "feature", "adaln")    # V-JEPA 2-AC / DINO-WM / JEPA-WM
 SCALE_FIELDS = ("encoder_dim", "width", "depth", "heads", "mlp_ratio")
+# ACSpec 后加的字段：取默认值时不进 spec_snapshot，AC 两个条件的规格快照与加字段之前逐字节相同
+NEW_FIELD_DEFAULTS = dict(conditioning="token", action_embed_dim=0, head_dim=0, mlp_hidden=0, context_frames=0)
+JEPA_WMS_SOURCE = "facebookresearch/jepa-wms@13cf1d9 (CC BY-NC 4.0)"
 OFFICIAL_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt"
 
 
@@ -52,6 +65,11 @@ class ACSpec:
     mlp_ratio: float = 4.0
     action_dim: int = 2
     state_input: str = "learned_constant"    # S08b：取默认值时不进 spec_snapshot，v7 快照逐字节不变
+    conditioning: str = "token"              # 2026-11-25：token（AC）/ feature（DINO-WM）/ adaln（JEPA-WM）
+    action_embed_dim: int = 0                # feature：拼到每个 patch 上的动作嵌入维（上游 DINO-WM 10）
+    head_dim: int = 0                        # feature：每头维数（上游 DINO-WM dim_head）
+    mlp_hidden: int = 0                      # feature：前馈隐层宽（上游 DINO-WM mlp_dim，绝对值）
+    context_frames: int = 0                  # 滚动时送进预测器的最近帧数；0 = 全部历史（AC）
 
     def __post_init__(self):
         if self.width % self.heads or (self.width//self.heads)//3//2 < 1:
@@ -62,6 +80,16 @@ class ACSpec:
             raise ValueError(f"state_input must be one of {STATE_INPUTS}")
         if self.state_input == "true_state" and self.action_dim != 7:
             raise ValueError("state_input true_state needs the 7-dimensional DROID actions")
+        if self.conditioning not in CONDITIONINGS:
+            raise ValueError(f"conditioning must be one of {CONDITIONINGS}")
+        if any(type(getattr(self, k)) is not int or getattr(self, k) < 0
+               for k in ("action_embed_dim", "head_dim", "mlp_hidden", "context_frames")):
+            raise ValueError("action_embed_dim, head_dim, mlp_hidden and context_frames are non-negative integers")
+        feature = self.conditioning == "feature"
+        if feature != (self.action_embed_dim > 0) or feature != (self.head_dim > 0) or feature != (self.mlp_hidden > 0):
+            raise ValueError("action_embed_dim, head_dim and mlp_hidden are set exactly for feature conditioning")
+        if self.conditioning != "token" and (self.state_input != "learned_constant" or self.context_frames < 1):
+            raise ValueError("DINO-WM / JEPA-WM take no state token and need a finite context window")
 
 
 def spec_snapshot(spec: ACSpec) -> dict:
@@ -69,19 +97,29 @@ def spec_snapshot(spec: ACSpec) -> dict:
     out = asdict(spec)
     if out["state_input"] == "learned_constant":
         del out["state_input"]
+    for key, default in NEW_FIELD_DEFAULTS.items():   # 2026-11-25：同理，AC 的快照不变
+        if out[key] == default:
+            del out[key]
     return out
 
 
 def is_official_scale(spec: ACSpec) -> bool:
-    """官方规模 = 结构字段（SCALE_FIELDS）等于 OFFICIAL 的；动作维和状态输入不算结构（v7 时两者相同，结果与 spec == OFFICIAL 一致）。"""
-    return all(getattr(spec, k) == getattr(OFFICIAL, k) for k in SCALE_FIELDS)
+    """官方规模 = token 条件方式且结构字段（SCALE_FIELDS）等于 OFFICIAL 的；动作维和状态输入不算结构（v7 时两者相同，结果与 spec == OFFICIAL 一致）。"""
+    return spec.conditioning == "token" and all(getattr(spec, k) == getattr(OFFICIAL, k) for k in SCALE_FIELDS)
 
 OFFICIAL = ACSpec()
 SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=3.5)   # 2026-11-08：MLP 224，对齐 token 写法 PO 参数 227617（原 2.0 对齐模态写法）
+# 2026-11-25：宽 64、1 层、4 头和 AC-small、TF 相同（1408→64 的瓶颈一致），只调前馈宽对齐 PO 的 227617（≤1%，测试核对）。
+# DINO-WM：token 维 64 + 10（上游 action_emb_dim 10），每头 16 维，前馈 176 → 227486；
+# JEPA-WM：AdaLN 调制层 Linear(64, 384) 占 24960，前馈只剩 32（mlp_ratio 0.5）→ 228064。
+DINO_WM_SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=4.0, conditioning="feature", action_embed_dim=10, head_dim=16,
+                       mlp_hidden=176, context_frames=3)
+JEPA_WM_SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=0.5, conditioning="adaln", context_frames=3)
 
 
 def spec_for(condition: str) -> ACSpec:
-    return {"vjepa2_ac": OFFICIAL, "vjepa2_ac_small": SMALL}[condition]
+    return {"vjepa2_ac": OFFICIAL, "vjepa2_ac_small": SMALL, "dino_wm_small": DINO_WM_SMALL,
+            "jepa_wm_small": JEPA_WM_SMALL}[condition]
 
 
 class ACPredictor(nn.Module):
@@ -92,6 +130,16 @@ class ACPredictor(nn.Module):
         spec.__post_init__()
         self.spec = spec
         self.encoder_dim = spec.encoder_dim
+        if spec.conditioning != "token":   # DINO-WM / JEPA-WM：核心在 wm_baselines.py，没有状态 token
+            from . import wm_baselines
+            if spec.conditioning == "feature":
+                self.core = wm_baselines.DinoWMCore(encoder_dim=spec.encoder_dim, width=spec.width, depth=spec.depth,
+                    heads=spec.heads, head_dim=spec.head_dim, mlp_hidden=spec.mlp_hidden, action_dim=spec.action_dim,
+                    action_embed_dim=spec.action_embed_dim)
+            else:
+                self.core = wm_baselines.AdaLNCore(encoder_dim=spec.encoder_dim, width=spec.width, depth=spec.depth,
+                    heads=spec.heads, mlp_ratio=spec.mlp_ratio, action_dim=spec.action_dim)
+            return
         # 与官方 vit_ac_predictor 相同的构造参数（qkv_bias、LayerNorm eps=1e-6）；mlp_ratio 由 spec 给出（官方 4）
         core = vjepa2_ac.VisionTransformerPredictorAC(
             img_size=256, patch_size=16, num_frames=2, tubelet_size=2, embed_dim=spec.encoder_dim,
@@ -159,6 +207,12 @@ class ACPredictor(nn.Module):
         true_state 时 states [B,T,7]（模型精度，物理单位）给每帧的状态 token；learned_constant 时 states 必须为 None。"""
         core = self.core
         b, t, n, e = context.shape
+        if self.spec.conditioning != "token":
+            if states is not None:
+                raise ValueError("DINO-WM / JEPA-WM take no states")
+            if actions.shape[:2] != (b, t):
+                raise ValueError("one action per context frame")
+            return F.layer_norm(core.predict(context, actions, height, width), (e,))
         x = core.predictor_embed(context)
         a = core.action_encoder(actions)[:, :, None]
         if self.true_state:
@@ -178,11 +232,14 @@ class ACPredictor(nn.Module):
         return F.layer_norm(x, (e,))
 
     def rollout(self, z0: Tensor, actions: Tensor, height: int, width: int, states: Tensor | None = None) -> Tensor:
-        """z0 [B,N,E]（已 LN），actions [B,K,m] → K 步自回归预测 [B,K,N,E]。true_state 时 states [B,K,7] 是第 0…K−1 帧的状态。"""
+        """z0 [B,N,E]（已 LN），actions [B,K,m] → K 步自回归预测 [B,K,N,E]。true_state 时 states [B,K,7] 是第 0…K−1 帧的状态。
+        context_frames = W > 0（DINO-WM、JEPA-WM）时第 k 步只看最近 W 帧 frames[k+1−W … k] 和它们的动作；0 时看全部（AC）。"""
         frames = [z0]
+        window = self.spec.context_frames
         for k in range(actions.shape[1]):
-            out = self.predict_frames(torch.stack(frames, 1), actions[:, :k+1], height, width,
-                                      None if states is None else states[:, :k+1])
+            lo = max(0, k+1-window) if window else 0
+            out = self.predict_frames(torch.stack(frames[lo:], 1), actions[:, lo:k+1], height, width,
+                                      None if states is None else states[:, lo:k+1])
             frames.append(out[:, -1])
         return torch.stack(frames[1:], 1)
 
@@ -301,5 +358,8 @@ def parameter_count(model: nn.Module) -> int:
 
 def describe(condition: str) -> dict:
     spec = spec_for(condition)
-    return dict(condition=condition, spec=spec_snapshot(spec), init="official_checkpoint" if condition == "vjepa2_ac" else "scratch",
-                checkpoint_url=OFFICIAL_CHECKPOINT_URL if condition == "vjepa2_ac" else None)
+    out = dict(condition=condition, spec=spec_snapshot(spec), init="official_checkpoint" if condition == "vjepa2_ac" else "scratch",
+               checkpoint_url=OFFICIAL_CHECKPOINT_URL if condition == "vjepa2_ac" else None)
+    if condition in WM_CONDITIONS:   # AC 两个条件的描述逐键不变
+        out.update(source=JEPA_WMS_SOURCE, upstream_pred_type="dino_wm" if spec.conditioning == "feature" else "AdaLN")
+    return out

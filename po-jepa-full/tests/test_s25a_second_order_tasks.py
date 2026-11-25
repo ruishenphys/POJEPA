@@ -344,10 +344,10 @@ def test_v8_jobs_default_is_unchanged_and_second_order_is_opt_in():
     lines = _jobs("--stage", "full", "--scenes", ",".join(SECOND))
     assert lines[0].startswith("# 注意：二阶场景") and "dup" in lines[0]
     cmds = [l for l in lines if l and not l.startswith("#")]
-    assert sum("probe_actions.py" in l for l in cmds) == 5 and sum("run.py run" in l for l in cmds) == 5*3*6
+    assert sum("probe_actions.py" in l for l in cmds) == 5 and sum("run.py run" in l for l in cmds) == 5*3*8
     var = [l for l in _jobs("--stage", "variants", "--scenes", ",".join(SECOND)) if l and not l.startswith("#")]
     plan = [l for l in var if "plan_v7.py" in l]
-    assert len(plan) == 5*6 and sum("run.py transfer" in l for l in var) == 6*sum(len(protocols.tests(s)) for s in SECOND)
+    assert len(plan) == 5*8 and sum("run.py transfer" in l for l in var) == 8*sum(len(protocols.tests(s)) for s in SECOND)
     mk = _tool("make_v8_jobs"); plan_v7 = _tool("plan_v7")
     for l in plan:
         if "--no-baselines" in l:

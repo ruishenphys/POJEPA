@@ -18,6 +18,8 @@
 | fixed_fourier | 补跑 | POJEPA + FourierSpectrum | 补跑标定 | 补跑标定 | full | 5 | 10 | 227,617 |
 | koopman | 补跑 | KoopmanPredictor，K = 103 | 0 | 0 | no_consistency | 1 | 2 | 227,840 |
 | po_jepa_rollout_sup | 补跑（§6，2026-11-12） | 与 full 完全相同 | 时间项换成 L_roll，权重 λ_r 补跑标定 | v7 full 的 λ_s | rollout_sup | 5 | 10 | 227,617 |
+| dino_wm_small | 主表（§7，2026-11-25） | DINO-WM 参数匹配版（特征拼接 + sincos，jepa-wms pred_type=dino_wm） | jepa-wms 损失 | — | — | — | — | 227,486 |
+| jepa_wm_small | 主表（§7，2026-11-25） | JEPA-WM 参数匹配版（AdaLN + RoPE，no-prop，jepa-wms pred_type=AdaLN） | jepa-wms 损失 | — | — | — | — | 228,064 |
 
 S28b：上表的 Φ / p_out 次数是二等分（默认）时的值；多段切分变体下时间一致性改成 1 + Σ_{这批抽到的不同 k} 2^k 次 Φ（`losses.temporal_phi_calls`），PO 类每次更新 (那个数 + 2) 次 Φ，transformer_consistency 1 + 那个数 + 2 次前向；po_jepa_rollout_sup 固定二等分。说明见 `docs/segments/S28b.md`。
 
@@ -260,3 +262,24 @@ Jerry 2026-11-17 在决策卡上定：选了时间一致性多段切分（M1，`
 - **标签**：多段切分的 rollout_sup 检查点在 loss_config 快照里带 `temporal_partition: dyadic`，和二等分的 rollout_sup 检查点互相读会报 mismatch。
 
 代码：`rollout_supervision.rollout_predictions`（按切分选 `temporal_predictions` / `partition_predictions`）、`rollout_supervision_loss`（收两种预测）；单步 `addon.conditions.rollout_sup_step`，梯度范数 `addon.calibration.rollout_gradient_norms(step=…)`。测试 `tests/test_s28d_dyadic_rollout_sup.py`，段说明 `docs/segments/S28d.md`。
+
+## 7. dino_wm_small、jepa_wm_small（DINO-WM、JEPA-WM 参数匹配基线，2026-11-25）
+
+Jerry 2026-11-25 定两个都加（“先都加，做不完再删”），依据 `baseline-eval-jepa-wm/2026-11-25_jepa-wm-dino-wm-assessment.md`（项目文件夹）。
+代码：`src/po_jepa/wm_baselines.py`（接到冻结 V-JEPA 2 特征上的两个核心）、`src/po_jepa/third_party/jepa_wms.py`（facebookresearch/jepa-wms @ 13cf1d9 拷贝，
+**CC BY-NC 4.0**，改动列在文件头，出处见 `THIRD_PARTY_NOTICES.md`）、`src/po_jepa/ac_baseline.py`（`ACSpec.conditioning`、上下文窗口）、
+`src/po_jepa/runtime/ac_training.py`（两套损失）。测试 `tests/test_wm_baselines.py`。
+
+- 都是 AC 包装 `ACPredictor` 的另外两种条件方式（`AC_CONDITIONS` 里，`is_ac` 为真），所以输入输出 LayerNorm、每个控制 tick 一步的动作 token
+  （`tick_actions`）、半整数时长取相邻两步平均、8×8/12×12 的位置按 16/H 缩放、检查点格式、评测路径都和 vjepa2_ac_small 相同。
+- 宽 64、1 层、4 头（和 AC-small、TF 同一个 1408→64 瓶颈），只调前馈宽对齐 PO-JEPA 的 227,617（1% 规则，测试核对；预登记 `wm_parameter_match`）。
+- 上下文窗口 3 帧（两者上游 num_hist = 3）：滚动时每一步只看最近 3 帧和它们的动作；AC 照旧看全部历史。
+- 片段 4 帧（同一批 (轨迹, 起点) 的前 4 帧），MSE；dino_wm_small 只有 teacher forcing（L_tf/2）；jepa_wm_small 加 1 步顺序滚动
+  （前缀 t ∈ {0,1} 按 (种子, 步数) 确定地取，上下文停梯度，L_tf/2 + L_roll/2）。AdamW 峰值 5e-4、权重衰减 1e-7，曲线和其余条件同形。
+- 和上游的差别（都为接 1408 维 V-JEPA 2 特征、参数匹配和多网格评测）：加 predictor_embed / predictor_proj；DINO-WM 的可学习位置表换成不训练的
+  3 轴 sincos，dropout 0.1 → 0；JEPA-WM 没有本体感受（仿真没有本体状态）；上游 AdaLN 块按 16×16 重复调制量，这里按实际 H×W；常数学习率改成同形曲线。
+- 任务表：`tools/make_v8_jobs.py` 的 `CONDITIONS` 默认带上两者（pilot、full 的 D 段和各评测阶段）。导师要求按方法分开跑：每个条件本来就是
+  一条独立命令（`python run.py run … --condition dino_wm_small`）；pilot、full 也可以只排几个条件，例如
+  `python tools/make_v8_jobs.py --stage full --conditions dino_wm_small,jepa_wm_small`。汇总 `summarize_v7.py` 只在结果里出现过它们时才按组核缺失。
+- DROID 路径还没接（`droid/conditions.py` 有自己的条件表），另开一段。
+

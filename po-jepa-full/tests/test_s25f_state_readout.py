@@ -609,7 +609,7 @@ def test_make_v8_jobs_readout_stage():
     fit = [c for c in commands if " fit " in c]; truth = [c for c in commands if " truth " in c]
     roll = [c for c in commands if "state_readout.py rollout" in c]; cf = [c for c in commands if "state_readout.py counterfactual" in c]
     modal = [c for c in commands if "modal_spectrum.py" in c]
-    assert len(fit) == len(truth) == scenes and len(roll) == len(cf) == scenes*3*6
+    assert len(fit) == len(truth) == scenes and len(roll) == len(cf) == scenes*3*8
     assert len(modal) == 3*3*2          # 默认场景里线性的：advection_diffusion、两帧的 spring_chain、wave；PO-JEPA 条件两个
     assert "--features ../features-v8/double_well-2000 --output ../results-v8/full/readout/probe/double_well" in fit[0]
     assert "--long-features ../features-v8/double_well~horizon=128-2000 --horizon 128" in truth[0]
