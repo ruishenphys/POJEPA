@@ -359,6 +359,15 @@ def finalize(out, spec, cache, splits=("train", "validation", "test"), variants=
             variants.check_tubelet_record(m, spec.knobs)
         except ValueError as error:
             raise ValueError(f"trajectory {tid}: tubelet 记录与数据集 {spec.tag} 不一致：{error}") from None
+        if spec.knobs.changes_timing():
+            # S25b3-fix1（Codex 审核 F1）：时间采样的缓存逐帧核实际时刻（= timing.frame_times）和帧数（= 特征的第一维），
+            # 这样 tubelet 记录里“前一帧 = 这一帧 − 1 tick”的相对检查落在真实时间轴上
+            from po_jepa import timing
+            expected = [float(t) for t in timing.frame_times(tid)]
+            if (type(m.get("frames")) is not list or type(m.get("shape")) is not list or not m["shape"]
+                    or m["shape"][0] != len(expected) or len(m["frames"]) != len(expected)
+                    or [f.get("time_ticks") if isinstance(f, dict) else None for f in m["frames"]] != expected):
+                raise ValueError(f"trajectory {tid}: 帧数或帧时刻与数据集 {spec.tag} 的 timing.frame_times 不一致")
         records.append(dict(trajectory_id=tid, split=m["split"], manifest_sha256=complete["manifest_sha256"],
                             evidence_role=m["generation"]["evidence_role"],
                             max_abs=m["feature_stats"]["max_abs"],
