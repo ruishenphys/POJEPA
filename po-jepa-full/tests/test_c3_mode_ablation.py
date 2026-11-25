@@ -748,3 +748,95 @@ def test_a_perp_gradient_is_isolated_from_the_modal_path():
     blocks = q.dynamics.coefficients.a_blocks
     g_cut, w_cut = grads(torch.cat((blocks[:, :K], blocks[:, K:].detach()), dim=1))
     assert float(torch.as_tensor(g_cut).abs().sum()) == 0. and float(torch.as_tensor(w_cut).abs().sum()) == 0.
+
+
+# ---------- 任务表（make_small_validation_jobs.py --stage c3-xavier，Jerry 2026-11-25：多段切分 + Xavier）----------
+
+C3X_COUNTS = dict(C=6, C2=2, D=6, R3=12, R4=2, G9=6, E=2)
+C3X_ROOTS = {"Kfull": "../../results-small-validation/c3/dyadic-xavier-Kfull",
+             "K16c": "../../results-small-validation/c3/dyadic-xavier-K16c"}
+C3X_FLAGS = {"Kfull": ("dyadic", "xavier", "full", "none"), "K16c": ("dyadic", "xavier", "16", "shared")}
+
+
+def c3x_variant_of(argv):
+    """任务行的输出路径落在哪个变体的结果根下（每行必须恰好一个）。"""
+    out = argv[argv.index("--output")+1]
+    hits = [v for v, root in C3X_ROOTS.items() if out.startswith(root+"/")]
+    assert len(hits) == 1, out
+    return hits[0]
+
+
+def test_c3x_sections_and_counts(tmp_path):
+    path = tmp_path/"jobs-c3-xavier.txt"
+    path.write_text("\n".join(jobs.job_lines("c3-xavier"))+"\n", encoding="utf-8")
+    assert {s["name"]: len(s["commands"]) for s in run_jobs.parse_sections(path)} == C3X_COUNTS
+
+
+def test_c3x_training_lines_are_dyadic_xavier_full_only():
+    runs = [shlex.split(l) for l in jobs.job_lines("c3-xavier") if l.startswith("python run.py run ")]
+    seen = set()
+    for a in runs:
+        v = c3x_variant_of(a)
+        flags = tuple(a[a.index(k)+1] for k in ("--temporal-partition", "--readout-init", "--modes", "--complement"))
+        assert flags == C3X_FLAGS[v]
+        assert a[a.index("--condition")+1] == "po_jepa_full" and a[a.index("--seed")+1] == "1703"
+        assert a[a.index("--trajectories")+1] == "2000" and a[a.index("--updates")+1] == "10000"
+        scene = a[a.index("--system")+1]
+        assert a[a.index("--output")+1] == f"{C3X_ROOTS[v]}/{scene}/seed1703/po_jepa_full"
+        seen.add((v, scene))
+    assert seen == {(v, s) for v in C3X_ROOTS for s in SCENES} and len(runs) == 6
+    # 结果根和第一批、C-2 都不重叠（第一批是 dyadic-zero-<变体>）
+    every_output = [shlex.split(l) for l in jobs.job_lines("c3-xavier") if l.startswith("python ")]
+    assert all(c3x_variant_of(a) for a in every_output)
+    first = {shlex.split(l)[shlex.split(l).index("--output")+1] for l in jobs.job_lines("c3", batch=1) if l.startswith("python ")}
+    assert not first & {a[a.index("--output")+1] for a in every_output}
+
+
+def test_c3x_run_py_lines_set_the_variant_and_its_own_calibration(tmp_path, monkeypatch):
+    entry = load_module(Path(__file__).resolve().parents[1]/"run.py", "c3x_run_py")
+    seen = []
+    monkeypatch.setattr(entry.subprocess, "run", lambda command, **kw: seen.append(kw["env"]) or Namespace(returncode=0))
+    keys = ("PO_JEPA_TEMPORAL_PARTITION", "PO_JEPA_READOUT_INIT", "PO_JEPA_MODES", "PO_JEPA_COMPLEMENT")
+    for name in keys:
+        monkeypatch.delenv(name, raising=False)
+    work = tmp_path/"work"/"full-model"/"po-jepa-full"
+    work.mkdir(parents=True)
+    monkeypatch.chdir(work)
+    counted = 0
+    for line in jobs.job_lines("c3-xavier"):
+        if not line.startswith("python run.py"):
+            continue
+        argv = shlex.split(line)
+        Path(argv[argv.index("--features-root")+1]).mkdir(parents=True, exist_ok=True)
+        assert entry.main(argv[2:]) == 0, line
+        assert tuple(seen[-1][k] for k in keys) == C3X_FLAGS[c3x_variant_of(argv)]
+        counted += 1
+    assert counted == 6+2+6
+    # 标定文件后缀和第一批的 ~dyadic~zeroinit~* 分开（不会读到零初始化标的 λ）
+    assert checks.variant_suffix(dict(temporal_partition="dyadic", readout_init="xavier", modes="full")) == "~dyadic~Kfull"
+    assert checks.variant_suffix(dict(temporal_partition="dyadic", readout_init="xavier", complement="shared")) == "~dyadic~K16c"
+    assert checks.variant_suffix(dict(temporal_partition="dyadic", readout_init="zero", modes="full")) == "~dyadic~zeroinit~Kfull"
+
+
+def test_c3x_tool_lines_parse_and_need_no_cross_version():
+    lines = jobs.job_lines("c3-xavier")
+    shrink = load_module(TOOLS/"shrinkage_check.py", "c3x_shrinkage_check")
+    g9 = [shlex.split(l) for l in lines if l.startswith("python tools/shrinkage_check.py")]
+    assert len(g9) == 6 and all(a[a.index("--job")+1].endswith("/seed1703/po_jepa_full") for a in g9)
+    if hasattr(shrink, "_parse"):
+        assert all(not shrink._parse(a[2:]).cross_version for a in g9)
+    tools = [shlex.split(l) for l in lines if l.startswith("python tools/")]
+    assert not any("--cross-version" in a for a in tools)   # 同一份代码训练和评测
+    # 读出、模态、G9 都读本变体自己的任务目录（和输出同一个结果根），不是第一批 dyadic-zero-* 的
+    for a in tools:
+        if "--job" in a:
+            assert a[a.index("--job")+1].startswith(C3X_ROOTS[c3x_variant_of(a)]+"/")
+    assert sum("state_readout.py" in a[1] for a in tools) == 12 and sum("modal_spectrum.py" in a[1] for a in tools) == 2
+
+
+def test_c3x_options_are_checked(capsys):
+    for argv in (["--stage", "c3-xavier", "--batch", "1"], ["--stage", "c3-xavier", "--readout-init", "zero"]):
+        with pytest.raises(SystemExit) as error:
+            jobs.main(argv)
+        assert error.value.code == 2
+    capsys.readouterr()

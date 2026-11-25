@@ -15,6 +15,10 @@ make_v7_jobs.py 相同，在 工作目录/full-model/po-jepa-full 里用 tools/r
       # po_jepa_full + po_jepa_no_consistency，共 12 条训练，加 3 条 identity（和 C-2 逐位核对）；
       # 第二批：K32c、K64c（K=32/64 + 补空间）只训 po_jepa_full，共 6 条。四个变体都不丢信息（Jerry 2026-11-22：
       # 只改基底个数，不管 K 取多少都把全部信息存进去）；C-2 的 K16（截断、丢信息）和 transformer_consistency 复用 C-2，不重训。
+  python tools/make_small_validation_jobs.py --stage c3-xavier > jobs-sv-c3-xavier.txt
+      # C-3 补训（Jerry 2026-11-25 定“少动”修法：多段切分 + P_out Xavier 初始化，dyadic-xavier）：Kfull 和 K16c 各 3 个场景
+      # 1 条 po_jepa_full（2000 条 × 10000 步，种子 1703），带标定、检查、R3 读出、R4 模态、G9 收缩检查和汇总。
+      # 对照（no_cons、TF+一致性、dyadic-zero 的 Kfull full）都复用 C-3 第一批和 C-2，不重训。
 
 C-2 的变体必须显式给：由 C-1 的汇总（tools/summarize_small_validation.py c1）按预先写好的规则推荐，Jerry 可以改。
 三个阶段的先后：b-v7.1 和 c1 互不依赖，可以同时排；c2 在 c1 之后，它的 R 段（新检查点的读出）要用 b-v7.1 的探针和真值。
@@ -64,6 +68,10 @@ C3_BATCHES = {1: ("K16c", "Kfull"), 2: ("K32c", "K64c")}
 C3_CONDITIONS = {1: ("po_jepa_full", "po_jepa_no_consistency"), 2: ("po_jepa_full",)}
 C3_BASE = ("dyadic", "zero")            # C-2 定下的变体（Jerry 2026-11-19），C-3 只改空间部分
 C3_IDENTITY_VARIANT = "K16c"            # 第一批的 3 条 identity 放在这个变体的结果根下（identity 不用模型，和变体无关）
+# C-3 补训（Jerry 2026-11-25）：“少动”是 dyadic + 零初始化叠加造成的（G12），改成多段切分 + Xavier，只在 Kfull 上补训 full
+C3X_BASE = ("dyadic", "xavier")
+C3X_VARIANTS = ("Kfull", "K16c")       # K16c：第一批 dyadic-zero 下 DW、VdP 训练发散，看 Xavier 下还在不在
+C3X_CONDITIONS = ("po_jepa_full",)
 ENCODER, AC, UPSTREAM = "../../checkpoints/vjepa2-vitg-fpc64-256.pth", "../../checkpoints/vjepa2-ac-vitg.pt", "../../vjepa2"
 V6_REQUIRED = ("c1 必须给 --v6-features：v7 里 200 条的 double_well 读的是 v6 的特征目录（v7 试跑同样），给 v7 试跑用的同一个"
                "绝对路径（v7 交接说明里 V6= 那一行）")
@@ -237,13 +245,13 @@ def c2_lines(partition, init):
     return lines
 
 
-def c3_root(name) -> str:
-    return f"{OUT}/c3/{variant_name(*C3_BASE)}-{name}"
+def c3_root(name, base=C3_BASE) -> str:
+    return f"{OUT}/c3/{variant_name(*base)}-{name}"
 
 
-def c3_flags(name) -> str:
+def c3_flags(name, base=C3_BASE) -> str:
     modes, complement = C3_VARIANTS[name]
-    return f"{variant_flags(*C3_BASE)} --modes {modes} --complement {complement}"
+    return f"{variant_flags(*base)} --modes {modes} --complement {complement}"
 
 
 def c3_lines(batch):
@@ -306,13 +314,67 @@ def c3_lines(batch):
     return lines
 
 
+def c3x_lines():
+    """C-3 补训（Jerry 2026-11-25）：dyadic-xavier 下 Kfull、K16c 各 3 个场景 1 条 po_jepa_full，和 C-3 第一批同一套段（不排 identity、D2）。
+    Kfull 确认“少动”修法；K16c 看第一批 dyadic-zero 下 DW、VdP 的训练发散在 Xavier 下是否还在（导师要 K 跨网格相同，K16c 是主候选）。
+    结果根 {OUT}/c3/dyadic-xavier-<变体>；变体后缀 ~dyadic~Kfull、~dyadic~K16c，标定文件和第一批的 ~dyadic~zeroinit~* 分开。"""
+    n, updates = C2["n"], C2["updates"]
+    base, names = C3X_BASE, C3X_VARIANTS
+    lines = [f"# C-3 补训：{', '.join(names)} × {variant_name(*base)}（多段切分 + P_out Xavier 初始化，Jerry 2026-11-25 定的“少动”修法），"
+             "只训 po_jepa_full。",
+             "# 变体：" + "；".join(f"{v} = --modes {C3_VARIANTS[v][0]} --complement {C3_VARIANTS[v][1]}" for v in names),
+             f"# 对照复用、不重训：no_cons 和 dyadic-zero 的 full 在 {OUT}/c3/{variant_name(*C3_BASE)}-<变体>（C-3 第一批），"
+             f"TF+一致性和 K16 在 {OUT}/c2/{variant_name(*C3_BASE)}（C-2）。",
+             "# 前提：b-v7.1 的 R1、R2（探针、真值）和 L1–L2（长时程测试集）已完成。",
+             f"# ===== C 标定（GPU，{len(names)*len(SCENES)} 条；每个变体每个场景重标 σ_z、λ_t、λ_s）====="]
+    for v in names:
+        for s in SCENES:
+            lines.append(f"python run.py calibrate {ds(s, n)} --updates {updates} {c3_flags(v, base)} --features-root {feats(s, n)} "
+                         f"--device cuda:0 --output {c3_root(v, base)}/calibrate/{s}")
+    lines.append(f"# ===== C2 检查（GPU，{len(names)} 条；每个变体在 {CHECK_SCENE} 上 1 条：依赖、设备、完整梯度、100 步成本）=====")
+    for v in names:
+        lines.append(f"python run.py check {ds(CHECK_SCENE, n)} --updates {updates} {c3_flags(v, base)} "
+                     f"--features-root {feats(CHECK_SCENE, n)} --device cuda:0 --output {c3_root(v, base)}/check")
+    lines.append(f"# ===== D 训练+评测（GPU，{len(names)*len(SCENES)*len(C3X_CONDITIONS)} 条，互不依赖）=====")
+    for v in names:
+        for s in SCENES:
+            for c in C3X_CONDITIONS:
+                lines.append(f"python run.py run {ds(s, n)} --updates {updates} --seed {SEED} --condition {c} {c3_flags(v, base)} "
+                             f"--features-root {feats(s, n)} --device cuda:0 --output {c3_root(v, base)}/{s}/seed{SEED}/{c}")
+    r3, r4 = [], []
+    for v in names:
+        part = readout_lines(c3_root(v, base), f"{c3_root(v, base)}/readout", C3X_CONDITIONS, (SEED,), cross_version=False)
+        split = next(i for i, l in enumerate(part) if l.startswith("# ===== R4"))
+        r3 += part[1:split]; r4 += part[split+1:]
+    lines.append(f"# ===== R3 长时程读出、反事实（GPU，{len(r3)} 条，互不依赖）=====")
+    lines += r3
+    lines.append(f"# ===== R4 模态频率对照（GPU，{len(r4)} 条；只有线性场景、PO-JEPA 条件；探索性）=====")
+    lines += r4
+    lines.append(f"# ===== G9 收缩检查（GPU，{len(names)*len(SCENES)*len(C3X_CONDITIONS)} 条，只评测；tools/shrinkage_check.py，"
+                 "和 C-2、C-3 的 G9 同一口径）=====")
+    for v in names:
+        root = c3_root(v, base)
+        for s in SCENES:
+            for c in C3X_CONDITIONS:
+                lines.append(f"python tools/shrinkage_check.py --job {root}/{s}/seed{SEED}/{c} --probe {OUT}/readout/probe/{s} "
+                             f"--truth {OUT}/readout/truth/{s}.json --features {feats(s, n)} "
+                             f"--output {root}/shrinkage/{s}/seed{SEED}/{c}.json --device cuda:0")
+    lines.append(f"# ===== E 汇总（CPU，{len(names)} 条）：每个变体一张 v7 汇总表（和第一批、C-2 的对照由回传分析做）=====")
+    for v in names:
+        lines.append(f"python tools/summarize_v7.py --results {c3_root(v, base)} --output {c3_root(v, base)}/summary")
+    return lines
+
+
 def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4, batch=None):
     if stage != "c1" and v6_features:
         raise ValueError("--v6-features 只用于 --stage c1（只有 C-1 的 double_well 是 200 条）")
     if stage != "c2" and (partition or init):
-        raise ValueError("--temporal-partition / --readout-init 只用于 --stage c2（C-1 四个变体都排；C-3 固定用 C-2 定下的 dyadic-zero）")
+        raise ValueError("--temporal-partition / --readout-init 只用于 --stage c2（C-1 四个变体都排；C-3 固定用 C-2 定下的 dyadic-zero，"
+                         "c3-xavier 固定用 dyadic-xavier）")
     if (stage == "c3") != (batch is not None):
         raise ValueError("--batch 只用于 --stage c3，而且 c3 必须给（1 = K16c、Kfull；2 = K32c、K64c）")
+    if stage == "c3-xavier":
+        return c3x_lines()
     if stage == "c3":
         if batch not in C3_BATCHES:
             raise ValueError(f"--batch 只能是 {sorted(C3_BATCHES)}")
@@ -332,7 +394,7 @@ def job_lines(stage, *, v6_features="", partition=None, init=None, shards=4, bat
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=("b-v7.1", "c1", "c2", "c3"), required=True)
+    p.add_argument("--stage", choices=("b-v7.1", "c1", "c2", "c3", "c3-xavier"), required=True)
     p.add_argument("--v6-features", default="", help="c1 必须给：v7 试跑用的 v6 double_well-200 特征目录（绝对路径）")
     p.add_argument("--temporal-partition", choices=PARTITIONS, help="c2 必须给：C-1 定下的时间一致性切分")
     p.add_argument("--readout-init", choices=INITS, help="c2 必须给：C-1 定下的 P_out 初始化")
