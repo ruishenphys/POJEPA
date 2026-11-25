@@ -302,16 +302,17 @@ def _is_sha(x) -> bool:
     return type(x) is str and len(x) == 64 and all(c in "0123456789abcdef" for c in x)
 
 
-def _check_timed_record(manifest: dict) -> None:
+def _check_timed_record(manifest: dict, v: Variant) -> None:
     """S25b3：时间采样数据集的 tubelet 记录逐项等于 timed_tubelet_record，prev_frames 与 manifest 的 frames 一一对应：
-    帧号相同，前一帧的时刻 = 这一帧的时刻 − 1 tick（float64 精确比较），秒 = tick·0.25，SHA 是 64 位小写十六进制。
-    这一帧的时刻本身由 runtime/timing_cache.check_manifest 对 timing.frame_times 核。"""
+    帧数 = horizon·fps/4 + 1，帧号相同，前一帧的时刻 = 这一帧的时刻 − 1 tick（float64 精确比较），秒 = tick·0.25，
+    SHA 是 64 位小写十六进制。这一帧的时刻本身由 runtime/timing_cache.check_manifest 和 encode_v7 finalize 对
+    timing.frame_times 核。S25b3-fix1（Codex 审核 F1）：原来只要求两个列表一样长，空列表、同步截短都能过。"""
     record, frames = manifest.get("tubelet"), manifest.get("frames")
     bad = ValueError("manifest 的 tubelet 记录与时间采样下 tubelet=pair 的编码定义不一致（variants.timed_tubelet_record）")
     if not isinstance(record, dict) or type(frames) is not list or type(record.get("prev_frames")) is not list:
         raise bad
     prev = record["prev_frames"]
-    if len(prev) != len(frames) or record != timed_tubelet_record(prev):
+    if len(prev) != len(frames) or len(frames) != v.horizon*v.fps//4+1 or record != timed_tubelet_record(prev):
         raise bad
     if type(record["prev_offset_ticks"]) is not int or type(record["prev_offset_seconds"]) is not float:
         raise bad
@@ -335,7 +336,7 @@ def check_tubelet_record(manifest: dict, v: Variant) -> None:
             raise ValueError("manifest 有 tubelet 记录，但数据集不是 tubelet=pair")
         return
     if v.changes_timing():
-        return _check_timed_record(manifest)
+        return _check_timed_record(manifest, v)
     record = manifest.get("tubelet")
     sha = record.get("first_prev", {}).get("image_sha256") if isinstance(record, dict) and isinstance(record.get("first_prev"), dict) else None
     if (type(sha) is not str or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)

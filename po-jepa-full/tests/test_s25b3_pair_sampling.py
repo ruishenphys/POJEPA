@@ -1,7 +1,9 @@
 """S25b3：两帧编码（tubelet=pair）加时间采样和空间采样（docs/segments/S25b3.md）。
 
 前一帧固定在 0.25 s（1 tick）前（Jerry 2026-11-22 定），不是视频流里的上一帧。期望值从基础数据集的画法（second_order 自己的
-frames_with_prev，不走 timing）、独立写出的帧时刻和独立的假编码器重算，不拿 pair_frames / encode_v7 的返回当参照。
+frames_with_prev，不走 timing）、独立写出的帧时刻、独立写出的随机流和独立的假编码器（显式 patch 下标）重算。
+S25b3-fix1（Codex 审核 F2）：缓存测试原来拿 pair_frames 的返回当期望，现在期望的前一帧独立算，pair_frames 的返回只用来
+核链路一致；抖动 + 像素噪声单独有一个逐位测试。
 假特征用 tools/encode_v7.py --fake-encoder（子进程），读取时把 synthetic 标记换成 real（同 S25b、S25d、S25e 的测试）。
 数据集 <场景>:40，测试段 36–39。
 """
@@ -131,6 +133,62 @@ def _fake_pair(prev, cur):
     return tubelet_probe.fake_tubelet_encoder()(torch.stack((p, c), 2)).numpy()
 
 
+def _independent_tubelet(prev, cur):
+    """S25b3-fix1（Codex 审核 F2）：假 tubelet 编码的独立写法：权重按同一个种子另抽，2×16×16 的块按显式下标逐个取
+    （行优先 token，块内按 通道、时间、行、列 展平），不调 tubelet_probe / native_encoder 的函数。"""
+    g = torch.Generator().manual_seed(0)
+    weight = torch.randn(3*2*16*16, 1408, generator=g)/math.sqrt(3*2*16*16)
+    p = torch.from_numpy(prev).permute(0, 3, 1, 2).double()/255.
+    c = torch.from_numpy(cur).permute(0, 3, 1, 2).double()/255.
+    video = torch.stack((p, c), 2)
+    side = prev.shape[1]//16
+    patches = torch.stack([video[:, :, :, 16*i:16*i+16, 16*j:16*j+16].reshape(len(prev), -1)
+                           for i in range(side) for j in range(side)], 1)
+    return torch.nn.functional.layer_norm(patches.float()@weight, (1408,)).numpy()
+
+
+def _stream(tid, stream, *extra, system="pendulum"):
+    """独立写出的随机流：熵 [1703, 1000+场景序号, 轨迹, 流号, …]（二阶场景不是 double_well）。"""
+    entropy = [1703, 1000+datasets.SYSTEMS.index(system), tid, stream, *extra]
+    return np.random.Generator(np.random.PCG64(np.random.SeedSequence(entropy)))
+
+
+def _jitter_times(tid, n=33, jitter=.4):
+    xi = _stream(tid, 10).uniform(-1., 1., n)
+    t = np.arange(n, dtype=np.float64); t[1:n-1] += jitter*xi[1:n-1]
+    return t
+
+
+def _independent_jitter_prev(tid, variant):
+    """抖动 + 像素噪声 10 的前一帧，独立算：时刻 = 独立写出的 t_k − 1；状态用 S24b 核过的 timing.simulate；画图用 second_order
+    本身（raw）；噪声 k = 0（t = −1）是流 4 的第 0 块，k = 32（末帧不抖，t = 31）是流 4 的第 32 块（预跑偏移 1），
+    其余 t_k − 1 既不是整 tick 也不是任何一帧的时刻 → 流 13、键 k。"""
+    v = datasets.active().knobs
+    assert datasets.active().variant == spec(variant).variant and v.pixel_noise == 10. and v.exposure == 0.
+    t = _jitter_times(tid)
+    prev_t = t-1.
+    assert prev_t[0] == -1. and prev_t[32] == 31. and all(x != math.floor(x) and x not in set(t) for x in prev_t[1:32])
+    sc = timing._scene(systems.get(), tid, v, 32)
+    u4 = systems.applied_subticks(tid, v, systems.commanded_controls(tid))
+    with systems.raw_images():
+        raw = sc.draw(timing.simulate(sc, u4, prev_t), prev_t)
+    tick = _stream(tid, 4).normal(0., 10., (33, 256, 256, 3))
+    noise = np.stack([tick[0]] + [_stream(tid, 13, k).normal(0., 10., (256, 256, 3)) for k in range(1, 32)] + [tick[32]])
+    return np.rint(np.clip(raw+noise, 0., 255.)).astype(np.uint8)
+
+
+def _independent_prev(name, tid, images):
+    """缓存测试用的独立前一帧：fps = 2 是基础数据集的奇数 tick；fps = 8 偶数帧是基础数据集的 tick k/2 − 1、奇数帧 k ≥ 3 是
+    第 k − 2 帧、k = 1 是 frames(prev=True) 的第 0 帧；抖动 + 像素噪声见 _independent_jitter_prev。"""
+    if name == "fps2":
+        return _base_frames("", tid)[0:33:2]
+    if name == "fps8":
+        base = _base_frames("", tid)
+        first = systems.get().frames_with_prev(tid)[1][0]
+        return np.stack([base[k//2] if k % 2 == 0 else first if k == 1 else images[k-2] for k in range(65)])
+    return _independent_jitter_prev(tid, CACHES[name])
+
+
 # —— 调节项 ——
 
 @pytest.mark.parametrize("system", variants.SECOND_ORDER)
@@ -239,6 +297,14 @@ def test_jitter_prev_frame_is_drawn_at_its_own_time(active):
     assert any(not np.array_equal(prev[k], images[k-1]) for k in range(1, 33))
 
 
+@pytest.mark.parametrize("tid", [36, 39])
+def test_jitter_with_pixel_noise_prev_frame_is_independent(active, tid):
+    """S25b3-fix1（Codex 审核 F2）：抖动 + 像素噪声时前一帧的状态、画图和噪声（流 4 / 流 13 与键）全部独立算，逐位相等。"""
+    _, prev, images = _pair(active, CACHES["jit"], tid)
+    assert np.array_equal(prev, _independent_jitter_prev(tid, CACHES["jit"]))
+    assert np.array_equal(timing.frame_times(tid), _jitter_times(tid))
+
+
 @pytest.mark.parametrize("knob", ["exposure=1", "switch_offset=0.5", "exposure=1,fps=8"])
 def test_prev_frame_on_the_frame_grid_keeps_exposure_and_switching(knob, active):
     """前一帧落在帧网格上时就是那一帧（同样长的曝光窗口、同一组执行动作）：fps = 4 时是第 k − 1 帧（k = 0 是
@@ -267,13 +333,15 @@ def test_timed_pair_cache_features_and_manifest(caches, active, name):
     s = spec(CACHES[name])
     v = s.knobs
     for tid in TEST_IDS:
-        _, prev, images = _pair(active, CACHES[name], tid)
+        _, chained, images = _pair(active, CACHES[name], tid)
+        prev = _independent_prev(name, tid, images)          # S25b3-fix1（Codex 审核 F2）：期望的前一帧独立算
+        assert np.array_equal(prev, chained)
         m = _manifest(caches[name]/f"{tid:04d}")
         z = np.load(caches[name]/f"{tid:04d}"/"raw_z.npy")
         L = 32*v.fps//4+1
         assert z.shape == (L, 256, 1408) and m["shape"] == [L, 256, 1408]
-        expected = _fake_pair(prev, images)
-        assert np.array_equal(z, expected.astype(np.float64).astype(np.float16))
+        assert np.allclose(z.astype(np.float32), _independent_tubelet(prev, images), atol=4e-3, rtol=0)
+        assert np.array_equal(z, _fake_pair(prev, images).astype(np.float64).astype(np.float16))   # 链路一致（同一个假编码器）
         x = torch.from_numpy(images).permute(0, 3, 1, 2).float()/255.
         dup = tubelet_probe.fake_tubelet_encoder()(torch.stack((x, x), 2)).numpy()
         video = _fake_pair(images[:-1], images[1:])                      # 视频流里的上一帧
@@ -437,6 +505,44 @@ def test_finalize_refuses_inconsistent_timed_record(tmp_path, caches):
     _rewrite_manifest(out/"0038", lambda m: m["tubelet"]["prev_frames"][7].update(time_ticks=0., time_seconds=0.))
     r = _encode(out, CACHES["fps8"], modes=("finalize",))
     assert r.returncode != 0 and "tubelet 记录" in r.stderr
+
+
+def _shift(m, ticks):
+    for f in m["frames"]:
+        f.update(time_ticks=f["time_ticks"]+ticks, time_seconds=(f["time_ticks"]+ticks)*.25)
+    for f in m["tubelet"]["prev_frames"]:
+        f.update(time_ticks=f["time_ticks"]+ticks, time_seconds=(f["time_ticks"]+ticks)*.25)
+
+
+@pytest.mark.parametrize("what,change", [
+    ("empty", lambda m: (m.update(frames=[]), m["tubelet"].update(prev_frames=[]))),
+    ("first_only", lambda m: (m.update(frames=m["frames"][:1]), m["tubelet"].update(prev_frames=m["tubelet"]["prev_frames"][:1]))),
+    ("shifted_100", lambda m: _shift(m, 100.)),
+])
+def test_finalize_checks_frame_count_and_times(tmp_path, caches, what, change):
+    """S25b3-fix1（Codex 审核 F1）：主帧和前一帧两个列表同步改（相对关系仍自洽）：清空、只剩第一帧、整体平移 100 tick，
+    finalize 都拒绝；记录检查本身也拒绝长度不对的记录。"""
+    out = tmp_path/"fps8"
+    shutil.copytree(caches["fps8"], out)
+    _rewrite_manifest(out/"0037", change)
+    m = _manifest(out/"0037")
+    v = spec(CACHES["fps8"]).knobs
+    if what != "shifted_100":
+        with pytest.raises(ValueError, match="tubelet"):
+            variants.check_tubelet_record(m, v)
+    else:
+        variants.check_tubelet_record(m, v)                 # 相对关系自洽，要靠 finalize 对 frame_times 核
+    r = _encode(out, CACHES["fps8"], modes=("finalize",))
+    assert r.returncode != 0 and ("tubelet 记录" in r.stderr or "帧时刻" in r.stderr), r.stderr
+
+
+def test_finalize_checks_dup_timed_frame_times(tmp_path, caches):
+    out = tmp_path/"dup8"
+    shutil.copytree(caches["dup8"], out)
+    assert _encode(out, "fps=8", modes=("finalize",)).returncode == 0
+    _rewrite_manifest(out/"0036", lambda m: m["frames"][3].update(time_ticks=9.))
+    r = _encode(out, "fps=8", modes=("finalize",))
+    assert r.returncode != 0 and "帧时刻" in r.stderr
 
 
 # —— 真实编码路径（记录输入的替身）——
