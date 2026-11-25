@@ -289,6 +289,8 @@ def equal_step_job(features, output, device, condition, *, training_run, limit_r
     from .workflow import verify_bundle
     if condition not in EQUAL_STEP_CONDITIONS:
         raise ValueError(f"equal-step 只支持 {EQUAL_STEP_CONDITIONS}")
+    # G14-fix1（Codex G14 P2）：两边共用同一份当前预登记，缩放不同的任务配不上；不支持缩放，给明确的错
+    checks.require_weight_scale_allowed(None, "equal-step（同步数对照，两边用同一份预登记，缩放与未缩放的任务配不上）")
     retention = comparison.checkpoint_retention_config()
     if retention is not None and condition in retention["prune_conditions"]:
         raise ValueError(f"{condition} 的检查点按 checkpoints.prune_conditions 精简过，不能截断选点")

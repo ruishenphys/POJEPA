@@ -30,8 +30,9 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G11 | C-3 mode-count ablation and scheme B (`c3` job files, batch 1 and batch 2): new PO-JEPA variants that change only the number of spatial basis vectors and never drop information (K = 16, 32, 64 plus the kept complement; all tokens) | **Ready once its pull request is merged**; batch 2 only after Jerry looks at batch 1 | batch 1 ~55 GPU-hours, batch 2 ~25 GPU-hours *(est.)* | C-2 results under `results-small-validation/c2/dyadic-zero/` (reference rows, **keep them**); readout probes and truth files (G4) |
 | G10 | C-2 truncation check (`tools/truncation_check.py`): oracle ceilings of the PO-JEPA output subspace, the C-2 Transformer's change projected onto the 16 graph modes, and the trained PO-JEPA attention and right-hand-side sizes, on the registered test windows of all three grids | **Ready once its pull request is merged** | ~3–6 GPU-hours *(est.)*, 21 commands | C-2 checkpoints under `results-small-validation/c2/dyadic-zero/` (G6); **please keep them** |
 | G12 | C-1 2×2 readout (§8f): physical readout and counterfactual action response of the 12 C-1 checkpoints (bisection/dyadic × Xavier/zero `P_out`), evaluation only, probes and truth fitted on the 200-trajectory datasets | **Ready** (`full-model` c379bc4 or later; #14 and #15 are merged) | ~1 GPU-hour *(est.)*, 48 commands (12 of them optional) | C-1 job folders under `results-small-validation/c1/` with their selected checkpoints; the v6 `double_well-200` features (`$V6`, as for C-1) |
-| G15 | C-3 extra training with the dyadic-xavier fix (§8i): `Kfull` and `K16c` × dyadic temporal partition × Xavier-initialised `P_out`, one `po_jepa_full` per variant and scene (6 runs), with calibration, readout, modal check, G9 shrinkage check and summary (`c3-xavier` job file, 36 commands); plus sending back the batch-1 checkpoints for the `K16c` divergence analysis | **Ready once its pull request is merged**; run it **after** the C-3 batch-1 remainder (§8e) and only then pull | ~20–24 GPU-hours *(est.)*, ~11 hours on two cards | readout probes and truth files under `results-small-validation/readout/` (G4) |
 | G13 | Second-order scenes in the formal-training job file (§8g): `tools/make_v8_jobs.py` now lists all 12 scenes by default, the 5 second-order scenes encoded from two frames (`<scene>~tubelet=pair`) | **Nothing to run now**: it runs with the formal training of the simulation dataset (advisor's cluster) | part of the formal training; the 5 scenes add about 70% to every stage, see §8g | formal training; `full-model` with S25b4 merged |
+| G14 | C-1-scale isolation of the double_well "moves too little" shrinkage (§8h): `po_jepa_no_consistency`, temporal-only and spatial-only consistency, two more seeds of the key cells, and a λ_t scan (×0.5, ×0.25), all 200 trajectories × 2,000 updates on double_well and van_der_pol; then action response and motion gain | **Ready once its pull request is merged**; pull only after the C-3 batch-1 remainder in that clone has finished | ~10–15 GPU-hours *(est.)*: 29 short training runs + 66 evaluation lines, ~6–8 hours on two cards | the C-1 clone (its 9 `*-200-u2000~*.yaml` calibrations, the C-1 job folders) and the G12 probes and truth files under `results-small-validation/c1-readout/` |
+| G15 | C-3 extra training with the dyadic-xavier fix (§8i): `Kfull` and `K16c` × dyadic temporal partition × Xavier-initialised `P_out`, one `po_jepa_full` per variant and scene (6 runs), with calibration, readout, modal check, G9 shrinkage check and summary (`c3-xavier` job file, 36 commands); plus sending back the batch-1 checkpoints for the `K16c` divergence analysis | **Ready once its pull request is merged**; run it **after** the C-3 batch-1 remainder (§8e) and only then pull | ~20–24 GPU-hours *(est.)*, ~11 hours on two cards | readout probes and truth files under `results-small-validation/readout/` (G4) |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -444,6 +445,95 @@ Commands per stage (counted with `grep -c '^python'` on the tool's output; 2,000
 (The default column is slightly less than the sum: the check and summary lines are shared.) The `full` stage has 12 × 3 × 6 = 216 training runs, matching the formal-training plan.
 
 Not decided yet (Jerry): whether the planning success criterion of the second-order scenes should also count velocity (now position only), and whether the readout should add acceleration. Until then the job file uses the current position-only criteria.
+
+## 8h. G14: what causes the double_well shrinkage (C-1 scale, trains 29 short runs)
+
+Question: in C-2 (`dyadic-zero`) and in C-1, `po_jepa_full` on double_well predicts only about half the motion of `po_jepa_no_consistency` and responds to actions much less (G9, G12). G12 found it only in the dyadic + zero-initialised `P_out` cell. Is the consistency loss itself what pulls the model toward "move less", and which of its two terms? Is it one seed? Does a smaller λ_t remove it (advisor's suggestion, 2026-11-25; Jerry chose to scale λ_t only, λ_s stays at its calibrated value)?
+
+Facts that shaped the design (Claude, CPU-checked on the current code):
+- The temporal partition only enters through the temporal-consistency loss. With both weights zero (`po_jepa_no_consistency`), bisection and dyadic give the same JEPA loss bit for bit and the same gradient up to float32 rounding (`tests/test_g14_weight_scale.py`). So "no consistency" is trained once per init (`bisection-*` folder names), and one `dyadic-zero` no-consistency run on double_well is kept only as a same-setting second realisation (a noise reference).
+- The four C-1 `po_jepa_full` cells (seed 1703) already exist; they are reused, not retrained. Only their G9 motion gain is new (section X, `--cross-version`).
+
+New option (this pull request): `run.py --time-weight-scale {1,0.5,0.25}` (and `--space-weight-scale`, unused here) multiplies the λ_t of the variant's own calibration file; the calibration file name does not change, `calibrate` refuses the option, only `po_jepa_full`, `po_jepa_time_only` and `po_jepa_space_only` accept it. The scale is written into `job.json` (`variant.time_weight_scale`), the evaluation tools restore it, and `summarize_v7.py` groups such runs as `<dataset>~dyadic~zeroinit~lt0.5`. Without the option nothing changes.
+
+The 29 training runs (all `--trajectories 200 --updates 2000`, the C-1 setting, K = 16 as in C-1):
+
+| Folder (`results-small-validation/c1-isolation/`) | Condition | Seeds | Scenes | Asks |
+|---|---|---|---|---|
+| `bisection-xavier` | `po_jepa_no_consistency` | 1703 | DW, VdP | baseline without consistency, Xavier `P_out` |
+| `bisection-zero` | `po_jepa_no_consistency` | 1703, 1704, 1705 | DW, VdP | does the zero init alone shrink? (3 seeds: the reference of the main comparison) |
+| `dyadic-zero` | `po_jepa_no_consistency` | 1703 | DW | noise reference (same setting as the row above) |
+| `dyadic-zero` | `po_jepa_time_only` | 1703 | DW, VdP | temporal consistency alone |
+| `bisection-zero` | `po_jepa_space_only` | 1703 | DW, VdP | spatial consistency alone |
+| `dyadic-zero` | `po_jepa_full` | 1704, 1705 | DW, VdP | is the C-1 shrinkage (seed 1703) reproducible? |
+| `dyadic-xavier` | `po_jepa_full` | 1704, 1705 | DW, VdP | the chosen fix (dyadic + Xavier), 3 seeds with C-1 |
+| `dyadic-zero~lt0.5`, `~lt0.25` | `po_jepa_full`, λ_t × 0.5 / × 0.25 | 1703 | DW, VdP | λ_t scan on the shrinking cell |
+| `dyadic-xavier~lt0.5`, `~lt0.25` | `po_jepa_full`, λ_t × 0.5 / × 0.25 | 1703 | DW, VdP | λ_t scan on the fix |
+
+Every training line is the normal `run.py run` (same evaluation as the main table). Each new job then gets `state_readout.py counterfactual` (action response A) and `shrinkage_check.py` (G9 motion gain), with the 200-trajectory probes and truth files that G12 wrote. advection_diffusion is left out: its probe cv R² is 0.735, below the 0.9 we need to read a ratio.
+
+Where and when: in the clone where C-1 and C-3 ran (it has the 9 C-1 calibration files `configs/calibration/<scene>-200-u2000~*.yaml`, which are not in git). Finish the C-3 batch-1 remainder there first, then `git pull` (this changes `MANIFEST.json`; do not pull while any job of that clone is still running), then:
+
+```bash
+cd $WORK/full-model/po-jepa-full
+V6=/absolute/path/of/the/v6/double_well-200/features    # the same value as in §7 G5 and §8f G12
+R=../../results-small-validation; O=$R/c1-isolation; P=$R/c1-readout     # P: probes and truth files written by G12
+SCENES="double_well van_der_pol"
+feats() { if [ "$1" = double_well ]; then echo "$V6"; else echo "../../features-v7/$1-200"; fi; }
+flags() { case $1 in
+  bisection-xavier) echo "--temporal-partition bisection --readout-init xavier";;
+  bisection-zero)   echo "--temporal-partition bisection --readout-init zero";;
+  dyadic-xavier)    echo "--temporal-partition dyadic --readout-init xavier";;
+  dyadic-zero)      echo "--temporal-partition dyadic --readout-init zero";; esac; }
+# cells: <variant> <condition> <seeds> <scenes> [λ_t scale]  (the λ_t scan: Tomas 2026-11-25, Jerry chose "scale λ_t only")
+CELLS="bisection-xavier po_jepa_no_consistency 1703 double_well,van_der_pol
+bisection-zero po_jepa_no_consistency 1703,1704,1705 double_well,van_der_pol
+dyadic-zero po_jepa_no_consistency 1703 double_well
+dyadic-zero po_jepa_time_only 1703 double_well,van_der_pol
+bisection-zero po_jepa_space_only 1703 double_well,van_der_pol
+dyadic-zero po_jepa_full 1704,1705 double_well,van_der_pol
+dyadic-xavier po_jepa_full 1704,1705 double_well,van_der_pol
+dyadic-zero po_jepa_full 1703 double_well,van_der_pol 0.5
+dyadic-zero po_jepa_full 1703 double_well,van_der_pol 0.25
+dyadic-xavier po_jepa_full 1703 double_well,van_der_pol 0.5
+dyadic-xavier po_jepa_full 1703 double_well,van_der_pol 0.25"
+each() {  # calls $1 <variant> <condition> <seed> <scene> <λ_t scale> for every training job
+  echo "$CELLS" | while read v c seeds scenes lt; do
+    for seed in ${seeds//,/ }; do for s in ${scenes//,/ }; do $1 $v $c $seed $s ${lt:-1}; done; done; done; }
+dir() { if [ "$5" = 1 ]; then echo "$1"; else echo "$1~lt$5"; fi; }   # result folder: same suffix as summarize_v7 (~lt0.5)
+scale() { if [ "$5" != 1 ]; then echo " --time-weight-scale $5"; fi; }
+job() { echo "$O/$(dir $@)/$4/seed$3/$2"; }
+train() { echo "python run.py run --system $4 --trajectories 200 --updates 2000 --seed $3 --condition $2 $(flags $1)$(scale $@) --features-root $(feats $4) --device cuda:0 --output $(job $@)"; }
+pt() { echo "--probe $P/probe/$1 --truth $P/truth/$1.json --features $(feats $1)"; }
+cf() { echo "python tools/state_readout.py counterfactual --job $(job $@) $(pt $4) --output $O/counterfactual/$(dir $@)/$4/seed$3/$2.json --device cuda:0"; }
+g9() { echo "python tools/shrinkage_check.py --job $(job $@) $(pt $4) --output $O/shrinkage/$(dir $@)/$4/seed$3/$2.json --device cuda:0"; }
+{
+echo "# ===== X G9 motion gain on the existing C-1 po_jepa_full jobs (GPU, 8 commands, evaluation only, --cross-version) ====="
+for v in bisection-xavier bisection-zero dyadic-xavier dyadic-zero; do for s in $SCENES; do
+  echo "python tools/shrinkage_check.py --job $R/c1/$v/$s/seed1703/po_jepa_full $(pt $s) --cross-version --output $O/shrinkage/c1-$v/$s/seed1703/po_jepa_full.json --device cuda:0"
+done; done
+echo "# ===== D training + evaluation, 200 trajectories x 2000 updates (GPU, 29 commands, independent) ====="
+each train
+echo "# ===== R counterfactual action response of the new jobs (GPU, 29 commands) ====="
+each cf
+echo "# ===== G9 motion gain of the new jobs (GPU, 29 commands) ====="
+each g9
+} > jobs-sv-c1-isolation.txt
+grep -c '^python' jobs-sv-c1-isolation.txt      # must print 95
+for s in X D R G9; do python tools/run_jobs.py jobs-sv-c1-isolation.txt --gpus 0,1 --only $s; done
+```
+
+- Sections: X (8, evaluation of existing C-1 jobs, no dependency) → D (29 training runs) → R (29) → G9 (29). One `run_jobs.py --only` per section as above, so a failure in one section does not block the next; rerunning skips finished lines; every tool refuses to overwrite an existing output.
+- Time *(est.)*: each D line is one C-1-size run (200 × 2,000 plus the standard evaluation, roughly 20–30 minutes); R and G9 lines ~1–2 minutes each. About 10–15 GPU-hours, 6–8 hours on two cards.
+- If an X line stops with a missing checkpoint, that C-1 folder was cleaned; leave it failed and tell us which.
+
+Send back (a few MB plus logs):
+
+```bash
+cd $WORK
+python $TOOL pack results-small-validation/c1-isolation logs-addon/jobs-sv-c1-isolation \
+    full-model/po-jepa-full/jobs-sv-c1-isolation.txt nvidia-smi.txt --output c1-isolation.pack.sqlite
+```
 
 ## 8i. G15: C-3 extra training with the dyadic-xavier fix (`c3-xavier` job file)
 
