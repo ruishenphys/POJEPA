@@ -181,6 +181,7 @@ def preregister():
 
 def build_condition(condition: str, device):
     """共用固定模型工厂与初始化，仅按条件设置批准的损失权重。"""
+    check.require_weight_scale_allowed(condition)   # G14-fix1：缩放只给 λ 来自基础标定的三个条件
     if condition in ADDON_CONDITIONS: return addon_conditions.build(condition, device)   # 07 §2.4
     config = check.load_protocol()
     loss = LossConfig(**{f.name:config["loss"][f.name] for f in fields(LossConfig)})

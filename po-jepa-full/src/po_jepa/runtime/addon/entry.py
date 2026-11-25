@@ -38,6 +38,7 @@ def execute(args):
     from . import calibrate, calibration
     if not checks.is_v7():
         raise ValueError("补跑子命令只用于 v7 协议（run.py 会设 PO_JEPA_PROTOCOL=v7）")
+    checks.require_weight_scale_allowed(None, args.command)   # G14-fix1（Codex G14 P1）
     bundle = workflow.verify_bundle()
     device = torch.device(args.device)
     if args.command == "check-addon" and (device.type != "cuda" or device.index is None):
