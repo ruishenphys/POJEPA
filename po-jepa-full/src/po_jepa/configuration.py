@@ -16,6 +16,16 @@
 wave 与 advection_diffusion、gray_scott 同一类：*_px 列是池化场的 L2（不是像素），规划的目标门槛按场的范数的 5%。
 激振源的位置不计入（与 gray_scott 的注入点相同）。
 
+S25b5（Jerry 2026-11-25 定：规划成功判据并入速度、读出加速度）：两帧编码（tubelet=pair）的特征看得到速度，所以另给
+构形的时间导数 velocity（世界单位/秒）和规划摘要的时间导数 controlled_velocity，都由隐藏状态解析算出（不做差分）：
+| 场景 | 构形速度 | 隐藏状态 |
+|---|---|---|
+| pendulum | θ̇·(cos θ, sin θ) | (θ, θ̇) |
+| cart_pole | (ẋ, ẋ + l·θ̇·cos θ, −l·θ̇·sin θ) | (x, ẋ, θ, θ̇) |
+| spring_chain、bouncing_balls | 质点/球的速度 [2n]（规划摘要取第 0 个） | 位置 [2n] + 速度 [2n] |
+| wave | u_t 的 16×16 平均池化场（池化是线性的，等于池化 u 的时间导数） | [u 池化 256, u_t 池化 256, p 2] |
+velocity 的单位和 configuration 相同再除以秒：乘 PX 是像素/秒，wave 是场的 L2/秒。
+
 输入都是 frames() 的隐藏状态（一维向量；wave 是 514 维池化隐藏状态，不是可续算的整场）。params 是 dict(v.params)。
 """
 import numpy as np
@@ -66,3 +76,22 @@ def motion(name, a, b, params) -> float:
     """探针的 *_px 距离：两个隐藏状态的构形之差的 L2 × PX（wave：池化场的 L2）。"""
     d = float(np.linalg.norm(configuration(name, a, params)-configuration(name, b, params)))
     return d if PX[name] is None else d*PX[name]
+
+
+def velocity(name, hidden, params) -> np.ndarray:
+    """S25b5：隐藏状态 → 构形的时间导数 d(configuration)/dt（文件头 S25b5 的表），形状与 configuration 相同。"""
+    h = _hidden(name, hidden, params)
+    if name == "pendulum":
+        return h[1]*np.array([np.cos(h[0]), np.sin(h[0])])
+    if name == "cart_pole":
+        l = second_order.param(name, params, "length")
+        return np.array([h[1], h[1]+l*h[3]*np.cos(h[2]), -l*h[3]*np.sin(h[2])])
+    if name == "wave":
+        return h[256:512].copy()
+    return h[len(h)//2:].copy()                     # spring_chain、bouncing_balls：后一半是速度 [n,2] 展平
+
+
+def controlled_velocity(name, hidden, params) -> np.ndarray:
+    """S25b5：规划摘要（controlled）的时间导数。"""
+    v = velocity(name, hidden, params)
+    return v[:2] if name in ("spring_chain", "bouncing_balls") else v

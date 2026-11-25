@@ -19,7 +19,11 @@
   python tools/state_readout.py counterfactual --job ../results-v8/full/double_well/seed1703/po_jepa_full \\
       --probe ../results-v8/full/readout/probe/double_well --truth ../results-v8/full/readout/truth/double_well.json \\
       --features ../features-v8/double_well-2000 --output ../results-v8/full/readout/counterfactual/double_well/seed1703/po_jepa_full.json
-二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。只读位置（两帧编码下读速度在 S25b 第二段接）。
+二阶场景的编码看训练数据集的调节项：不带 tubelet=pair 是单帧复制（dup，特征看不到速度），带的是两帧编码（S25b），报告的 tubelet 字段照实写。
+S25b5（Jerry 2026-11-25 定，新口径）：二阶场景另读速度（定义见 src/po_jepa/runtime/state_readout.py 文件头第 1 条）。命令行不变：
+fit 在 --output 下另写 velocity/ 子目录（速度探针），truth 另写 v_actual、v_counterfactual 和长时程的 v，rollout、counterfactual
+从 --probe 的 velocity/ 读速度探针，结果多出 vel_ 开头的速度指标（反事实汇总在 overall.velocity、by_duration.<t>.velocity）。
+S25b5 之前拟合的二阶场景探针和真值没有速度，rollout、counterfactual 会拒绝，要用当前代码重做 fit、truth。
 """
 import argparse
 from dataclasses import replace
@@ -109,7 +113,8 @@ def cmd_fit(a):
     approved = data.approved_cache_metadata(a.features, splits=("validation",))
     params = dict(spec.knobs.params)
     ids = list(spec.split_range("validation"))
-    x, y, groups = None, [], []
+    x, y, yv, groups = None, [], [], []
+    velocity = state_readout.has_velocity(spec.system)          # S25b5
     for i, tid in enumerate(ids):
         raw, m, sha = cache._read_complete_cache(a.features/f"{tid:04d}")
         if (m["trajectory_id"] != tid or m["split"] != "validation" or sha != approved["manifest_sha256_by_id"][tid]
@@ -121,14 +126,26 @@ def cmd_fit(a):
             x = torch.empty(len(ids)*f.shape[0], f.shape[1], dtype=torch.float32)
         x[i*f.shape[0]:(i+1)*f.shape[0]] = f
         y.append(state_readout.targets(spec.system, states, params)); groups += [tid]*f.shape[0]
+        if velocity:
+            yv.append(state_readout.velocity_targets(spec.system, states, params))
     probe, record = state_readout.fit(x, np.concatenate(y), np.array(groups), a.kind, device=a.device)
-    meta = state_readout.save(probe, a.output, dict(
-        dataset=spec.tag, system=spec.system, variant=spec.variant, split="validation", units=state_readout.units(spec.system),
-        trajectories=ids, cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]),
-        tubelet=variants.tubelet_label(spec.system, spec.knobs), seconds=round(time.perf_counter()-started, 1),
-        scientific_conclusions_verified=False))
-    print(f"{spec.tag} 探针（{a.kind}）：{record['samples']} 个样本，交叉验证 R² {record['cv_r2']:.4f}"
-          f"（λ = 10^{record['lambda_exponent']:g}·trace/n{'，在网格边上' if record['lambda_at_grid_edge'] else ''}）→ {a.output}")
+    # S25b5：速度探针用同一份特征另拟合（单独选 λ，位置探针不受影响），两个都拟合完再写盘
+    vprobe, vrecord = (state_readout.fit(x, np.concatenate(yv), np.array(groups), a.kind, device=a.device)
+                       if velocity else (None, None))
+    common = dict(dataset=spec.tag, system=spec.system, variant=spec.variant, split="validation",
+                  trajectories=ids, cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]),
+                  tubelet=variants.tubelet_label(spec.system, spec.knobs), seconds=round(time.perf_counter()-started, 1),
+                  scientific_conclusions_verified=False)
+    meta = state_readout.save(probe, a.output, dict(common, quantity="position", units=state_readout.units(spec.system),
+                                                    **({"velocity_probe": state_readout.VELOCITY_DIR} if velocity else {})))
+    show = lambda r: (f"{r['samples']} 个样本，交叉验证 R² {r['cv_r2']:.4f}"
+                      f"（λ = 10^{r['lambda_exponent']:g}·trace/n{'，在网格边上' if r['lambda_at_grid_edge'] else ''}）")
+    print(f"{spec.tag} 探针（{a.kind}）：{show(record)} → {a.output}")
+    if velocity:
+        vmeta = state_readout.save(vprobe, a.output/state_readout.VELOCITY_DIR,
+                                   dict(common, quantity="velocity", units=state_readout.velocity_units(spec.system)))
+        print(f"{spec.tag} 速度探针（{a.kind}）：{show(vrecord)} → {a.output/state_readout.VELOCITY_DIR}")
+        meta = dict(meta, velocity=vmeta)
     return meta
 
 
@@ -145,6 +162,8 @@ def cmd_truth(a):
     params = dict(base.knobs.params)
     approved = data.approved_cache_metadata(a.features, splits=("test",))
     counterfactual = []
+    velocity = state_readout.has_velocity(base.system)          # S25b5：二阶场景另写速度真值
+    vel = lambda state: state_readout.velocity_target(base.system, state, params).tolist()
     for tid in base.split_range("test"):
         donor = datasets.donor_id(tid)
         _, m, sha = cache._read_complete_cache(a.features/f"{tid:04d}")
@@ -160,7 +179,9 @@ def cmd_truth(a):
                 counterfactual.append(dict(trajectory_id=tid, donor_id=donor, start_tick=start, duration_cycles=t,
                                            manifest_sha256=sha,
                                            y_actual=state_readout.target(base.system, states[start+int(t)], params).tolist(),
-                                           y_counterfactual=state_readout.target(base.system, cf_state, params).tolist()))
+                                           y_counterfactual=state_readout.target(base.system, cf_state, params).tolist(),
+                                           **(dict(v_actual=vel(states[start+int(t)]), v_counterfactual=vel(cf_state))
+                                              if velocity else {})))
     scene = base.system if not base.variant else f"{base.system}~{base.variant}"
     long_spec = datasets.DatasetSpec(base.system, base.count, protocols.merged(scene, f"horizon={a.horizon}"))
     old = datasets._set_for_tests(long_spec)
@@ -174,14 +195,16 @@ def cmd_truth(a):
                 raise SystemExit(f"轨迹 {tid}：长时程缓存身份不符")
             states = _checked_states(system, tid, m, [int(t) for t in times])
             long.append(dict(trajectory_id=tid, manifest_sha256=sha,
-                             y={f"{t:g}": state_readout.target(base.system, states[int(t)], params).tolist() for t in times}))
+                             y={f"{t:g}": state_readout.target(base.system, states[int(t)], params).tolist() for t in times},
+                             **({"v": {f"{t:g}": vel(states[int(t)]) for t in times}} if velocity else {})))
     finally:
         datasets._set_for_tests(old)
     report = dict(kind="state_readout_truth", dataset=base.tag, long_dataset=long_spec.tag, system=base.system, horizon=a.horizon,
                   units=state_readout.units(base.system), cache_identity=dict(encode_report_sha256=approved["encode_report_sha256"]),
                   long_cache_identity=dict(encode_report_sha256=long_approved["encode_report_sha256"]),
                   counterfactual=counterfactual, long=long, seconds=round(time.perf_counter()-started, 1),
-                  tubelet=variants.tubelet_label(base.system, base.knobs))
+                  tubelet=variants.tubelet_label(base.system, base.knobs),
+                  **({"velocity": True, "velocity_units": state_readout.velocity_units(base.system)} if velocity else {}))
     _write(a.output, report)
     print(f"{base.tag} 真值：反事实 {len(counterfactual)} 个窗口，长时程 {len(long)} 条 → {a.output}")
     return report
@@ -211,6 +234,21 @@ def _load_job(a):
     truth = json.loads(a.truth.read_text())
     if truth.get("kind") != "state_readout_truth" or truth.get("dataset") != base.tag:
         raise SystemExit(f"--truth 不是 {base.tag} 的真值文件")
+    vprobe = vmeta = None
+    if state_readout.has_velocity(base.system):
+        # S25b5：二阶场景要速度探针和速度真值；S25b5 之前做的没有，拒绝（不静默只报位置）
+        if truth.get("velocity") is not True:
+            raise SystemExit(f"--truth 没有速度真值（S25b5 之前做的？）：二阶场景要用当前代码重新跑 truth")
+        try:
+            vprobe, vmeta = state_readout.load(a.probe/state_readout.VELOCITY_DIR, dataset_tag=base.tag, system=base.system,
+                                               quantity="velocity")
+        except ValueError as error:
+            raise SystemExit(f"--probe 的速度探针读不进来（{error}）")
+        if any(vmeta.get(k) != probe_meta.get(k) for k in ("cache_identity", "trajectories", "tubelet")) \
+                or vmeta["fit"]["kind"] != probe_meta["fit"]["kind"]:
+            raise SystemExit("--probe 的速度探针和位置探针不是同一份缓存上拟合的（读出 kind、缓存身份、轨迹或 tubelet 不同）")
+    a.velocity_probe = None if vprobe is None else vprobe.to(torch.device(a.device))
+    a.velocity_meta = vmeta
     device = torch.device(a.device)
     if a.cross_version:
         model, loss, selected, registration = _load_cross_version(a, job_dir, job, device)
@@ -243,6 +281,7 @@ def _load_cross_version(a, job_dir, job, device):
 
 def _report(kind, a, job_dir, job, base, probe_meta, truth, selected, registration, extra):
     from po_jepa import variants
+    from po_jepa.runtime import state_readout
     return dict(kind=kind, train_dataset=base.tag, condition=job["condition"], seed=job["seed"], updates=job["updates"],
                 job_dir=str(job_dir), units=truth["units"],
                 tubelet=variants.tubelet_label(base.system, base.knobs),
@@ -250,6 +289,10 @@ def _report(kind, a, job_dir, job, base, probe_meta, truth, selected, registrati
                 **_registration_fields(registration),
                 probe=dict(path=str(a.probe), kind=probe_meta["fit"]["kind"], weight_sha256=probe_meta["weight_sha256"],
                            cv_r2=probe_meta["fit"]["cv_r2"], variance=probe_meta["fit"]["variance"]),
+                **({} if a.velocity_meta is None else dict(
+                    velocity_units=truth["velocity_units"],
+                    velocity_probe=dict(path=str(a.probe/state_readout.VELOCITY_DIR), weight_sha256=a.velocity_meta["weight_sha256"],
+                                        cv_r2=a.velocity_meta["fit"]["cv_r2"], variance=a.velocity_meta["fit"]["variance"]))),
                 truth_sha256=hashlib.sha256(a.truth.read_bytes()).hexdigest(), **extra, scientific_conclusions_verified=False)
 
 
@@ -303,13 +346,16 @@ def cmd_rollout(a):
                 if by_id[tid]["manifest_sha256"] != sha:
                     raise SystemExit(f"轨迹 {tid}：真值记的 manifest 与缓存不符")
                 y = {t: np.asarray(by_id[tid]["y"][f"{t:g}"]) for t in long_rollout.curve_times(a.horizon)}
-                rows.append(dict(trajectory_id=tid, values=state_readout.rollout_values(model, probe, windows, y, a.horizon),
+                yv = None if a.velocity_probe is None else {t: np.asarray(by_id[tid]["v"][f"{t:g}"])
+                                                            for t in long_rollout.curve_times(a.horizon)}
+                rows.append(dict(trajectory_id=tid, values=state_readout.rollout_values(model, probe, windows, y, a.horizon,
+                                                                                        a.velocity_probe, yv),
                                  manifest_sha256=sha))
         finally:
             _restore(model, modes, state)
     finally:
         datasets._set_for_tests(old)
-    names = state_readout.rollout_names(a.horizon)
+    names = state_readout.rollout_names(a.horizon, a.velocity_probe is not None)
     means = {k: float(np.mean([r["values"][k] for r in rows])) for k in names} if rows else {}
     report = _report("state_readout_rollout", a, job_dir, job, base, probe_meta, truth, selected, registration, dict(
         dataset=long_spec.tag, horizon=a.horizon, curve_times=list(long_rollout.curve_times(a.horizon)),
@@ -346,7 +392,9 @@ def cmd_counterfactual(a):
             same = evaluation.identical_controls(w.inputs.controls, donor.inputs.controls, w.inputs.duration)
             rows.append(dict(trajectory_id=q.trajectory_id, donor_id=r["donor_id"], start_tick=q.start_tick,
                              duration_cycles=q.duration_cycles, identical_controls=bool(same),
-                             values=state_readout.counterfactual_values(model, probe, w, donor, r["y_actual"], r["y_counterfactual"])))
+                             values=state_readout.counterfactual_values(
+                                 model, probe, w, donor, r["y_actual"], r["y_counterfactual"], a.velocity_probe,
+                                 *((None, None) if a.velocity_probe is None else (r["v_actual"], r["v_counterfactual"])))))
     finally:
         _restore(model, modes, state)
     report = _report("state_readout_counterfactual", a, job_dir, job, base, probe_meta, truth, selected, registration, dict(

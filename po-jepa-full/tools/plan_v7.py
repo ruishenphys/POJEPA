@@ -9,7 +9,7 @@
   zero   ：一直不动；
   random ：随机动作；
   oracle ：同样的 CEM，但代价用真值仿真器里的状态距离（能做到多好的上界）。
-成功判据（--success 可改）：最终状态误差 ≤ 0.5 × 不动时的误差（对所有场景通用）；小球场景另报受控小球到目标的平均距离（像素）。
+成功判据（--success 可改）：最终状态误差 ≤ 0.5 × 不动时的误差（二阶场景另并入速度，见下面 S25b5）；小球场景另报受控小球到目标的平均距离（像素）。
 “状态误差”用的状态摘要（报告里的 state_summary）：小球场景是受控小球位置；advection_diffusion 是 16×16 平均浓度场；
 S21b 新场景 gray_scott 是 U、V 的 16×16 池化场（512 维，和 advection_diffusion 同一类），push 是方块位姿
 (b_x, b_y, size/2·θ)，也就是要把方块推到目标，推杆在哪不算。push 的真值规划（oracle）代价用完整状态
@@ -18,8 +18,8 @@ S21b 新场景 gray_scott 是 U、V 的 16×16 池化场（512 维，和 advecti
 每 2 个 tick 一段，方向 = 起点时推杆指向方块中心的方向 ± 30° 内均匀，幅值 ∈ [0.25, 0.5]，同样要求方块位姿和“不动”差 ≥ 0.15。
 S25a 二阶场景（po_jepa.configuration）：状态摘要是画面上看得到的位置——pendulum 摆锤 (sin θ, −cos θ)、cart_pole 小车和摆锤
 (x, x + l·sin θ, l·cos θ)、spring_chain 和 bouncing_balls 第 0 个（受控）质点/球的位置、wave 是 u 的 16×16 池化场（256 维，
-场，目标门槛按 5%）；速度不计入（目标只是一帧画面）。真值规划的代价也用这个摘要；目标动作与粒子类场景相同（均匀随机，
-每 2 tick 一段）。“不动”在二阶场景里不是停住：惯性和振荡照样在走，成功判据照旧是“误差 ≤ 0.5 × 不动时的误差”。
+场，目标门槛按 5%）；S25a 时速度不计入（目标只是一帧画面），S25b5 起成功判据并入速度（见下）。真值规划的代价也用这个摘要（S25b5 起接上 τ·速度）；目标动作与粒子类场景相同（均匀随机，
+每 2 tick 一段）。“不动”在二阶场景里不是停住：惯性和振荡照样在走，成功判据的基准仍是“不动时的位置误差”。
 spring_chain 的目标门槛是 0.03（GOAL_GAP）：弹簧硬（k = 16），8 个 tick 的随机动作只把受控质点推开约 0.04（≈ 2 像素），
 0.15 根本够不着（S25a 实测，docs/segments/S25a.md §3）。
 二阶场景的编码跟训练数据集的调节项走，和 encode_v7 写的缓存是同一条规则：不带 tubelet=pair 是单帧复制（dup，特征看不到速度）；
@@ -28,7 +28,15 @@ spring_chain 的目标门槛是 0.03（GOAL_GAP）：弹簧硬（k = 16），8 �
   起点（tick start）    ：前一帧是测试轨迹自己在 tick start−1 的画面（start = 0 时是 t = −1 那一帧），与缓存里那一行同一个输入；
   目标（tick start+H）  ：前一帧是目标动作序列走到 tick start+H−1 的状态（H = 1 时是起点状态）；
   重规划（执行到 tick t）：前一帧是实际执行轨迹在 tick t−1 的状态（--replan 1 时就是上一次执行后的状态）。
-所以目标特征里带着“按目标动作到达时”的速度；代价仍是到目标特征的 JEPA 距离，状态误差和成功判据仍只看位置（构形）。
+所以目标特征里带着“按目标动作到达时”的速度；模型规划的代价仍是到目标特征的 JEPA 距离。
+S25b5（Jerry 2026-11-25 定，新口径）：二阶场景的成功判据并入速度，“到了位置但速度不对”算失败。e_q 是规划摘要（位置）的
+误差，e_v 是规划摘要的时间导数（configuration.controlled_velocity，世界单位/秒）的误差，e_q0 是“不动”的位置误差：
+  成功 ⇔ max(e_q, τ·e_v) ≤ --success × e_q0，τ = VELOCITY_SECONDS = 1 tick = 0.25 s（两帧编码的间隔）；
+也就是两帧间隔内速度误差造成的位移不超过位置的容差。真值规划（oracle）的代价相应是 √(e_q² + τ²·e_v²)（oracle_target
+接上 τ·速度），这样它仍是新判据下的上界。目标的抽法和门槛（goal_far_enough）不变，只看位置，所以回合和以前是同一批。
+判据属于任务本身，单帧复制（dup，特征看不到速度）的对照也用同一条。报告另给只看位置的旧成功率
+（position_only_success_rate，即 e_q ≤ --success × e_q0）和速度误差；二阶场景的 success_rate、oracle 的各项与 S25b5 之前
+的结果不可比。一阶场景和 push 的状态里没有速度，判据、代价和报告逐位不变。
 --test-variant 是整个替换训练数据集的调节项：训练和测试两边的 tubelet 必须相同，否则两帧特征上训练的模型会读到单帧复制的
 特征（或反过来），直接拒绝。
 
@@ -65,12 +73,38 @@ def summary(system_name, system, v, state):
     return state[:2]                                             # 受控小球（多粒子场景是第 0 个）
 
 
+VELOCITY_SECONDS = .25                  # S25b5：速度误差换成位移用的时间 τ = 1 tick（见文件头）
+
+
+def summary_velocity(system_name, system, v, state):
+    """S25b5：二阶场景规划摘要的时间导数（世界单位/秒；wave 是 u_t 的池化场）；其他场景没有速度，返回 None。"""
+    import numpy as np
+    from po_jepa import configuration, variants
+    if system_name not in variants.SECOND_ORDER:
+        return None
+    return configuration.controlled_velocity(system_name, system.hidden(np.asarray(state)[None])[0], dict(v.params))
+
+
 def oracle_target(system_name, system, v, state):
-    """真值规划的代价用的状态：push 是完整状态（见文件头），其他场景就是 summary。"""
+    """真值规划的代价用的状态：push 是完整状态（见文件头）；二阶场景是 [summary, τ·summary_velocity]（S25b5），
+    到目标的 L2 就是 √(e_q² + τ²·e_v²)；其他场景就是 summary。"""
     import numpy as np
     if system_name == "push":
         return np.array([state[0], state[1], state[2], state[3], .5*v.param("push", "size")*state[4]])
-    return summary(system_name, system, v, state)
+    q = summary(system_name, system, v, state)
+    vel = summary_velocity(system_name, system, v, state)
+    return q if vel is None else np.concatenate((q, VELOCITY_SECONDS*vel))
+
+
+def success(e_q, e_v, e_q0, ratio):
+    """S25b5 成功判据（逐回合，数组）：没有速度（e_v 是 None）时 e_q ≤ ratio·e_q0（与以前相同）；
+    有速度时 max(e_q, τ·e_v) ≤ ratio·e_q0。e_q0 下限 1e-9（与以前相同）。"""
+    import numpy as np
+    tol = ratio*np.maximum(np.asarray(e_q0, dtype=np.float64), 1e-9)
+    e = np.asarray(e_q, dtype=np.float64)
+    if e_v is not None:
+        e = np.maximum(e, VELOCITY_SECONDS*np.asarray(e_v, dtype=np.float64))
+    return e <= tol
 
 
 def goal_controls(system_name, state, horizon, goal_rng):
@@ -298,6 +332,8 @@ def main():
         return system.draw(state[None], tid, v, ticks=[tick])[0]
 
     summary_state = lambda state: summary(spec.system, system, v, state)
+    velocity_state = lambda state: summary_velocity(spec.system, system, v, state)      # S25b5：一阶场景、push 是 None
+    has_velocity = spec.system in variants.SECOND_ORDER
     oracle_state = lambda state: oracle_target(spec.system, system, v, state)
     goal_actions = lambda state: goal_controls(spec.system, state, a.horizon, goal_rng)
 
@@ -352,7 +388,8 @@ def main():
         history0 = systems.command_ticks(systems.commanded_controls(tid))     # 起点前已下达的命令（有延迟时还在排队）
         history0[start:] = 0.
         # 目标：同起点按随机下达动作（每 2 个 tick 换一次）走 H 个 tick；与“不动”的结果差得足够远才用（最多重抽 20 次）
-        zero_final = summary_state(simulate(tid, s0, start, np.zeros((a.horizon, 2)), history0, render=False)[0])
+        zero_state = simulate(tid, s0, start, np.zeros((a.horizon, 2)), history0, render=False)[0]
+        zero_final = summary_state(zero_state)
         for _ in range(20):
             gu = goal_actions(s0)
             goal_state, goal_frame = simulate(tid, s0, start, gu, history0)
@@ -370,7 +407,7 @@ def main():
             if clip.shape[0] != systems.TICKS+2 or not np.array_equal(clip[start+1], first_frame):
                 raise SystemExit(f"轨迹 {tid}：frames_with_prev 的第 {start+1} 帧和重画的起点画面不一致")
             first_frame = clip[start:start+2]
-        result = {}
+        result, velocity = {}, {}
         for planner in ("model",) if a.no_baselines else ("model", "oracle", "random"):
             state, t, frame, history = s0, start, None, history0.copy()
             if planner == "random":
@@ -391,8 +428,13 @@ def main():
                         frame_z = encode(frame, tid)
             err = float(np.linalg.norm(summary_state(state)-g))
             result[planner] = err
+            if has_velocity:
+                velocity[planner] = float(np.linalg.norm(velocity_state(state)-velocity_state(goal_state)))
         zero_err = float(np.linalg.norm(zero_final-g))
-        rows.append(dict(trajectory_id=tid, start_tick=start, goal_valid=bool(valid), zero=zero_err, **result))
+        if has_velocity:
+            velocity["zero"] = float(np.linalg.norm(velocity_state(zero_state)-velocity_state(goal_state)))
+        rows.append(dict(trajectory_id=tid, start_tick=start, goal_valid=bool(valid), zero=zero_err, **result,
+                         **({"velocity": velocity} if has_velocity else {})))
         shown = "  ".join(f"{k} {val:.3f}" for k, val in result.items())
         print(f"[{condition} {spec.tag}] 回合 {ep+1}/{a.episodes}：{shown}  zero {zero_err:.3f}" + ("" if valid else "  （目标无效）") +
               f"  {time.perf_counter()-started:.0f}s", flush=True)
@@ -406,17 +448,31 @@ def main():
                                      configuration.PX.get(spec.system, 27.))       # S25a：二阶场景每单位像素数
     def stats(name):
         e = np.array([r[name] for r in scored]); z = np.array([r["zero"] for r in scored])
-        ok = (e <= a.success*np.maximum(z, 1e-9))
-        return dict(success_rate=float(ok.mean()), mean_error=float(e.mean()),
-                    mean_error_px=None if relative_gap else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
+        ev = np.array([r["velocity"][name] for r in scored]) if has_velocity else None
+        ok = success(e, ev, z, a.success)
+        out = dict(success_rate=float(ok.mean()), mean_error=float(e.mean()),
+                   mean_error_px=None if relative_gap else float(e.mean()*scale), relative_to_zero=float((e/np.maximum(z, 1e-9)).mean()))
+        if has_velocity:           # S25b5：只看位置的旧判据、速度误差（世界单位/秒；乘 PX 是像素/秒，wave 是场的 L2/秒）
+            out.update(position_only_success_rate=float(success(e, None, z, a.success).mean()),
+                       mean_velocity_error=float(ev.mean()),
+                       mean_velocity_error_px_per_s=None if relative_gap else float(ev.mean()*scale))
+        return out
     summary_name = {"advection_diffusion": "16×16 平均浓度场", "gray_scott": "U、V 的 16×16 池化场（512 维）",
                     "push": "方块位姿 (b_x, b_y, size/2·θ)", **configuration.SUMMARY_NAME}.get(spec.system, "受控小球位置")
     report = dict(kind="planning", job=str(job_dir), condition=condition, train_dataset=base.tag, dataset=spec.tag,
                   seed=job["seed"], horizon_ticks=a.horizon, replan_ticks=a.replan, state_summary=summary_name,
-                  cem=dict(samples=a.samples, oracle_samples=a.oracle_samples, iterations=a.iterations, elites=a.elites), success_rule=f"误差 ≤ {a.success} × 不动时的误差",
+                  cem=dict(samples=a.samples, oracle_samples=a.oracle_samples, iterations=a.iterations, elites=a.elites),
+                  success_rule=(f"max(位置误差, {VELOCITY_SECONDS:g} s × 速度误差) ≤ {a.success} × 不动时的位置误差（S25b5，并入速度）"
+                                if has_velocity else f"误差 ≤ {a.success} × 不动时的误差"),
                   model=stats("model"), oracle=None if a.no_baselines else stats("oracle"),
                   random=None if a.no_baselines else stats("random"),
-                  zero=dict(mean_error=float(np.mean([r["zero"] for r in scored]))), episodes=rows,
+                  zero=dict(mean_error=float(np.mean([r["zero"] for r in scored])),
+                            **({"mean_velocity_error": float(np.mean([r["velocity"]["zero"] for r in scored]))} if has_velocity else {})),
+                  episodes=rows,
+                  **({"success_metric": dict(version="S25b5", velocity_seconds=VELOCITY_SECONDS,
+                                             oracle_cost="√(位置误差² + τ²·速度误差²)",
+                                             note="二阶场景并入速度的新口径，与 S25b5 之前的 success_rate、oracle 结果不可比；"
+                                                  "position_only_success_rate 是只看位置的旧判据")} if has_velocity else {}),
                   goals=dict(valid=len(scored), invalid=len(rows)-len(scored),
                              rule="与“不动”的差 ≥ 0.05 × 目标范数（场）或 ≥ 0.15（其他）；20 次重抽都不够的回合不计分"
                                   + (f"；本场景门槛 {GOAL_GAP[spec.system]}" if spec.system in GOAL_GAP else "")),
