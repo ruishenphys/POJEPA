@@ -336,7 +336,9 @@ def _jobs(*args):
 
 def test_v8_jobs_default_is_unchanged_and_second_order_is_opt_in():
     default = _jobs("--stage", "full")
-    assert not any(f"--system {s} " in l for l in default for s in SECOND) and not any("二阶" in l for l in default[:1])
+    # S25b4：默认里的二阶场景都是两帧编码（tubelet=pair）；单帧复制要显式 --scenes 才排，默认没有警告行
+    assert all("--variant tubelet=pair " in l for l in default for s in SECOND if f"--system {s} " in l)
+    assert any(f"--system {s} " in l for l in default for s in SECOND) and not any("二阶" in l for l in default[:1])
     lines = _jobs("--stage", "full", "--scenes", ",".join(SECOND))
     assert lines[0].startswith("# 注意：二阶场景") and "dup" in lines[0]
     cmds = [l for l in lines if l and not l.startswith("#")]
