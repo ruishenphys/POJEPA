@@ -24,6 +24,7 @@ S25b5（Jerry 2026-11-25 定，新口径）：二阶场景另读速度（定义�
 fit 在 --output 下另写 velocity/ 子目录（速度探针），truth 另写 v_actual、v_counterfactual 和长时程的 v，rollout、counterfactual
 从 --probe 的 velocity/ 读速度探针，结果多出 vel_ 开头的速度指标（反事实汇总在 overall.velocity、by_duration.<t>.velocity）。
 S25b5 之前拟合的二阶场景探针和真值没有速度，rollout、counterfactual 会拒绝，要用当前代码重做 fit、truth。
+速度探针记下同一次 fit 写的位置探针的数组 SHA（position_probe），读的时候核来源字段齐全、相同并按它绑定（S25b5-fix1）。
 """
 import argparse
 from dataclasses import replace
@@ -142,8 +143,10 @@ def cmd_fit(a):
                       f"（λ = 10^{r['lambda_exponent']:g}·trace/n{'，在网格边上' if r['lambda_at_grid_edge'] else ''}）")
     print(f"{spec.tag} 探针（{a.kind}）：{show(record)} → {a.output}")
     if velocity:
+        # S25b5-fix1（Codex 审核 F1）：速度探针记下配对的位置探针的两个数组 SHA，读的时候按它绑定
         vmeta = state_readout.save(vprobe, a.output/state_readout.VELOCITY_DIR,
-                                   dict(common, quantity="velocity", units=state_readout.velocity_units(spec.system)))
+                                   dict(common, quantity="velocity", units=state_readout.velocity_units(spec.system),
+                                        position_probe=dict(weight_sha256=meta["weight_sha256"], mean_x_sha256=meta["mean_x_sha256"])))
         print(f"{spec.tag} 速度探针（{a.kind}）：{show(vrecord)} → {a.output/state_readout.VELOCITY_DIR}")
         meta = dict(meta, velocity=vmeta)
     return meta
@@ -244,9 +247,7 @@ def _load_job(a):
                                                quantity="velocity")
         except ValueError as error:
             raise SystemExit(f"--probe 的速度探针读不进来（{error}）")
-        if any(vmeta.get(k) != probe_meta.get(k) for k in ("cache_identity", "trajectories", "tubelet")) \
-                or vmeta["fit"]["kind"] != probe_meta["fit"]["kind"]:
-            raise SystemExit("--probe 的速度探针和位置探针不是同一份缓存上拟合的（读出 kind、缓存身份、轨迹或 tubelet 不同）")
+        _check_velocity_pair(probe_meta, vmeta)
     a.velocity_probe = None if vprobe is None else vprobe.to(torch.device(a.device))
     a.velocity_meta = vmeta
     device = torch.device(a.device)
@@ -258,6 +259,23 @@ def _load_job(a):
         model, loss, selected, registration = v7jobs.load_for_evaluation(
             job["condition"], None if job["condition"] == "identity" else job_dir, device)
     return job_dir, job, base, probe.to(device), probe_meta, truth, model, loss, selected, registration, device
+
+
+def _check_velocity_pair(probe_meta, vmeta):
+    """S25b5-fix1（Codex 审核 F1）：速度探针必须是和位置探针同一次 fit 写的。两边的来源字段（缓存身份、轨迹、tubelet、
+    读出 kind）都要在且有效、彼此相同（原来用 .get()，两边都缺时 None == None 放行）；两边的 mean_x 是同一份特征的列均值，
+    SHA 要相同；速度探针记的配对位置探针（position_probe 的 weight、mean_x SHA）要等于这个位置探针的。"""
+    for name, m in (("位置", probe_meta), ("速度", vmeta)):
+        ci = m.get("cache_identity")
+        if not (isinstance(ci, dict) and isinstance(ci.get("encode_report_sha256"), str) and len(ci["encode_report_sha256"]) == 64
+                and isinstance(m.get("trajectories"), list) and m["trajectories"] and m.get("tubelet") in ("dup", "pair")
+                and isinstance(m.get("mean_x_sha256"), str)):
+            raise SystemExit(f"--probe 的{name}探针缺来源字段（缓存身份、轨迹、tubelet、mean_x SHA）：用当前代码重新跑 fit")
+    if any(vmeta[k] != probe_meta[k] for k in ("cache_identity", "trajectories", "tubelet", "mean_x_sha256")) \
+            or vmeta["fit"]["kind"] != probe_meta["fit"]["kind"]:
+        raise SystemExit("--probe 的速度探针和位置探针不是同一份缓存上拟合的（读出 kind、缓存身份、轨迹、tubelet 或特征均值不同）")
+    if vmeta.get("position_probe") != dict(weight_sha256=probe_meta["weight_sha256"], mean_x_sha256=probe_meta["mean_x_sha256"]):
+        raise SystemExit("--probe 的速度探针记的配对位置探针不是这一个（不是同一次 fit 写的）")
 
 
 def _load_cross_version(a, job_dir, job, device):

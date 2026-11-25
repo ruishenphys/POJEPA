@@ -274,11 +274,14 @@ def test_counterfactual_values_and_summary_with_velocity(active):
     vel = [dict(cf_true=2., cf_pred=1., cf_error=1., cf_inner=2., actual_readout=4., actual_floor=1.),
            dict(cf_true=3., cf_pred=3., cf_error=6., cf_inner=-9., actual_readout=2., actual_floor=3.)]
     rows = [dict(identical_controls=False, values={**a, **{"vel_"+k: x for k, x in b.items()}}) for a, b in zip(pos, vel)]
+    big = dict(cf_true=0., cf_pred=9., cf_error=9., cf_inner=0., actual_readout=3., actual_floor=1.)
+    rows.append(dict(identical_controls=True, values={**big, **{"vel_"+k: (100.*x if k != "cf_true" else 0.) for k, x in big.items()}}))
     s = state_readout.counterfactual_summary(rows)
     assert s["explained"] == pytest.approx(1-1/26) and s["gain"] == pytest.approx(25/26)        # 位置汇总不变
     sv = s["velocity"]
     assert sv["explained"] == pytest.approx(1-37/13) and sv["gain"] == pytest.approx(-7/13)
-    assert sv["cos_mean"] == pytest.approx((1.-1.)/2) and sv["actual_readout"] == 3. and sv["windows"] == 2
+    assert sv["cos_mean"] == pytest.approx((1.-1.)/2) and sv["windows"] == 3 and sv["windows_with_different_actions"] == 2
+    assert sv["actual_readout"] == pytest.approx((4.+2.+300.)/3)          # 均值取全部窗口；cos、explained、gain 不含动作相同的
     assert "velocity" not in state_readout.counterfactual_summary([dict(identical_controls=False, values=pos[0])])
 
 
@@ -346,7 +349,8 @@ def test_fit_and_truth_write_velocity(pair_readout, active):
     assert (pm["quantity"], pm["units"], pm["velocity_probe"]) == ("position", "px", "velocity")
     assert (vm["quantity"], vm["units"], vm["tubelet"], vm["trajectories"]) == ("velocity", "px_per_s", "pair", list(VAL_IDS))
     assert vm["fit"]["samples"] == pm["fit"]["samples"] == 4*33 and vm["fit"]["outputs"] == 2
-    assert vm["cache_identity"] == pm["cache_identity"]
+    assert vm["cache_identity"] == pm["cache_identity"] and vm["mean_x_sha256"] == pm["mean_x_sha256"]
+    assert vm["position_probe"] == dict(weight_sha256=pm["weight_sha256"], mean_x_sha256=pm["mean_x_sha256"])
     active(PAIR)
     S = systems.get()
     vp, _ = state_readout.load(probe/"velocity", dataset_tag=PAIR.tag, system="pendulum", quantity="velocity")
@@ -358,6 +362,13 @@ def test_fit_and_truth_write_velocity(pair_readout, active):
     np.testing.assert_allclose(r["v_actual"], 80.*_pend_v(states[14]), rtol=0, atol=1e-12)
     np.testing.assert_allclose(r["y_actual"], 80.*np.array([math.sin(states[14][0]), -math.cos(states[14][0])]), rtol=0, atol=1e-12)
     assert r["v_counterfactual"] != r["v_actual"]
+    # 反事实终点（S25f 已核过的续算路径 probe_actions.counterfactual_end）：速度和位置真值来自同一个状态，比例按手写公式
+    sys.path.insert(0, str(ROOT/"tools"))
+    import probe_actions
+    from po_jepa import simulation
+    _, cf_state, _ = probe_actions.counterfactual_end(S, simulation, 37, r["donor_id"], 10, 4)
+    np.testing.assert_allclose(r["v_counterfactual"], 80.*_pend_v(cf_state), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(r["y_counterfactual"], 80.*np.array([math.sin(cf_state[0]), -math.cos(cf_state[0])]), rtol=0, atol=1e-12)
     active(PAIR_LONG)
     long_states, _ = systems.get().frames(39)
     active(PAIR)
@@ -412,6 +423,16 @@ def test_rollout_and_counterfactual_tools_report_velocity(pair_caches, pair_read
         assert all("vel_cf_error" in x["values"] for x in c["rows"])
         if name == "identity":
             assert c["overall"]["velocity"]["explained"] == 0. and c["overall"]["velocity"]["gain"] == 0.
+            # identity：ẑ_A = ẑ_B，预测的 Δ 为 0，vel_cf_error = ‖v(s_B) − v(s_A)‖，两个终点按手写公式独立算
+            row = next(x for x in c["rows"] if (x["trajectory_id"], x["start_tick"], x["duration_cycles"]) == (37, 10, 4.))
+            active(PAIR)
+            sys.path.insert(0, str(ROOT/"tools"))
+            import probe_actions
+            from po_jepa import simulation
+            actual, cf_state, _ = probe_actions.counterfactual_end(systems.get(), simulation, 37, row["donor_id"], 10, 4)
+            want = float(np.linalg.norm(80.*(_pend_v(cf_state)-_pend_v(actual))))
+            assert want > 0 and row["values"]["vel_cf_error"] == pytest.approx(want, rel=1e-9)
+            assert row["values"]["vel_cf_true"] == pytest.approx(want, rel=1e-9) and row["values"]["vel_cf_pred"] == 0.
         else:
             assert c["overall"]["velocity"]["cf_pred"] > 0
     active(PAIR)
@@ -437,7 +458,30 @@ def test_tools_refuse_second_order_inputs_without_velocity(pair_caches, pair_rea
     (tmp_path/"mixed"/"velocity"/"probe.json").write_text(json.dumps(m))
     with pytest.raises(SystemExit, match="同一份缓存"):
         run(tmp_path/"mixed", truth, "c")
-    assert not any((tmp_path/f"{n}.json").exists() for n in "abc")
+    # S25b5-fix1（Codex 审核 F1）：两边都缺来源字段、特征均值 SHA 不同、配对的位置探针不是这一个，都拒绝
+    def tampered(name, edit_pos, edit_vel):
+        shutil.copytree(probe, tmp_path/name)
+        for sub, edit in (("", edit_pos), ("velocity", edit_vel)):
+            f = tmp_path/name/sub/"probe.json"; m = json.loads(f.read_text()); edit(m); f.write_text(json.dumps(m))
+        return tmp_path/name
+    drop = lambda m: [m.pop(k) for k in ("cache_identity", "trajectories", "tubelet")]
+    keep = lambda m: None
+    with pytest.raises(SystemExit, match="缺来源字段"):
+        run(tampered("bare", drop, drop), truth, "d")
+    with pytest.raises(SystemExit, match="缺来源字段"):
+        run(tampered("bare_v", keep, lambda m: m.pop("cache_identity")), truth, "e")
+    mean_dir = tampered("mean", keep, keep)                      # 速度探针换一份特征均值（数组和它的 SHA 一起换，单探针加载照样通过）
+    mx = np.load(mean_dir/"velocity"/"mean_x.npy"); np.save(mean_dir/"velocity"/"mean_x.npy", mx+np.float32(1.))
+    vf = mean_dir/"velocity"/"probe.json"; m = json.loads(vf.read_text())
+    m["mean_x_sha256"] = state_readout._sha(mean_dir/"velocity"/"mean_x.npy"); vf.write_text(json.dumps(m))
+    state_readout.load(mean_dir/"velocity", dataset_tag=PAIR.tag, system="pendulum", quantity="velocity")
+    with pytest.raises(SystemExit, match="特征均值"):
+        run(mean_dir, truth, "f")
+    with pytest.raises(SystemExit, match="配对位置探针"):
+        run(tampered("pair", keep, lambda m: m["position_probe"].update(weight_sha256="0"*64)), truth, "g")
+    with pytest.raises(SystemExit, match="配对位置探针"):
+        run(tampered("nopair", keep, lambda m: m.pop("position_probe")), truth, "h")
+    assert not any((tmp_path/f"{n}.json").exists() for n in "abcdefgh")
     active(PAIR)
 
 
@@ -456,3 +500,34 @@ def test_plan_velocity_error_is_the_executed_end_against_the_goal(tmp_path, monk
     assert ep["model"] == pytest.approx(float(np.linalg.norm(sin_cos(end)-sin_cos(goal))), rel=1e-12)
     ok = max(ep["model"], .25*ep["velocity"]["model"]) <= .5*ep["zero"]
     assert rep["model"]["success_rate"] == float(ok) and rep["model"]["position_only_success_rate"] == float(ep["model"] <= .5*ep["zero"])
+
+
+def test_plan_baseline_velocity_errors_are_the_executed_ends(tmp_path, monkeypatch, active):
+    """S25b5-fix1（Codex 审核 F2）：oracle、random 的速度误差也从实际执行的终点独立算（手写摆锤公式）。--replan = 时域 3、
+    CEM 1 轮、oracle 4 个样本：续算次序是 [不动, 目标 × n, 模型执行, oracle 候选 × 4, oracle 执行, 随机]。"""
+    from test_s25b2_online_pair import _job as job_dir, _load, _spec
+    spec = _spec("pendulum", "tubelet=pair"); active(spec)
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    plan = _load("plan_v7")
+    paths, original = [], plan.rollout_path
+    def spy(*args):
+        path = original(*args); paths.append(dict(actions=np.array(args[6]), start=args[5], end=path[-1].copy())); return path
+    monkeypatch.setattr(plan, "rollout_path", spy)
+    out = tmp_path/"plan.json"
+    monkeypatch.setattr(sys, "argv", ["plan_v7.py", "--job", str(job_dir(tmp_path, spec.tag)), "--device", "cpu", "--output", str(out),
+                                      "--fake-encoder", "--episodes", "1", "--horizon", "3", "--replan", "3", "--samples", "8",
+                                      "--iterations", "1", "--oracle-samples", "4"])
+    plan.main()
+    rep = json.loads(out.read_text(encoding="utf-8"))
+    ep, = rep["episodes"]
+    n_goal = len(paths)-8
+    assert n_goal >= 1 and not paths[0]["actions"].any()
+    zero, goal, model, oracle, random = (paths[i]["end"] for i in (0, n_goal, n_goal+1, -2, -1))
+    assert all(p["start"] == ep["start_tick"] and len(p["actions"]) == 3 for p in paths)
+    sin_cos = lambda h: np.array([math.sin(h[0]), -math.cos(h[0])])
+    for name, end in (("zero", zero), ("model", model), ("oracle", oracle), ("random", random)):
+        assert ep["velocity"][name] == pytest.approx(float(np.linalg.norm(_pend_v(end)-_pend_v(goal))), rel=1e-12), name
+        assert ep[name] == pytest.approx(float(np.linalg.norm(sin_cos(end)-sin_cos(goal))), rel=1e-12), name
+    for name in ("model", "oracle", "random"):
+        ok = max(ep[name], .25*ep["velocity"][name]) <= .5*ep["zero"]
+        assert rep[name]["success_rate"] == float(ok) and rep[name]["mean_velocity_error_px_per_s"] == pytest.approx(80.*ep["velocity"][name])
