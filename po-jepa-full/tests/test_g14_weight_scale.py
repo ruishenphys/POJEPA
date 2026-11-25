@@ -165,12 +165,17 @@ def test_run_py_passes_scale_flags(monkeypatch, tmp_path):
                 env=dict(PO_JEPA_TIME_WEIGHT_SCALE="0.25"))
 
 
-@pytest.mark.parametrize("extra", [("calibrate",), ("calibrate-addon",), ("check-addon",),
+@pytest.mark.parametrize("extra", [("calibrate",), ("calibrate-addon",), ("check-addon",), ("check",),
+                                   ("equal-step", "--condition", "po_jepa_no_consistency", "--training-run", "a", "--limit-run", "b"),
                                    ("run", "--condition", "po_jepa_no_consistency"), ("run", "--condition", "transformer_consistency"),
                                    ("run", "--condition", "po_jepa_rollout_sup"), ("run", "--condition", "fixed_fourier")])
 def test_run_py_refuses_scale_where_it_has_no_meaning(monkeypatch, tmp_path, extra):
     with pytest.raises(SystemExit):
         _run_py(monkeypatch, tmp_path, *extra, "--time-weight-scale", "0.5")
+    # G14-fix1（Codex G14 P1）：不给参数、只继承环境变量也拦
+    with pytest.raises(SystemExit):
+        _run_py(monkeypatch, tmp_path, *extra, env=dict(PO_JEPA_SPACE_WEIGHT_SCALE="0.25"))
+    monkeypatch.delenv("PO_JEPA_SPACE_WEIGHT_SCALE")
     _, code, _ = _run_py(monkeypatch, tmp_path, *extra, "--time-weight-scale", "1")   # 默认值照常放行
     assert code == 0
 
@@ -194,8 +199,8 @@ def _relative(a, b):
 
 @pytest.mark.parametrize("init", ["xavier", "zero"])
 def test_no_consistency_partition_only_rounds(init):
-    """权重都为 0 时，二等分和多段切分的 JEPA 损失逐位相同（同一条长支），整体梯度只差 float32 舍入（长支在多段切分里和各段
-    一起批量计算，求和顺序不同）：相对差 < 1e-4（实测 0～2e-5，随线程数变）。AdamW 会把梯度几乎为 0 的个别参数上的舍入放大，所以两边训练不逐位相同；
+    """权重都为 0 时，二等分和多段切分的 JEPA 损失逐位相同（同一条长支），整体梯度只差 float32 舍入（零权重时一致性分支仍在
+    计算图里，两种切分的图不同，浮点梯度累加的过程不同；精确的内部来源没有追）：相对差 < 1e-4（实测 0～2e-5，随线程数变）。AdamW 会把梯度几乎为 0 的个别参数上的舍入放大，所以两边训练不逐位相同；
     G14 里 no_consistency 不分切分，dyadic-zero 那一条只当数值噪声（同设定的另一次实现）参照。"""
     (gb, lb), (gd, ld) = (_first_gradient(p, "no_consistency", init, (0., 0.)) for p in ("bisection", "dyadic"))
     assert lb["jepa"] == ld["jepa"] and lb["total"] == ld["total"]
@@ -206,3 +211,45 @@ def test_time_only_partition_changes_the_gradient():
     """对照：时间权重为正时，切分真的改变梯度（上面的检查不是恒真的）。"""
     (gb, _), (gd, _) = (_first_gradient(p, "time_only", "xavier", (.5, 0.)) for p in ("bisection", "dyadic"))
     assert _relative(gb, gd) > 1e-3
+
+
+# ---------- G14-fix1（Codex G14 P1、P2）：子进程里只靠环境变量也拦住 ----------
+
+@pytest.mark.parametrize("condition", ["po_jepa_no_consistency", "identity", "transformer_consistency", "fixed_fourier",
+                                       "po_jepa_rollout_sup", "koopman", "matched_transformer"])
+def test_build_condition_refuses_scale_for_other_conditions(v7, monkeypatch, condition):
+    from po_jepa.runtime import comparison
+    monkeypatch.setenv(checks.SPACE_SCALE_ENV, "0.5")
+    with pytest.raises(ValueError, match="缩放"):
+        comparison.build_condition(condition, torch.device("cpu"))
+
+
+def test_build_condition_scales_the_allowed_conditions(v7, monkeypatch):
+    from po_jepa.runtime import comparison
+    base = {c: comparison.build_condition(c, torch.device("cpu"))[1] for c in checks.WEIGHT_SCALE_CONDITIONS}
+    monkeypatch.setenv(checks.TIME_SCALE_ENV, "0.25")
+    for c, loss in base.items():
+        scaled = comparison.build_condition(c, torch.device("cpu"))[1]
+        assert scaled.time_weight == loss.time_weight*0.25 and scaled.space_weight == loss.space_weight
+
+
+def test_addon_entry_and_calibration_refuse_scale(v7, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from po_jepa.runtime.addon import calibrate, entry
+    monkeypatch.setenv(checks.TIME_SCALE_ENV, "0.5")
+    for command in ("calibrate-addon", "check-addon"):
+        with pytest.raises(ValueError, match="缩放"):
+            entry.execute(SimpleNamespace(command=command, device="cpu", output=str(tmp_path/command), features_root=str(tmp_path),
+                                          base_calibration="local", seed=1703))
+        assert not (tmp_path/command).exists()
+    with pytest.raises(ValueError, match="缩放"):
+        calibrate.calibrate_addon(tmp_path, tmp_path/"out", torch.device("cpu"), base="local")
+
+
+def test_equal_step_refuses_scale(v7, monkeypatch, tmp_path):
+    from po_jepa.runtime import v7jobs
+    monkeypatch.setenv(checks.TIME_SCALE_ENV, "0.5")
+    with pytest.raises(ValueError, match="equal-step"):
+        v7jobs.equal_step_job(tmp_path, tmp_path/"out", torch.device("cpu"), "po_jepa_no_consistency",
+                              training_run=tmp_path, limit_run=tmp_path)
+    assert not (tmp_path/"out").exists()

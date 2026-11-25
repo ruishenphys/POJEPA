@@ -210,6 +210,7 @@ def _publish(path: Path, text: str) -> None:
 def calibrate_addon(features, output, device, base="v7-import") -> dict:
     """16 §3.2：output 是已建好的空目录。依次标定 CALIBRATED_CONDITIONS，全部完成后写记录和补跑标定文件，返回写入的内容。
     base（S26a）是基础标定的来源（BASE_CALIBRATIONS）；记录里的 v7_calibration_* 指的就是这份基础标定，另记 base_calibration。"""
+    check.require_weight_scale_allowed(None, "补跑标定")   # G14-fix1（Codex G14 P1）：直接调用也拦住
     path = calibration.addon_calibration_path()
     if path.exists():
         raise ValueError(f"补跑标定文件已存在：{path}。它可能已被训练任务用过，不覆盖；确实要重标定请先告诉 Jerry")

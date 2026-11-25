@@ -94,6 +94,9 @@ FULL_MAX_MODES = 1024
 TIME_SCALE_ENV = "PO_JEPA_TIME_WEIGHT_SCALE"
 SPACE_SCALE_ENV = "PO_JEPA_SPACE_WEIGHT_SCALE"
 WEIGHT_SCALES = ("1", "0.5", "0.25")
+# λ 来自基础标定（而不是补跑标定或恒为 0）的条件，才能缩放；其余条件在建模型时拒绝（G14-fix1，Codex G14 P1：不靠入口参数，
+# 只设环境变量也拦得住）
+WEIGHT_SCALE_CONDITIONS = ("po_jepa_full", "po_jepa_time_only", "po_jepa_space_only")
 
 def v7_variant() -> dict:
     """S28b：当前 v7 变体 dict(temporal_partition, readout_init)，取自两个环境变量，不设取默认（二等分、Xavier）。
@@ -140,6 +143,18 @@ def variant_suffix(variant: dict) -> str:
     if modes != "16" or complement != "none":
         suffix += f"~K{modes}"+("c" if complement == "shared" else "")
     return suffix
+
+def weight_scaled() -> bool:
+    """G14-fix1：当前环境是否设了不是 1 的一致性权重缩放（读 v7_variant，非法值照样报错）。"""
+    variant = v7_variant()
+    return "time_weight_scale" in variant or "space_weight_scale" in variant
+
+def require_weight_scale_allowed(condition: str, what: str = "") -> None:
+    """G14-fix1：缩放下只有 WEIGHT_SCALE_CONDITIONS 能建模型；condition=None 表示标定类命令，一律拒绝。"""
+    if weight_scaled() and condition not in WEIGHT_SCALE_CONDITIONS:
+        target = f"条件 {condition}" if condition else (what or "这个命令")
+        raise ValueError(f"一致性权重缩放（{TIME_SCALE_ENV}/{SPACE_SCALE_ENV}）下不能用于{target}：只用于 "
+                         f"{', '.join(WEIGHT_SCALE_CONDITIONS)}；标定、补跑标定和同步数对照都不收缩放")
 
 def weight_scale_suffix(variant: dict) -> str:
     """G14：一致性权重缩放的标签后缀（汇总分组、结果目录名用），默认为空，否则 ~lt0.5、~ls0.25 这样，时间在前。"""

@@ -69,11 +69,6 @@ def main(argv=None):
     if args.command=='spectral-gap' and (args.condition is not None or args.training_run is not None or args.seed!=1703):
         parser.error('spectral-gap 每个场景只跑一次：不接受 --condition、--training-run，种子只用 1703')
     if args.command=='spectral-gap' and args.device!='cpu':parser.error('spectral-gap 只在 CPU 上跑：--device cpu')
-    scaled=any(v not in (None,'1') for v in (args.time_weight_scale,args.space_weight_scale))
-    if scaled and args.command in ('calibrate','sweep','calibrate-addon','check-addon'):
-        parser.error(f'{args.command} 不收 --time-weight-scale/--space-weight-scale：缩放乘在同一变体的标定值上，不另标定')
-    if scaled and args.condition not in (None,'po_jepa_full','po_jepa_time_only','po_jepa_space_only'):
-        parser.error('--time-weight-scale/--space-weight-scale 只用于 po_jepa_full、po_jepa_time_only、po_jepa_space_only（其他条件的 λ 不来自基础标定或恒为 0）')
     root=Path(__file__).resolve().parent
     # 子进程固定使用本目录的 src，避免环境里以前 pip install -e 过的旧版本（如 code-v4）被导入。
     env=dict(os.environ)
@@ -90,6 +85,12 @@ def main(argv=None):
         if value is None:continue
         if env.get(name,value)!=value:parser.error(f'{flag} {value} 和环境变量 {name}={env[name]} 不一致：去掉其中一个')
         env[name]=value
+    # G14-fix1（Codex G14 P1）：按最终传给子进程的环境判断缩放（参数或继承的环境变量都算），子进程里建模型、标定时还会再拦一次
+    scaled=any(env.get(name,'1')!='1' for name in ('PO_JEPA_TIME_WEIGHT_SCALE','PO_JEPA_SPACE_WEIGHT_SCALE'))
+    if scaled and args.command in ('calibrate','sweep','calibrate-addon','check-addon','equal-step','check'):
+        parser.error(f'{args.command} 不收一致性权重缩放（--time-weight-scale/--space-weight-scale 或同名环境变量）：缩放乘在同一变体的标定值上，不另标定；同步数对照两边用同一份预登记，配不上')
+    if scaled and args.condition not in (None,'po_jepa_full','po_jepa_time_only','po_jepa_space_only'):
+        parser.error('一致性权重缩放只用于 po_jepa_full、po_jepa_time_only、po_jepa_space_only（其他条件的 λ 不来自基础标定或恒为 0）；检查 --time-weight-scale/--space-weight-scale 和同名环境变量')
     if args.ac_checkpoint:env['PO_JEPA_AC_CHECKPOINT']=str(args.ac_checkpoint.resolve())
     child=[sys.executable,'-B','-X','utf8','-m','po_jepa.runtime.addon.entry' if args.command in ADDON_ENTRY else 'po_jepa.runtime.cli',args.command,
         '--features-root',str(Path(args.features_root).resolve()),'--device',args.device,'--output',str(args.output.resolve()/'run')]
