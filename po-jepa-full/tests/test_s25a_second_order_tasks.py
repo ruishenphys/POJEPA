@@ -203,7 +203,9 @@ def test_plan_summaries_on_second_order(use):
     plan = _tool("plan_v7")
     use("pendulum"); S = systems.get(); v = datasets.active().knobs
     assert np.allclose(plan.summary("pendulum", S, v, np.array([math.pi/2, 4.])), [1., 0.], atol=1e-15)
-    assert np.array_equal(plan.oracle_target("pendulum", S, v, np.array([.3, 4.])), plan.summary("pendulum", S, v, np.array([.3, 4.])))
+    # S25b5：真值规划的代价状态接上 τ·速度（摆锤速度 θ̇·(cos θ, sin θ)，见 tests/test_s25b5_velocity_success.py）
+    assert np.allclose(plan.oracle_target("pendulum", S, v, np.array([.3, 4.])),
+                       [math.sin(.3), -math.cos(.3), .25*4.*math.cos(.3), .25*4.*math.sin(.3)], rtol=0, atol=1e-15)
     use("cart_pole", "length=1.4"); S = systems.get(); v = datasets.active().knobs
     assert np.allclose(plan.summary("cart_pole", S, v, np.array([.5, 0., math.pi/6, 0.])), [.5, 1.2, 1.4*math.sqrt(3)/2])
     use("spring_chain", "n=3"); S = systems.get(); v = datasets.active().knobs

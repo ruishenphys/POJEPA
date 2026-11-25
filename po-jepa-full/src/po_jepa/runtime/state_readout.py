@@ -13,7 +13,13 @@
    | gray_scott | U、V 池化场（512 维，不含注入点） | 场的 L2 |
    | push | 推杆和方块中心 4 个坐标 × 48（不含朝向角） | 像素 |
    | 二阶场景 | 构形（po_jepa.configuration，只有位置）× 每单位像素；wave 是 u 的池化场 | 像素；wave 场的 L2 |
-   二阶场景现在按单帧复制（dup）编码，特征看不到速度，所以只读位置（S25b 接 pair 编码后可以加速度）。
+   S25b5（Jerry 2026-11-25 定，新口径）：二阶场景另读速度。位置探针（上表）不变；另拟合一个速度探针，目标是构形的时间导数
+   velocity_target = configuration.velocity × 每单位像素（像素/秒；wave 是 u_t 的池化场，场的 L2/秒），同一套特征、
+   同一套拟合（单独选 λ，所以位置探针的数值和以前的拟合法逐位相同），存在探针目录的 velocity/ 子目录（probe.json 的
+   quantity = "velocity"）。两帧编码（tubelet=pair）的特征看得到速度；单帧复制（dup）也照样拟合，作为对照（看不到速度时
+   速度探针的 R² 应该明显更低）。一阶场景和 push 的状态里没有速度，什么都不变。滚动和反事实的速度指标在键名前加 vel_
+   （vel_readout:T=t、vel_nmse:T=t、vel_vpt@ε、vel_cf_error 等），定义与位置的逐条相同，只是 R、y、V 换成速度探针的；
+   二阶场景的读出结果从 S25b5 起多了这些键，和 S25b5 之前的结果不可比（之前没有速度，探针和真值文件要重做）。
 2. 探针的输入：每个 token 先做无仿射 LayerNorm（eps = 1e-5，和 JEPA 距离同一个），再取读出 kind（tubelet_probe.readout：
    mean 1408 维、pool4 22528 维、full 360448 维，默认 full）。LN 让探针只看损失约束的那部分（JEPA 距离对每个 token 的
    平移和缩放不敏感，模型的原始预测在这两个方向上没被约束）。
@@ -57,6 +63,17 @@ CF_DURATIONS = (1., 2., 4., 8.)
 SCALE = {"double_well": 48., "van_der_pol": 27., "multi_particle": 48., "advection_diffusion": 1., "landscape": 48.}
 FIELD_TARGETS = ("advection_diffusion", "gray_scott", "wave")
 PROBE_SCHEMA = "po_jepa.state_readout.v1"
+VELOCITY_DIR = "velocity"          # S25b5：速度探针在位置探针目录下的子目录
+VELOCITY_PREFIX = "vel_"           # S25b5：滚动、反事实里速度指标的键名前缀
+
+
+def has_velocity(name) -> bool:
+    """S25b5：二阶场景另读速度。"""
+    return name in variants.SECOND_ORDER
+
+
+def velocity_units(name) -> str:
+    return units(name)+"_per_s"
 
 
 def units(name) -> str:
@@ -82,6 +99,22 @@ def target(name, hidden, params) -> np.ndarray:
 
 def targets(name, states, params) -> np.ndarray:
     return np.stack([target(name, s, params) for s in states])
+
+
+def velocity_target(name, hidden, params) -> np.ndarray:
+    """S25b5：二阶场景的一个隐藏状态 → 速度读出目标 = configuration.velocity × 每单位像素（wave 是 u_t 池化场，不乘）。
+    与 target 同一个比例，所以 velocity_target 是 target 沿真实轨迹的时间导数（测试核）。"""
+    h = np.asarray(hidden, dtype=np.float64)
+    if h.ndim != 1:
+        raise ValueError("velocity_target 一次只收一个隐藏状态 [D]")
+    if not has_velocity(name):
+        raise ValueError(f"{name} 的状态里没有速度（只有二阶场景读速度）")
+    c = configuration.velocity(name, h, params)
+    return c if configuration.PX[name] is None else c*configuration.PX[name]
+
+
+def velocity_targets(name, states, params) -> np.ndarray:
+    return np.stack([velocity_target(name, s, params) for s in states])
 
 
 def features(z: torch.Tensor, kind: str) -> torch.Tensor:
@@ -228,12 +261,18 @@ def _sha(path) -> str:
     return h.hexdigest()
 
 
-def load(folder: Path, *, dataset_tag: str, system: str) -> tuple:
-    """→ (Probe, meta)。核 schema、数据集、两个数组文件的 SHA 和形状。"""
+def load(folder: Path, *, dataset_tag: str, system: str, quantity: str = "position") -> tuple:
+    """→ (Probe, meta)。核 schema、读的量（S25b5：position 或 velocity；S25b5 之前的探针没有 quantity 键，算 position）、
+    数据集、两个数组文件的 SHA 和形状。"""
     folder = Path(folder)
+    if not (folder/"probe.json").exists():
+        raise ValueError(f"{folder} 下没有 probe.json" + ("（S25b5 起二阶场景要速度探针：用当前代码重新跑 fit）"
+                                                         if quantity == "velocity" else ""))
     meta = json.loads((folder/"probe.json").read_text())
     if meta.get("schema") != PROBE_SCHEMA:
         raise ValueError("not a state-readout probe")
+    if meta.get("quantity", "position") != quantity:
+        raise ValueError(f"probe reads {meta.get('quantity', 'position')}, not {quantity}")
     if meta.get("dataset") != dataset_tag or meta.get("system") != system:
         raise ValueError(f"probe was fitted on {meta.get('dataset')}, not {dataset_tag}")
     for name in ("weight", "mean_x"):
@@ -275,40 +314,56 @@ def vpt(times, nmse, threshold) -> float:
     return best
 
 
-def rollout_names(horizon) -> tuple:
+def rollout_names(horizon, velocity=False) -> tuple:
+    """velocity=True（S25b5，二阶场景）时位置的键后面再接同样一套 vel_ 开头的速度键。"""
     from . import long_rollout
     from .addon import d4
     times = long_rollout.curve_times(horizon)
     names = [f"{k}:T={d4._t(t)}" for t in times for k in ("readout", "floor", "nmse", "floor_nmse")]
     names += [f"{k}@{e:g}" for e in VPT_THRESHOLDS for k in ("vpt", "floor_vpt")]
+    if velocity:
+        names += [VELOCITY_PREFIX+k for k in names]
     return tuple(names)
 
 
-@torch.no_grad()
-def rollout_values(model, probe, windows, truth, horizon) -> dict:
-    """一条长时程测试轨迹。windows：{t: CacheWindow}，t 取遍 long_rollout.window_times(H)（同一条轨迹、起点 0，
-    long_rollout.load_window 读出；windows[t].target.raw_z 是真实特征 z*_t）；truth：{t: y_t}（读出目标，物理单位）。"""
-    from . import long_rollout
+def _curve(probe, preds, reals, truth, times, prefix) -> dict:
+    """一个量（位置或速度）的读出曲线和 VPT。preds、reals：[len(times), …] 的预测特征和真实特征；truth：{t: y_t}。"""
     from .addon import d4
-    times = long_rollout.curve_times(horizon)
-    preds = rollout_predictions(model, windows[float(horizon)], horizon)
-    pred_y = probe(torch.cat([preds[t] for t in times]))
-    real_y = probe(torch.cat([windows[t].target.raw_z for t in times]))
+    pred_y, real_y = probe(preds), probe(reals)
     values, nmse, floor = {}, [], []
     for i, t in enumerate(times):
         y = np.asarray(truth[t], dtype=np.float64)
         if y.shape != pred_y[i].shape:
             raise ValueError("truth and probe outputs differ in shape")
         e, f = float(np.linalg.norm(pred_y[i]-y)), float(np.linalg.norm(real_y[i]-y))
-        values[f"readout:T={d4._t(t)}"] = e
-        values[f"floor:T={d4._t(t)}"] = f
-        values[f"nmse:T={d4._t(t)}"] = e*e/probe.variance
-        values[f"floor_nmse:T={d4._t(t)}"] = f*f/probe.variance
+        values[f"{prefix}readout:T={d4._t(t)}"] = e
+        values[f"{prefix}floor:T={d4._t(t)}"] = f
+        values[f"{prefix}nmse:T={d4._t(t)}"] = e*e/probe.variance
+        values[f"{prefix}floor_nmse:T={d4._t(t)}"] = f*f/probe.variance
         nmse.append(e*e/probe.variance); floor.append(f*f/probe.variance)
     for eps in VPT_THRESHOLDS:
-        values[f"vpt@{eps:g}"] = vpt(times, nmse, eps)
-        values[f"floor_vpt@{eps:g}"] = vpt(times, floor, eps)
-    return d4._finite({k: values[k] for k in rollout_names(horizon)})
+        values[f"{prefix}vpt@{eps:g}"] = vpt(times, nmse, eps)
+        values[f"{prefix}floor_vpt@{eps:g}"] = vpt(times, floor, eps)
+    return values
+
+
+@torch.no_grad()
+def rollout_values(model, probe, windows, truth, horizon, velocity_probe=None, velocity_truth=None) -> dict:
+    """一条长时程测试轨迹。windows：{t: CacheWindow}，t 取遍 long_rollout.window_times(H)（同一条轨迹、起点 0，
+    long_rollout.load_window 读出；windows[t].target.raw_z 是真实特征 z*_t）；truth：{t: y_t}（读出目标，物理单位）。
+    S25b5：velocity_probe、velocity_truth（{t: 速度目标}）同时给时另算 vel_ 开头的速度指标（同一个滚动预测）。"""
+    from . import long_rollout
+    from .addon import d4
+    if (velocity_probe is None) != (velocity_truth is None):
+        raise ValueError("velocity_probe 和 velocity_truth 要一起给")
+    times = long_rollout.curve_times(horizon)
+    preds = rollout_predictions(model, windows[float(horizon)], horizon)
+    pz = torch.cat([preds[t] for t in times])
+    rz = torch.cat([windows[t].target.raw_z for t in times])
+    values = _curve(probe, pz, rz, truth, times, "")
+    if velocity_probe is not None:
+        values.update(_curve(velocity_probe, pz, rz, velocity_truth, times, VELOCITY_PREFIX))
+    return d4._finite({k: values[k] for k in rollout_names(horizon, velocity_probe is not None)})
 
 
 # —— 反事实预测 ——
@@ -316,15 +371,9 @@ def rollout_values(model, probe, windows, truth, horizon) -> dict:
 CF_KEYS = ("cf_true", "cf_pred", "cf_error", "cf_inner", "actual_readout", "actual_floor")
 
 
-@torch.no_grad()
-def counterfactual_values(model, probe, window, donor, y_actual, y_counterfactual) -> dict:
-    """一个测试窗口（evaluation.load_test_window 读出的 recipient 和 donor，调用者已核 _aligned_pair）。
-    y_actual = target(s_A)（真实终点），y_counterfactual = target(s_B)（换 donor 动作重新仿真的终点）。"""
-    from .addon import d4
-    raw, grid, duration = window.inputs.raw_z, window.inputs.grid, window.inputs.duration
-    actual = model(raw, window.inputs.controls, duration, grid)
-    alternative = model(raw, donor.inputs.controls, duration, grid)
-    r_a, r_b, r_real = probe(torch.cat((actual, alternative, window.target.raw_z)))
+def _cf(probe, z, y_actual, y_counterfactual, prefix) -> dict:
+    """一个量的反事实指标。z = cat(ẑ_A, ẑ_B, z*_A)。"""
+    r_a, r_b, r_real = probe(z)
     y_a = np.asarray(y_actual, dtype=np.float64); y_b = np.asarray(y_counterfactual, dtype=np.float64)
     if y_a.shape != r_a.shape or y_b.shape != r_a.shape:
         raise ValueError("truth and probe outputs differ in shape")
@@ -332,13 +381,42 @@ def counterfactual_values(model, probe, window, donor, y_actual, y_counterfactua
     values = dict(cf_true=float(np.linalg.norm(true)), cf_pred=float(np.linalg.norm(pred)),
                   cf_error=float(np.linalg.norm(pred-true)), cf_inner=float(pred@true),
                   actual_readout=float(np.linalg.norm(r_a-y_a)), actual_floor=float(np.linalg.norm(r_real-y_a)))
+    return {prefix+k: v for k, v in values.items()}
+
+
+@torch.no_grad()
+def counterfactual_values(model, probe, window, donor, y_actual, y_counterfactual,
+                          velocity_probe=None, v_actual=None, v_counterfactual=None) -> dict:
+    """一个测试窗口（evaluation.load_test_window 读出的 recipient 和 donor，调用者已核 _aligned_pair）。
+    y_actual = target(s_A)（真实终点），y_counterfactual = target(s_B)（换 donor 动作重新仿真的终点）。
+    S25b5：velocity_probe、v_actual = velocity_target(s_A)、v_counterfactual = velocity_target(s_B) 一起给时另算 vel_ 开头的键。"""
+    from .addon import d4
+    given = (velocity_probe is not None, v_actual is not None, v_counterfactual is not None)
+    if any(given) and not all(given):
+        raise ValueError("velocity_probe、v_actual、v_counterfactual 要一起给")
+    raw, grid, duration = window.inputs.raw_z, window.inputs.grid, window.inputs.duration
+    actual = model(raw, window.inputs.controls, duration, grid)
+    alternative = model(raw, donor.inputs.controls, duration, grid)
+    z = torch.cat((actual, alternative, window.target.raw_z))
+    values = _cf(probe, z, y_actual, y_counterfactual, "")
+    if velocity_probe is not None:
+        values.update(_cf(velocity_probe, z, v_actual, v_counterfactual, VELOCITY_PREFIX))
     return d4._finite(values)
 
 
 def counterfactual_summary(rows) -> dict:
-    """rows：每个窗口 dict(values=…, identical_controls=bool)。均值取全部窗口；cos、explained、gain 只用动作不同的窗口。"""
+    """rows：每个窗口 dict(values=…, identical_controls=bool)。均值取全部窗口；cos、explained、gain 只用动作不同的窗口。
+    S25b5：values 里有 vel_ 开头的速度键时，另给 velocity = 同样定义的速度汇总（动作相同的窗口同样不进 cos 等）。"""
+    out = _cf_summary(rows, "")
+    if rows and VELOCITY_PREFIX+"cf_true" in rows[0]["values"]:
+        out["velocity"] = _cf_summary(rows, VELOCITY_PREFIX)
+    return out
+
+
+def _cf_summary(rows, prefix) -> dict:
     if not rows:
         return {}
+    rows = [dict(r, values={k: r["values"][prefix+k] for k in CF_KEYS}) for r in rows]
     out = {k: float(np.mean([r["values"][k] for r in rows])) for k in CF_KEYS if k != "cf_inner"}
     moved = [r["values"] for r in rows if not r["identical_controls"]]
     total = sum(v["cf_true"]**2 for v in moved)
