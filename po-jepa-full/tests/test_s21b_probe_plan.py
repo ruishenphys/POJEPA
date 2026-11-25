@@ -284,17 +284,18 @@ def test_v8_variants_stage_covers_every_standard_test():
     lines = _jobs("--stage", "variants")
     v1 = [l for l in lines if "encode_v7.py encode" in l]; v3 = [l for l in lines if "run.py transfer" in l]
     plan = [l for l in lines if "plan_v7.py" in l]
-    total = sum(len(protocols.tests(s)) for s in protocols.SCENES)
-    assert len(v1) == 4*total and len(v3) == 6*total and len(plan) == 7*6
-    for s in protocols.SCENES:
+    total = sum(len(protocols.tests(s)) for s in protocols.DEFAULT_SCENES)     # S25b4：默认 12 个场景（二阶带 tubelet=pair）
+    assert len(v1) == 4*total and len(v3) == 6*total and len(plan) == 12*6
+    for s in protocols.DEFAULT_SCENES:
         system = protocols.system_of(s)
         for _, _, t in protocols.tests(s):
             knobs = protocols.merged(s, t); folder = f"../features-v8/{system}~{knobs}-2000"
             assert sum(f"--variant {knobs} " in l and f"--output {folder} " in l for l in v1) == 4
             assert sum(f"--system {system} " in l and f"--test-variant {t} " in l and f"--features-root {folder} " in l for l in v3) == 6
     oracle = [l for l in plan if "--no-baselines" not in l]
-    assert len(oracle) == 7 and all("identity" in l for l in oracle)
-    assert sum("--oracle-samples 16" in l for l in oracle) == 1 and sum("--oracle-samples 32" in l for l in oracle) == 1
+    assert len(oracle) == 12 and all("identity" in l for l in oracle)
+    # gray_scott 16；push 和（S25b4 起在默认里的）wave~tubelet=pair 32
+    assert sum("--oracle-samples 16" in l for l in oracle) == 1 and sum("--oracle-samples 32" in l for l in oracle) == 2
     plan_v7 = _tool("plan_v7")
     for l in plan:                                   # 每条规划命令过 plan_v7 的参数解析
         argv = l.split()[2:]
@@ -308,12 +309,12 @@ def test_v8_variants_stage_covers_every_standard_test():
 def test_v8_strength_stage_is_light_and_heavy_only():
     lines = _jobs("--stage", "strength")
     v1 = [l for l in lines if "encode_v7.py encode" in l]
-    want = sum(len(protocols.tests(s, ("轻", "重"))) for s in protocols.SCENES)
+    want = sum(len(protocols.tests(s, ("轻", "重"))) for s in protocols.DEFAULT_SCENES)
     assert len(v1) == 4*want and not any("plan_v7.py" in l for l in lines)
     got = {(l.split("--system ")[1].split()[0], l.split("--variant ")[1].split()[0]) for l in v1}
-    assert got == {(protocols.system_of(s), protocols.merged(s, t)) for s in protocols.SCENES
+    assert got == {(protocols.system_of(s), protocols.merged(s, t)) for s in protocols.DEFAULT_SCENES
                    for _, _, t in protocols.tests(s, ("轻", "重"))}
-    standard = {(protocols.system_of(s), protocols.merged(s, t)) for s in protocols.SCENES for _, _, t in protocols.tests(s)}
+    standard = {(protocols.system_of(s), protocols.merged(s, t)) for s in protocols.DEFAULT_SCENES for _, _, t in protocols.tests(s)}
     assert not got & standard                                  # 标准档在 variants 阶段已经评过
     subset = _jobs("--stage", "strength", "--protocols", "P4", "--scenes", "push", "--conditions", "identity")
     assert [l.split("--test-variant ")[1].split()[0] for l in subset if "run.py transfer" in l] == ["gain=1.5", "gain=3"]
@@ -322,11 +323,11 @@ def test_v8_strength_stage_is_light_and_heavy_only():
 def test_v8_full_stage_has_all_scenes_and_probes():
     lines = _jobs("--stage", "full")
     probes = [l for l in lines if "probe_actions.py" in l]
-    assert len(probes) == 7 and any("--system landscape --variant shape=multi_well" in l for l in probes)
+    assert len(probes) == 12 and any("--system landscape --variant shape=multi_well" in l for l in probes)   # S25b4：12 个场景
     runs = [l for l in lines if "run.py run" in l]
-    assert len(runs) == 7*3*6 and sum("--system push " in l for l in runs) == 18
+    assert len(runs) == 12*3*6 and sum("--system push " in l for l in runs) == 18
     pilot = _jobs("--stage", "pilot")
-    assert not any("probe_actions.py" in l for l in pilot) and sum("run.py run" in l for l in pilot) == 7*6
+    assert not any("probe_actions.py" in l for l in pilot) and sum("run.py run" in l for l in pilot) == 12*6
 
 
 def test_v7_job_table_is_untouched():

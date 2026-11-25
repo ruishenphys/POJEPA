@@ -605,18 +605,20 @@ def test_make_v8_jobs_readout_stage():
         return r.stdout.splitlines()
     lines = run("--stage", "readout")
     commands = [l for l in lines if l.startswith("python")]
-    scenes = len(protocols.SCENES)
+    scenes = len(protocols.DEFAULT_SCENES)      # S25b4：12 个
     fit = [c for c in commands if " fit " in c]; truth = [c for c in commands if " truth " in c]
     roll = [c for c in commands if "state_readout.py rollout" in c]; cf = [c for c in commands if "state_readout.py counterfactual" in c]
     modal = [c for c in commands if "modal_spectrum.py" in c]
     assert len(fit) == len(truth) == scenes and len(roll) == len(cf) == scenes*3*6
-    assert len(modal) == 1*3*2          # 默认场景里线性的只有 advection_diffusion；PO-JEPA 条件两个
+    assert len(modal) == 3*3*2          # 默认场景里线性的：advection_diffusion、两帧的 spring_chain、wave；PO-JEPA 条件两个
     assert "--features ../features-v8/double_well-2000 --output ../results-v8/full/readout/probe/double_well" in fit[0]
     assert "--long-features ../features-v8/double_well~horizon=128-2000 --horizon 128" in truth[0]
     assert all("horizon=128" in c.split("--features ")[1].split()[0] for c in roll)
     assert not any("horizon=128" in c for c in cf)
     assert all(("--ac-checkpoint" in c) == ("/vjepa2_ac " in c+" " or c.split("--job ")[1].split()[0].endswith("/vjepa2_ac")) for c in roll+cf)
-    assert all("/po_jepa_" in c for c in modal) and all("advection_diffusion" in c for c in modal)
+    assert all("/po_jepa_" in c for c in modal)
+    assert {c.split("--job ../results-v8/full/")[1].split("/")[0] for c in modal} == {
+        "advection_diffusion", "spring_chain~tubelet=pair", "wave~tubelet=pair"}
     second = run("--stage", "readout", "--scenes", "spring_chain,wave,pendulum", "--conditions", "po_jepa_full,identity")
     assert second[0].startswith("# 注意：二阶场景")
     assert len([l for l in second if l.startswith("python tools/modal_spectrum.py")]) == 2*3*1

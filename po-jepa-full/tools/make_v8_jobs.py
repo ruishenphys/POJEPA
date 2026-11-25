@@ -1,7 +1,7 @@
 """生成 v8 要提交的全部命令（每行一个独立任务），格式和 make_v7_jobs.py 相同：按 “# =====” 分段，段与段之间有依赖，
 同一段里的命令互不依赖、可以同时跑在不同的卡上；GPU 命令都写 --device cuda:0（排队系统用 CUDA_VISIBLE_DEVICES 分卡）。
 
-  python tools/make_v8_jobs.py --stage pilot    > jobs-v8-pilot.txt      # 试跑：7 个场景各 200 条、2000 步、1 个种子
+  python tools/make_v8_jobs.py --stage pilot    > jobs-v8-pilot.txt      # 试跑：12 个场景各 200 条、2000 步、1 个种子
   python tools/make_v8_jobs.py --stage full     > jobs-v8-full.txt       # 正式：各 2000 条、10000 步、3 个种子
   python tools/make_v8_jobs.py --stage variants > jobs-v8-variants.txt   # 分布外评测（评测协议的标准档）+ 规划（full 之后）
   python tools/make_v8_jobs.py --stage strength > jobs-v8-strength.txt   # 强度曲线（轻档、重档；variants 之后）
@@ -11,16 +11,21 @@
   python tools/make_v8_jobs.py --stage readout  > jobs-v8-readout.txt    # 物理状态读出、VPT、反事实、模态频率（full、long 之后，S25f）
 
 和 v7 的区别（S21b）：
-- 场景是 po_jepa.protocols.SCENES：v7 的 5 个加 gray_scott、push。
+- 场景默认是 po_jepa.protocols.DEFAULT_SCENES（S25b4 起 12 个）：一阶 7 个（SCENES：v7 的 5 个加 gray_scott、push）
+  加二阶 5 个的两帧编码写法（PAIR_SCENES：<场景>~tubelet=pair）。
 - 分布外测试表来自评测协议 po_jepa.protocols（P1–P13，三档强度；DATASET.md 有协议表），不是 v7 的 TEST_VARIANTS。
   v7 的 TEST_VARIANTS 和 make_v7_jobs.py 一字不改：v7 正式实验和仿真补跑（make_addon_jobs.py）都在用它。
 - 正式阶段的动作探针（B2）每个场景都跑，不只 double_well。
 - 默认目录是 ../features-v8、../results-v8，和 v7 分开。同一个场景、同一个调节项的数据在 v7 树和 v8 树上逐位相同
   （S20b、S21a、S21b 的跨树对照），想复用 v7 已编码的特征，可以用 --features 指到 v7 的特征目录。
 
-S25a：五个二阶场景（protocols.SECOND_ORDER_SCENES）能排了，但要显式写 --scenes（默认仍是 7 个一阶场景，任务表不变）。
-它们现在按单帧复制（dup）编码，特征里看不到速度，只适合当“看不到速度时有多差”的对照；两帧（pair）编码等 S22 探针结果
-在 S25b 接，接好以后并进默认场景。排了二阶场景时，输出的第一行注释会写明这一点。
+S25a：五个二阶场景（protocols.SECOND_ORDER_SCENES）能排了。不带调节项的写法（pendulum 等）是单帧复制（dup）编码，
+特征里看不到速度，只当“看不到速度时有多差”的对照，要显式写 --scenes 才排；排了它们时，输出的第一行注释会写明。
+S25b4：二阶场景按两帧编码（<场景>~tubelet=pair，S25b、S25b2、S25b3）并进默认场景。调节项跟着场景名走，所以每个阶段的
+编码（--variant 带 tubelet=pair）、特征目录和结果目录（名字带 ~tubelet=pair）、训练、transfer / timing_eval / space_eval
+的测试集（它们把 --test-variant 叠到训练数据集的调节项上，--test-variant 里不写 tubelet）都是两帧的；V4 规划只在基础场景
+（P0）上规划，不写 --test-variant，数据集从 --job 里读，也是两帧的（plan_v7 的 --test-variant 是整个替换，以后要排分布外
+规划时 --test-variant 里必须带 tubelet=pair，plan_v7 会拒绝两边 tubelet 不同）。
 
 S25c：--stage long 排长时程测试集（<场景>~horizon=128 的测试段，每类 200 条 × 129 帧，只编码测试段）的编码、汇总和
 tools/long_rollout.py 滚动评测（3 个种子 × 各条件；模型是 full 阶段在基础场景上训练好的，不再训练）。
@@ -76,7 +81,8 @@ def split_scene(scene):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage", choices=("pilot", "full", "variants", "strength", "long", "timing", "space", "readout", "addon", "addon-pilot"), required=True)
-    p.add_argument("--scenes", default=",".join(protocols.SCENES), help="逗号分隔的场景（系统[~调节项]）")
+    p.add_argument("--scenes", default=",".join(protocols.DEFAULT_SCENES),
+                   help="逗号分隔的场景（系统[~调节项]），默认 12 个（二阶场景带 tubelet=pair）；二阶场景不带调节项是单帧复制对照")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=None,
                    help="variants、strength、long、timing、space、readout 评哪些条件（默认 v7 的条件）；可以加补跑的 6 个（S26a、08 §6，"
@@ -91,8 +97,8 @@ def main():
     a = p.parse_args()
     scenes = [s for s in a.scenes.split(",") if s]
     for s in scenes:
-        if s not in protocols.ALL_SCENES:
-            raise SystemExit(f"{s} 不是 v8 的基础场景：{protocols.ALL_SCENES}")
+        if s not in protocols.JOB_SCENES:
+            raise SystemExit(f"{s} 不是 v8 的基础场景：{protocols.JOB_SCENES}")
     ids = [i for i in a.protocols.split(",") if i] or None
     if ids and not set(ids) <= set(protocols.BY_ID):
         raise SystemExit(f"没有这些协议：{sorted(set(ids)-set(protocols.BY_ID))}")
@@ -116,7 +122,8 @@ def main():
     root = f"{a.results}/{'pilot' if pilot else 'full'}"
     second = [s for s in scenes if s in protocols.SECOND_ORDER_SCENES]
     if second:
-        print(f"# 注意：二阶场景 {','.join(second)} 按单帧复制（dup）编码，特征里看不到速度（pair 编码等 S22 探针结果，S25b 接）。")
+        print(f"# 注意：二阶场景 {','.join(second)} 按单帧复制（dup）编码，特征里看不到速度，是对照；"
+              "两帧编码要写 <场景>~tubelet=pair（默认场景就是这个写法）。")
     enc = f"--upstream-root {a.upstream_root} --checkpoint {a.encoder}"
 
     def name(scene, extra=None):
