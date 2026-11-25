@@ -4,7 +4,8 @@
   h_{t+1} = roll(h_t, 1 + a_t)  （按通道循环移位，LayerNorm 不变；移位量取决于第 t 个 tick 的动作）
 
 神谕 predict_frames 对第 t 帧用第 t 个动作做同样的移位（逐帧因果）。对齐正确时 teacher forcing 和 2 步滚动两项损失都恰好为 0；
-任何一处错一帧（上下文拿错帧、动作错一位、目标错一位、取错输出位置）都会让损失非零。"""
+动作错一位会让两项损失都非零（第 2 个测试）；第 3 个测试让预测和真值可分（乘 α），按神谕公式独立算出两项损失的期望值
+并核对第 2 步的上下文，所以上下文拿真值、目标错一位、取错输出位置、滚动项复用 teacher forcing 项都会失败（Codex C3x P2-1）。"""
 import torch
 from torch import nn
 
@@ -51,7 +52,7 @@ def test_rollout_loss_is_aligned_with_the_next_frame():
     assert res.loss_values["ac_rollout"] < 1e-6
 
 
-def test_a_misaligned_target_would_be_caught():
+def test_misaligned_actions_would_be_caught():
     """对照：神谕错用下一个 tick 的动作（错一位）时，两项损失都明显非零（说明上面的 0 不是平凡的）。"""
     clips, acts = clip_and_actions(1)
     model = OracleAC()
@@ -62,8 +63,9 @@ def test_a_misaligned_target_would_be_caught():
 
 
 def test_second_step_context_is_true_start_then_own_prediction():
-    """附录 C 说的错法是“真值 z1 拼预测 ẑ2”。这里神谕输出乘 1.001（预测和真值可分），记下两次调用的输入输出：
-    第 2 步的上下文必须是 [真值 h0, 第 1 步自己的预测 ẑ1]，它的最后一帧输出和 h2 比。"""
+    """附录 C 说的错法是“真值 z1 拼预测 ẑ2”。这里神谕输出乘 α = 1.001（预测和真值可分），记下两次调用的输入输出：
+    第 2 步的上下文必须是 [真值 h0, 第 1 步自己的预测 ẑ1 = α h1]，最后一帧输出 α² h2 和 h2 比。期望损失只由输入和神谕公式构造：
+      L_TF = mean |α h_{1:9} − h_{1:9}|,   L_AR = mean |[α h1, α² h2] − [h1, h2]|。"""
     clips, acts = clip_and_actions(2)
     model = OracleAC()
     with torch.no_grad():
@@ -71,8 +73,17 @@ def test_second_step_context_is_true_start_then_own_prediction():
     seen = []
     original = model.predict_frames
     model.predict_frames = lambda frames, *a: seen.append((frames.detach().clone(), out := original(frames, *a))) or out
-    ac_training.train_step("vjepa2_ac_small", model, torch.optim.SGD(model.parameters(), lr=0.), clips, acts, _loss(), 0)
+    alpha = 1.001
+    res, _ = ac_training.train_step("vjepa2_ac_small", model, torch.optim.SGD(model.parameters(), lr=0.), clips, acts, _loss(), 0)
     h = torch.nn.functional.layer_norm(clips, (E,))
+    expected_tf = (alpha*h[:, 1:]-h[:, 1:]).abs().mean().item()
+    expected_ar = (torch.stack([alpha*h[:, 1], alpha**2*h[:, 2]], 1)-h[:, 1:3]).abs().mean().item()
+    assert abs(res.loss_values["ac_teacher_forcing"]-expected_tf) <= 1e-4*expected_tf   # float32 舍入
+    assert abs(res.loss_values["ac_rollout"]-expected_ar) <= 1e-4*expected_ar
+    assert expected_ar > 1.2*expected_tf                       # 两项可分：滚动项复用 teacher forcing 项会被抓到
+    # 梯度也经过滚动项（α > 1 时 |·| 处处可导）：d/dα L_TF = mean|h_{1:9}|，d/dα L_AR = mean([|h1|, 2α|h2|])
+    expected_grad = h[:, 1:].abs().mean().item()+torch.stack([h[:, 1].abs(), 2*alpha*h[:, 2].abs()], 1).mean().item()
+    assert abs(res.grad_norm-expected_grad) <= 1e-4*expected_grad
     (tf_in, tf_out), (ar_in, ar_out) = seen
     assert torch.equal(tf_in, h[:, :-1])
     assert torch.equal(ar_in[:, 0], h[:, 0]) and torch.equal(ar_in[:, 1], tf_out[:, 0].detach())

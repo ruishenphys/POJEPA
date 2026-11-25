@@ -349,10 +349,13 @@ Batch 1 stopped in section D on 2026-11-24 (19 of 72 done): `K16c` `po_jepa_full
 
 ```bash
 cd $WORK/full-model/po-jepa-full        # the same clone that ran batch 1 (0d35288); do NOT git pull before this is finished
-for s in R3 R4 G9 E; do python tools/run_jobs.py jobs-sv-c3-b1.txt --gpus 0,1 --only $s; done
+for s in R3 R4 G9 E; do
+    python tools/run_jobs.py jobs-sv-c3-b1.txt --gpus 0,1 --only "$s" \
+        || printf 'Section %s had failures; keep its logs and continue.\n' "$s"
+done
 ```
 
-- Use the existing `jobs-sv-c3-b1.txt`; do not regenerate it. These lines read checkpoints trained by this clone and have no `--cross-version`, so they must run **before** the pull for §8i (after the pull they would stop with `delivery source changed`).
+- Use the existing `jobs-sv-c3-b1.txt`; do not regenerate it. These lines read checkpoints trained by this clone and have no `--cross-version`, so they must run **before** the pull for §8i (after the pull they would be refused: the preregistration of these runs records the old delivery manifest).
 - Expected failures, which are fine: the lines that read `K16c` `po_jepa_full` on `double_well` and `van_der_pol` (no checkpoint), and possibly the `van_der_pol` `po_jepa_no_consistency` lines. Everything else should finish. `run_jobs.py` prints the failed log paths at the end of each section; keep them.
 - Each `for` step ends with either `全部完成。` or `第 … 段有任务失败，已停下`; both are fine here, the loop goes on to the next section.
 - D2 (6 equal-step evaluations, ~7 GPU-hours *(est.)*) is **skipped**: the `Kfull` full runs trained the full 10,000 updates without early stopping, so it adds little.
@@ -557,7 +560,16 @@ python tools/run_jobs.py jobs-sv-c3-xavier.txt --gpus 0,1
 
 36 commands: 6 × `calibrate`, 2 × `check` (`van_der_pol`), 6 training runs, 12 readouts and counterfactuals (R3), 2 modal spectra (R4, `advection_diffusion`), 6 × `shrinkage_check.py` (G9), 2 summaries. About 20–24 GPU-hours *(est.)*, ~11 hours on two cards (C-3 batch 1 took about 3–3.5 GPU-hours per training run including its calibration; a run that diverges stops early). G14 (§8h, if present) can share this clone and run after or alongside it.
 
-If a training run diverges (loss to 1e3 or more, gradient norm to 1e16, as `K16c` did in batch 1), keep its folder and log and go on; the other lines are independent except the R3, R4 and G9 lines of that run, which will fail.
+If a training run diverges (loss to 1e3 or more, gradient norm to 1e16, as `K16c` did in batch 1), `run_jobs.py` finishes the other D lines and then **stops** (it does not enter R3 and later). Keep the failed folder and log, and do not rerun the whole file (it would retry the deterministic divergence). Once every D line has ended, run the remaining sections one at a time:
+
+```bash
+for s in R3 R4 G9 E; do
+    python tools/run_jobs.py jobs-sv-c3-xavier.txt --gpus 0,1 --only "$s" \
+        || printf 'Section %s had failures; keep its logs and continue.\n' "$s"
+done
+```
+
+The R3, R4 and G9 lines of the diverged run will fail; the others finish. A failure in C or C2 (calibration, check) is different: stop and send the logs first.
 
 Send back:
 

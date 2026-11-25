@@ -116,7 +116,7 @@
     "tests/addon_entry_smoke.py": "68c67fdb5d0742276701735d5391ecd1860fba96dfceb80907811f583e266ae1",
     "tests/conftest.py": "91a7e957225f9e54473442b6c09a911a466cbb6e395dacdae891b5e2ae8e4836",
     "tests/test_ac_context_check.py": "2168c8547036f5f39603374ce2ac4f50c1a5d57c61acab60744c23d5943817ce",
-    "tests/test_ac_rollout_alignment.py": "90f6c3ad7232083572c93224a0c0fe1a996a7f3acac544e081fbd86c369c0da9",
+    "tests/test_ac_rollout_alignment.py": "8e2ccac561df6e2b57acbd08f9e437e09195a25702c82039a0e09e22cadcfa9f",
     "tests/test_actions.py": "88f01edec8084b00a1f755ee2e276560703eb10a8711f601dadb201c9946acee",
     "tests/test_addon_conditions.py": "d7520e8de11517a080d569865be2d32378b7017fe35ac64e5a856ab2b1498487",
     "tests/test_addon_d4.py": "951f0a09cd060fc541095c3102f8d67fc1cafdecf6e7e598b5ad088012fab726",
