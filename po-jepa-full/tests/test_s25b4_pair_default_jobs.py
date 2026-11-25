@@ -201,3 +201,43 @@ def test_dup_control_still_explicit_and_bad_scenes_refused():
         r = subprocess.run([sys.executable, "-B", str(ROOT/"tools/make_v8_jobs.py"), "--stage", "full", "--scenes", bad],
                            capture_output=True, text=True, cwd=ROOT)
         assert r.returncode != 0 and "不是 v8 的基础场景" in r.stderr, bad
+
+
+def test_readout_and_long_paths_belong_to_the_same_scene():
+    """S25b4-fix1（Codex S25b4 P3）：读出、长时程每条命令的探针、真值、基础特征、长时程特征都要是本场景本调节项的，
+    不只是“带 tubelet=pair”（wave 读 pendulum 的探针、长时程特征写成基础特征，原来的测试都放过）。"""
+    def scene(system, knobs):
+        return system + (("~" + ",".join(f"{k}={v}" for k, v in sorted(knobs.items()))) if knobs else "")
+
+    def feats(system, knobs):
+        return f"../features-v8/{scene(system, knobs)}-2000"
+
+    readout, checked = _cmds("--stage", "readout"), 0
+    for l in readout:
+        if "state_readout.py" not in l:
+            continue
+        if " fit " in l or " truth " in l:
+            system, knobs = _arg(l, "--system"), _knobs(_arg(l, "--variant") or "")
+        else:
+            system, knobs = _scene_of_path(_arg(l, "--job"))
+        name = scene(system, knobs)
+        long = feats(system, {**knobs, "horizon": "128"})
+        if " fit " in l:
+            assert _arg(l, "--features") == feats(system, knobs) and _arg(l, "--output") == f"../results-v8/full/readout/probe/{name}"
+        elif " truth " in l:
+            assert _arg(l, "--features") == feats(system, knobs) and _arg(l, "--long-features") == long
+            assert _arg(l, "--output") == f"../results-v8/full/readout/truth/{name}.json"
+        else:
+            assert _arg(l, "--probe") == f"../results-v8/full/readout/probe/{name}"
+            assert _arg(l, "--truth") == f"../results-v8/full/readout/truth/{name}.json"
+            kind = "rollout" if "state_readout.py rollout" in l else "counterfactual"
+            assert _arg(l, "--features") == (long if kind == "rollout" else feats(system, knobs)), l
+            assert _arg(l, "--output").startswith(f"../results-v8/full/readout/{kind}/{name}/seed")
+        checked += 1
+    assert checked == 12 + 12 + 2*12*3*6
+    long_cmds = [l for l in _cmds("--stage", "long") if "long_rollout.py" in l]
+    for l in long_cmds:
+        system, knobs = _scene_of_path(_arg(l, "--job"))
+        assert _arg(l, "--features") == feats(system, {**knobs, "horizon": "128"})
+        assert _arg(l, "--output").startswith(f"../results-v8/full/long/{scene(system, knobs)}/seed")
+    assert len(long_cmds) == 12*3*6

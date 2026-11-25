@@ -184,7 +184,7 @@
     "tests/test_s25a_second_order_tasks.py": "ae1a94ecbffbb0bc23f738d83fcefccb4744fe387805dcb14f6fd1b2b48e5dd2",
     "tests/test_s25b2_online_pair.py": "7d8fadd1094a9b65cd87b270441472619d029bd60c1bc675c87195cbcaa8c241",
     "tests/test_s25b3_pair_sampling.py": "6560121e681eef4068d238d267f5c75f2e43d7867e554e8bf12943c57f2e3d49",
-    "tests/test_s25b4_pair_default_jobs.py": "02972841d8a529ee6fd663b00824dc154929a0893a162ff9a04c5f60d5421461",
+    "tests/test_s25b4_pair_default_jobs.py": "0b33d1aa8da2f8d0686f832f33272cd79194a6364a872b0bb8b3ce6f6d2a8700",
     "tests/test_s25b_pair_encoding.py": "fee8ed2cc19de92e6b6ba1dd5716f7c89eb272fe7dced340c206e6e26ba23e98",
     "tests/test_s25c_long_horizon.py": "e74a305a04e71b47d0a5e71ad4df19cce342c78b027d0e302fdb4cc5d6304cf8",
     "tests/test_s25d_timing_eval.py": "32a2c414170ca0ed164e24e8e55bcb0366c2bc682ca144b4566711dd7da2ae27",
