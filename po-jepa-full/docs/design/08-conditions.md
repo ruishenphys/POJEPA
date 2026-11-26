@@ -275,9 +275,9 @@ Jerry 2026-11-25 定两个都加（“先都加，做不完再删”），依据
 - 宽 64、1 层、4 头（和 AC-small、TF 同一个 1408→64 瓶颈），只调前馈宽对齐 PO-JEPA 的 227,617（1% 规则，测试核对；预登记 `wm_parameter_match`）。
 - 上下文窗口 3 帧（两者上游 num_hist = 3）：滚动时每一步只看最近 3 帧和它们的动作；AC 照旧看全部历史。
 - 片段 4 帧（同一批 (轨迹, 起点) 的前 4 帧），MSE；dino_wm_small 只有 teacher forcing（L_tf/2）；jepa_wm_small 加 1 步顺序滚动
-  （前缀 t ∈ {0,1} 按 (种子, 步数) 确定地取，上下文停梯度，L_tf/2 + L_roll/2）。AdamW 峰值 5e-4、权重衰减 1e-7，曲线和其余条件同形。
+  （前缀 t ∈ {0,1} 按 (种子, 步数) 确定地取，上下文停梯度，L_tf/3 + L_roll/2，即上游的 L_tf/(rollout_steps+1) + L_roll/rollout_steps）。AdamW 峰值 5e-4、权重衰减固定 1e-7，曲线和其余条件同形。
 - 和上游的差别（都为接 1408 维 V-JEPA 2 特征、参数匹配和多网格评测）：加 predictor_embed / predictor_proj；DINO-WM 的可学习位置表换成不训练的
-  3 轴 sincos，dropout 0.1 → 0；JEPA-WM 没有本体感受（仿真没有本体状态）；上游 AdaLN 块按 16×16 重复调制量，这里按实际 H×W；常数学习率改成同形曲线。
+  3 轴 sincos，dropout 0.1 → 0；JEPA-WM 没有本体感受（仿真没有本体状态）；上游 AdaLN 块按 16×16 重复调制量，这里按实际 H×W；常数学习率改成同形曲线；上游权重衰减按余弦从 1e-7 升到 1e-6，这里固定 1e-7；DINO-WM 动作嵌入维上游 20，这里 10（参数匹配）。
 - 任务表：`tools/make_v8_jobs.py` 的 `CONDITIONS` 默认带上两者（pilot、full 的 D 段和各评测阶段）。导师要求按方法分开跑：每个条件本来就是
   一条独立命令（`python run.py run … --condition dino_wm_small`）；pilot、full 也可以只排几个条件，例如
   `python tools/make_v8_jobs.py --stage full --conditions dino_wm_small,jepa_wm_small`。汇总 `summarize_v7.py` 只在结果里出现过它们时才按组核缺失。

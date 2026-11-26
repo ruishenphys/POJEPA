@@ -19,9 +19,10 @@ mw_4f_fsk5_ask1_r224_pred_dino_wm_depth6_noprop_repro_1roll_save_seed1.yaml、mw
 - dino_wm_small：只有 teacher forcing（rollout_steps 1），loss = L_tf / 2（上游 predictor_loss / (rollout_steps + 1)）；
 - jepa_wm_small：再加 1 步顺序滚动（rollout_steps 2）：前缀 t ∈ {0, 1} 均匀取一个，上下文 = [真值第 0…t 帧, teacher forcing 的第 t+1 帧预测]
   （整段停梯度，rollout_stop_gradient），动作第 0…t+1 个，截最近 3 帧（ctxt_window_train_rollout 3），预测第 t+2 帧；
-  loss = L_tf / 2 + L_roll / 2（上游两项各除以 rollout_steps）。上游每批用 torch.randint 取 t，这里按 (模型种子, 已完成步数)
+  loss = L_tf / 3 + L_roll / 2（上游 teacher forcing 除以 rollout_steps + 1、滚动项除以 rollout_steps；2026-11-26 Codex WM1 P1 改正）。上游每批用 torch.randint 取 t，这里按 (模型种子, 已完成步数)
   确定地取（同一分布，不碰全局随机状态，续训逐位可复现）；
-- 优化器：AdamW(β=(0.9,0.999), eps=1e-8)，权重衰减 1e-7（上游 weight_decay），偏置与一维参数不衰减；峰值学习率 5e-4（上游 ref_lr），
+- 优化器：AdamW(β=(0.9,0.999), eps=1e-8)，权重衰减固定 1e-7（上游 weight_decay 起点；上游按余弦从 1e-7 升到 final_weight_decay 1e-6，
+  这里固定不升，差 1e-6 量级、对 2e5 参数的小模型影响可忽略，记为和上游的差别），偏置与一维参数不衰减；峰值学习率 5e-4（上游 ref_lr），
   曲线和 AC 一样与 PO-JEPA 同形（上游是常数学习率、无预热，这里为和其余条件同一套步数/早停口径改成同形曲线）；float32。
 """
 import hashlib
@@ -202,7 +203,7 @@ def _wm_losses(condition, model, clips, actions, completed):
     context = torch.cat([h[:, :t+1], z_tf[:, t:t+1]], 1).detach()[:, -window:]   # rollout_stop_gradient
     nxt = model.predict_frames(context, actions[:, :t+2][:, -window:], 16, 16)[:, -1]
     roll = F.mse_loss(nxt, h[:, t+2])
-    return tf/2+roll/2, dict(ac_teacher_forcing=tf.detach().item(), ac_rollout=roll.detach().item(), ac_rollout_prefix=t)
+    return tf/(steps+1)+roll/steps, dict(ac_teacher_forcing=tf.detach().item(), ac_rollout=roll.detach().item(), ac_rollout_prefix=t)
 
 
 def _wm_step(condition, model, optimizer, clips, actions, loss_config, completed, states):

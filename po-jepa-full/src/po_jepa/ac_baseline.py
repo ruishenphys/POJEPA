@@ -66,7 +66,7 @@ class ACSpec:
     action_dim: int = 2
     state_input: str = "learned_constant"    # S08b：取默认值时不进 spec_snapshot，v7 快照逐字节不变
     conditioning: str = "token"              # 2026-11-25：token（AC）/ feature（DINO-WM）/ adaln（JEPA-WM）
-    action_embed_dim: int = 0                # feature：拼到每个 patch 上的动作嵌入维（上游 DINO-WM 10）
+    action_embed_dim: int = 0                # feature：拼到每个 patch 上的动作嵌入维（上游 DINO-WM action_emb_dim 20，这里 10 以对齐参数）
     head_dim: int = 0                        # feature：每头维数（上游 DINO-WM dim_head）
     mlp_hidden: int = 0                      # feature：前馈隐层宽（上游 DINO-WM mlp_dim，绝对值）
     context_frames: int = 0                  # 滚动时送进预测器的最近帧数；0 = 全部历史（AC）
@@ -110,7 +110,7 @@ def is_official_scale(spec: ACSpec) -> bool:
 OFFICIAL = ACSpec()
 SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=3.5)   # 2026-11-08：MLP 224，对齐 token 写法 PO 参数 227617（原 2.0 对齐模态写法）
 # 2026-11-25：宽 64、1 层、4 头和 AC-small、TF 相同（1408→64 的瓶颈一致），只调前馈宽对齐 PO 的 227617（≤1%，测试核对）。
-# DINO-WM：token 维 64 + 10（上游 action_emb_dim 10），每头 16 维，前馈 176 → 227486；
+# DINO-WM：token 维 64 + 10（上游 action_emb_dim 20，这里缩到 10 以对齐参数），每头 16 维，前馈 176 → 227486；
 # JEPA-WM：AdaLN 调制层 Linear(64, 384) 占 24960，前馈只剩 32（mlp_ratio 0.5）→ 228064。
 DINO_WM_SMALL = ACSpec(width=64, depth=1, heads=4, mlp_ratio=4.0, conditioning="feature", action_embed_dim=10, head_dim=16,
                        mlp_hidden=176, context_frames=3)

@@ -295,15 +295,16 @@ def test_jepa_wm_loss_teacher_forcing_plus_stop_gradient_rollout(completed):
     ctx = torch.cat([h[:, :t+1], z[:, t:t+1].detach()], 1)          # t+2 ≤ 3 帧，窗口截不掉
     nxt = model.predict_frames(ctx, actions[:, :t+2], 16, 16)[:, -1]
     roll = ((nxt-h[:, t+2])**2).mean()
-    want = _grads(model, tf/2+roll/2)
-    torch.testing.assert_close(loss.detach(), (tf/2+roll/2).detach())
+    # 上游两级加权：teacher forcing / (rollout_steps+1)，滚动 / rollout_steps，rollout_steps = 2
+    want = _grads(model, tf/3+roll/2)
+    torch.testing.assert_close(loss.detach(), (tf/3+roll/2).detach())
     for a, b in zip(got, want):
         torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-7)
     assert parts["ac_rollout_prefix"] == t and parts["ac_rollout"] == pytest.approx(roll.item(), rel=1e-6)
     # 停梯度要紧：不停的话梯度不同
     z2 = model.predict_frames(h[:, :3], actions, 16, 16)
     leak = model.predict_frames(torch.cat([h[:, :t+1], z2[:, t:t+1]], 1), actions[:, :t+2], 16, 16)[:, -1]
-    other = _grads(model, ((z2-h[:, 1:])**2).mean()/2+((leak-h[:, t+2])**2).mean()/2)
+    other = _grads(model, ((z2-h[:, 1:])**2).mean()/3+((leak-h[:, t+2])**2).mean()/2)
     assert any(not torch.allclose(a, b, rtol=1e-5, atol=1e-7) for a, b in zip(got, other))
 
 
