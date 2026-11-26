@@ -40,6 +40,13 @@ SYNTHETIC_SPLIT = "development_smoke"
 PAPER_SHA256 = "d851778ecf4a1f160da9c681a831b3bc9333dae2b60eaeefa6090c0af44aaff1"
 V7_SOURCES = tuple(f"src/po_jepa/{n}.py" for n in ("actions", "dynamics", "geometry", "losses", "model", "spectral")) \
     + ("src/po_jepa/runtime/training.py",)
+# DWM1-P2（Codex，2026-11-26）：DROID 各条件的模型和训练步还用到下面这些共享源码，原来不在来源里，改了前向（参数、规格、
+# 初始化都不变）续训也认不出来。全部登记；仿真那边的来源清单不动。
+SHARED_MODEL_SOURCES = ("src/po_jepa/ac_baseline.py", "src/po_jepa/runtime/ac_training.py", "src/po_jepa/wm_baselines.py",
+                        "src/po_jepa/third_party/jepa_wms.py", "src/po_jepa/third_party/vjepa2_ac.py",
+                        "src/po_jepa/baselines.py", "src/po_jepa/fourier.py", "src/po_jepa/koopman.py",
+                        "src/po_jepa/generic_consistency.py", "src/po_jepa/spectral_backends.py",
+                        "src/po_jepa/runtime/comparison.py", "src/po_jepa/runtime/addon/conditions.py")
 
 
 # ---------------------------------------------------------------- 每条回合要用的数组
@@ -269,7 +276,7 @@ def training_provenance(config: DroidConfig, manifests: Mapping[str, dict], feat
     if not idents or any(i != idents[0] for i in idents):
         raise ValueError("feature manifests must share one encoder identity")
     ident = idents[0]
-    sources = {name: cache.file_sha(cache.ROOT/name) for name in (*V7_SOURCES, *droid_sources())}
+    sources = {name: cache.file_sha(cache.ROOT/name) for name in (*V7_SOURCES, *SHARED_MODEL_SOURCES, *droid_sources())}
     head = {"paper_sha256": PAPER_SHA256, "upstream_commit": config.encode.upstream_commit,
             "source_files_sha256": sources}
     if ident.get("evidence_role") == en.SYNTHETIC_ROLE:

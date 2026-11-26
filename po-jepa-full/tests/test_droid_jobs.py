@@ -31,10 +31,12 @@ POSIX_RUNNER = pytest.mark.skipif(sys.platform == "win32", reason="droid_run.py 
 CONFIGS = ROOT/"configs"/"droid"
 DATA, RUNS = "/data/droid-1.0.1", "/runs/po-jepa-droid"
 CONDITIONS = ["po_jepa_full", "po_jepa_no_consistency", "fixed_fourier", "koopman",
-              "matched_transformer", "transformer_consistency", "vjepa2_ac", "vjepa2_ac_small"]
+              "matched_transformer", "transformer_consistency", "vjepa2_ac", "vjepa2_ac_small",
+              "dino_wm_small", "jepa_wm_small"]   # 2026-11-26：DINO-WM、JEPA-WM（09 §14）
 LAMBDA = ["po_jepa_full", "fixed_fourier", "transformer_consistency"]
 PRIORITY = {"vjepa2_ac": 1, "po_jepa_full": 2, "po_jepa_no_consistency": 2, "fixed_fourier": 2,
-            "vjepa2_ac_small": 2, "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3}
+            "vjepa2_ac_small": 2, "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3,
+            "dino_wm_small": 2, "jepa_wm_small": 2}
 # base.yaml resources（12 §2/§4：sigma-z、spectral-gap 用 stats 的）
 RES = {"index": (0, 32, 16, 120), "download": (0, 16, 8, 600), "prepare": (0, 8, 32, 240), "stats": (0, 8, 32, 60),
        "encode": (1, 8, 64, 600), "check": (1, 8, 64, 120), "calibrate": (1, 8, 64, 240),
@@ -89,8 +91,8 @@ def level_of(jobs: list[dict]) -> dict[str, int]:
 
 # ---------------------------------------------------------------- 任务图
 
-@pytest.mark.parametrize("name,train_shards,seeds,count", [("pilot", 1, [1703], 40),
-                                                            ("full", 20, [1703, 1704, 1705], 129)])
+@pytest.mark.parametrize("name,train_shards,seeds,count", [("pilot", 1, [1703], 44),
+                                                            ("full", 20, [1703, 1704, 1705], 141)])
 def test_graph_matches_the_12_table(name, train_shards, seeds, count):
     graph = graph_of(name)
     want = expected(name, train_shards, seeds)
@@ -158,7 +160,7 @@ def test_cli_is_byte_identical_and_list_sections_are_layers(tmp_path, capsys):
         assert sorted(ids) == sorted(i for i, v in level.items() if v == k)
         assert all(d in seen for i in ids for d in by_command_id(graph, i)["deps"])    # 依赖都在前面的段
         seen += ids
-    assert len(seen) == len(graph["jobs"]) == 129
+    assert len(seen) == len(graph["jobs"]) == 141
 
 
 def by_command_id(graph: dict, job_id: str) -> dict:
@@ -537,7 +539,7 @@ def test_runner_on_the_real_pilot_graph_dry_run(tmp_path, capsys):
     path.write_text(json.dumps(graph))
     assert droid_run.main([str(path), "--workdir", str(tmp_path), "--dry-run", "--cpus", "32", "--mem-gb", "256"]) == 0
     lines = [line.split()[1] for line in capsys.readouterr().out.splitlines() if line.strip()[:1].isdigit()]
-    assert sorted(lines) == sorted(j["id"] for j in graph["jobs"]) and len(lines) == 40
+    assert sorted(lines) == sorted(j["id"] for j in graph["jobs"]) and len(lines) == 44
     pos = {i: k for k, i in enumerate(lines)}
     assert all(pos[d] < pos[j["id"]] for j in graph["jobs"] for d in j["deps"])
     assert lines[0] == "index" and lines[-1] == "summary"

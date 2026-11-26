@@ -11,7 +11,7 @@
 | `calibrate/sigma-z` | §3.1（CPU） | 训练片的特征 | `calibration/sigma_z.json` |
 | `calibrate/lambda-<条件>` | §3.2，po_jepa_full、fixed_fourier、transformer_consistency 各一条（GPU） | sigma-z | `calibration/lambda-<条件>.json` |
 | `check/env` | §7（GPU） | sigma-z | `check/env.json` |
-| `train/<条件>/seed<种子>` | §4（GPU），8 个条件 × 种子 | sigma-z；需要 λ 的条件还依赖自己的 lambda；check/env | `train/<条件>/seed<种子>/` |
+| `train/<条件>/seed<种子>` | §4（GPU），10 个条件 × 种子（后两个 DINO-WM、JEPA-WM 见 §14） | sigma-z；需要 λ 的条件还依赖自己的 lambda；check/env | `train/<条件>/seed<种子>/` |
 
 命令统一是 `python tools/droid.py <阶段> --config configs/droid/<name>.yaml --data-root … --run-root … --job <任务名>`，任务图见 12。
 
@@ -301,3 +301,32 @@ v7 每步写一份完整的 JSON；DROID 一个任务 3 万步，改成 `train-l
 ## 13. 审核修复补注（e9016a8 第三轮审核，2026-11-11）
 
 见 `docs/segments/review-fix-e9016a8.md`。和本文有关的：读 `sigma_z.json` 一律核 schema、配置、标定时的特征总清单（全部片）和 `action_scale.json` 的 SHA 等于当前数据根的（§3.1 写的字段，RF-P1-2；训练、λ 标定、评测、check/env、截断间隙都经同一个 `spectral_gap.read_sigma_z`）；评测读 λ 时核所选训练登记的训练集，读到的 σ_z、λ 文件 SHA 必须等于训练登记的；检查点存的来源字典多一项 `droid_training` = {condition, seed, registration_sha256}，续训整份比较，`load_selected` 核它等于本次请求（RF-P2-1），另核登记的配置 SHA；训练、评测、截断间隙任务持输出目录的 `job.lock` 排他锁（RF-P2-3）；评测的原始帧率、原始分辨率轴写之前删自己的 `*.partial`（RF-P2-2）；`check/env` 已有记录时核通过状态、配置、特征总清单、σ_z 文件 SHA（§7，RF-P2-4）。都不改任何数值口径。
+
+## 14. DINO-WM、JEPA-WM 参数匹配基线（2026-11-26）
+
+Jerry 2026-11-25 定两个都加（“先都加，做不完再删”），仿真路径已在 PR #26 接好（08 §7）。DROID 上是同两个条件，
+`dino_wm_small`、`jepa_wm_small`，排在 `CONDITIONS` 的最后，每个种子各一条训练和一条评测任务。代码：`droid/wm.py`
+（训练步、优化器）、`droid/conditions.py`（构造、匹配）；仿真会读到的源码（`ac_baseline.py`、`runtime/ac_training.py`、
+`wm_baselines.py`、`third_party/jepa_wms.py`）一个字节都没改，仿真任务的源码身份不变。
+
+| 项 | DROID 上的做法 | 依据 / 和上游 jepa-wms @ 13cf1d9 的差别 |
+|---|---|---|
+| 模型 | 仿真的 `ac_baseline.DINO_WM_SMALL` / `JEPA_WM_SMALL`，只改 `action_dim = 7`（物理单位，和 AC 同一套 tick 动作）和匹配项 | 宽 64、1 层、4 头，上下文 3 帧；上游 DROID 是深 6 宽 384（DINO-WM）、深 12 宽 1024（JEPA-WM） |
+| 参数匹配 | §2.3 同一规则：DINO-WM 前馈宽 [317, 318, 319] → 318，248,694（差 43，0.017%）；JEPA-WM mlp_ratio [2.875, 2.9375, 3.0] → 2.9375（前馈 188），248,508（差 229，0.092%） | 每单位前馈宽 149（DINO-WM）/ 129（JEPA-WM）个参数，测试核对 |
+| 本体状态 | 不用（no-prop），任何 `ac_state` 下都一样；验证、评测、规划都不绑定起点状态（`conditions.binds_state` 为假），原始帧率评测的小步前向忽略状态 | 上游 DROID 的两份最终配置都是 noprop（`droid_4fpcs_fps4_r256_dv3vitl_asp1_pred_AdaLN_depth12_noprop_repro_2roll_4n.yaml` 的 `proprio_encoding: none`；`droid_4f_fps4_r224_pred_dino_wm_depth6_noprop_repro_1roll_4fpcs_2n.yaml` 的 `proprio_emb_dim: 0`），带本体的 ftprop 只在 Metaworld 上。和 vjepa2_ac、vjepa2_ac_small（DROID 上吃真实状态，§6.2）不同，比较时注明 |
+| 训练片段 | AC 同一批 (回合, 起点) 的 9 帧片段只取前 4 帧、前 3 个动作 | 上游 num_hist 3 + num_pred 1（4 帧）。上游 DROID 按 4 fps 取帧（帧距 0.25 s），这里一帧是一个周期（约 1 s，和 AC、PO-JEPA 相同）。起点只取 [0, F − 9]，和仿真同一取法 |
+| 损失 | 和仿真 `ac_training._wm_losses` 逐项相同：DINO-WM L_tf/2；JEPA-WM L_tf/3 + L_roll/2（1 步顺序滚动、上下文停梯度、窗口 3） | 上游 DROID JEPA-WM 也是 rollout_steps 2、ctxt_window_train_rollout 3（评估报告写的“6 步滚动、W = 5”是评测时的滚动步数，训练不是） |
+| 滚动前缀 | t ∈ {0, 1} 按 (本任务种子, 已完成步数) 确定地取 | 仿真用 `checks.model_seed()`，DROID 不走仿真协议，那里永远是 1703，三个种子会取到同一串前缀 |
+| 优化器 | `ac_training.make_optimizer`（AdamW、wd 1e-7、峰值 5e-4、曲线同形）；β：DINO-WM (0.9, 0.999)，JEPA-WM (0.9, 0.995) | β 照上游各自的 DROID 最终配置（仿真版 JEPA-WM 照 Metaworld 是 0.999） |
+| 评测 | 和 AC 同一族（`evaluate.AC_CONDITIONS`）：输入尺度的量不可比、TCD 半程是插值、原始帧率走 `ac_steps` | 输出在 LN 空间，没有 p_out |
+| 检查点 | `ac_training.save_checkpoint` / `load_checkpoint`（schema `v7_vjepa2_ac_checkpoint_v1`），每个验证点都留 | 小模型，不进 `RETAIN_TWO` |
+
+任务图：`tools/droid_jobs.py --conditions dino_wm_small,jepa_wm_small` 只排这两个条件的训练和评测，连同它们依赖的数据、
+标定和 check/env；不排 spectral-gap 和 summary（汇总读全部条件，在完整任务图里跑）。完成标志和完整任务图相同，不给
+`--conditions` 时输出和以前逐字节相同（加了两个条件后 pilot 44 个任务、full 141 个）。`check/env` 也检查这两个条件。
+加条件改了 `base.yaml`，所以两份配置的 config_sha256 变了（此前没有在跑的 DROID 任务）。
+
+DWM1 审核修复（Codex P2）：DROID 训练来源（`batches.training_provenance`）原来只登记 v7 的 7 个文件和 `droid/` 下的文件，各条件用到的
+共享模型源码（`ac_baseline.py`、`runtime/ac_training.py`、`wm_baselines.py`、`third_party/jepa_wms.py`、`third_party/vjepa2_ac.py`、
+`baselines.py`、`fourier.py`、`koopman.py`、`generic_consistency.py`、`spectral_backends.py`、`runtime/comparison.py`、
+`runtime/addon/conditions.py`）不在里面，只改前向时续训认不出来；现在全部登记（`batches.SHARED_MODEL_SOURCES`），仿真的来源清单不动。

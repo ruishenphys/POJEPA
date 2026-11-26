@@ -10,6 +10,10 @@
   `index/splits.json` 时改用 `splits.shard_plan`（并核对两者一致）。`use_failures: false` 的片号取决于失败回合落在
   哪里，必须先有索引。之后是 `val`、`id_test`、`ood_test`（02 §6）。
 - 完成标志的路径取自各阶段模块自己的路径函数（download/prepare/features），运行根下的按 12 §2 的表。
+- `--conditions a,b`（2026-11-26，导师要求按方法分开跑）：只排这些条件的训练和评测（可含不训练的 identity、
+  vjepa2_ac_zeroshot），连同它们依赖的数据、标定和 check/env 任务；不排 spectral-gap 和 summary（汇总读全部条件，
+  在不带 --conditions 的完整任务图里跑）。完成标志的路径和完整任务图相同，先按方法跑完再跑完整任务图时已完成的直接跳过。
+  不给时输出和以前逐字节相同。例：`--conditions dino_wm_small,jepa_wm_small`。
 - `--format list` 输出 v7 那种按 “# =====” 分段的纯文本，每段是一个拓扑层（12 §5.3）。
 
 `tools/droid.py`（统一入口）和 `tools/droid_run.py`（本机运行器）用本模块的 `build_graph`、`find_job`。
@@ -43,7 +47,8 @@ SPECTRAL_GAP = "spectral-gap"
 # Transformer 类和 Koopman 最后。其他任务的 priority 是拓扑层次。
 TRAIN_PRIORITY = {"vjepa2_ac": 1,
                   "po_jepa_full": 2, "po_jepa_no_consistency": 2, "fixed_fourier": 2, "vjepa2_ac_small": 2,
-                  "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3}
+                  "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3,
+                  "dino_wm_small": 2, "jepa_wm_small": 2}   # 09 §14：参数匹配、逐帧自回归，和 AC 缩小版同档
 STAGES = ("index", "download", "prepare", "encode", "calibrate", "check", "train", "eval", "summary")
 # 完成标志在时仍要调用阶段、由阶段先核本次请求的身份再决定复用的阶段（S11-P1-1 修复）：训练（COMPLETE.json 绑定
 # report.json）、评测（job.json/source.json 的请求身份，10 §8.9）、汇总（每次按当前产物重算，内容不变就不换输出）、
@@ -143,9 +148,23 @@ def resources(config: DroidConfig, job_id: str) -> dict:
 
 # ---------------------------------------------------------------- 任务图
 
-def job_deps(config: DroidConfig, shards: list[str]) -> dict[str, list[str]]:
-    """12 §2 的任务和依赖（插入顺序无关紧要，输出按拓扑层次和编号排）。"""
+def parse_conditions(text: str | None) -> tuple[str, ...] | None:
+    """`--conditions` 的值：逗号分隔、不重复、每个都是训练条件或不训练的对照；None 表示全部。"""
+    if text is None:
+        return None
+    names = tuple(n.strip() for n in text.split(","))
+    if not names or any(not n for n in names) or len(set(names)) != len(names):
+        raise ValueError(f"--conditions must be a comma-separated list of distinct names, got {text!r}")
+    unknown = [n for n in names if n not in (*CONDITIONS, *UNTRAINED)]
+    if unknown:
+        raise ValueError(f"unknown DROID conditions {unknown} (trained: {list(CONDITIONS)}; untrained: {list(UNTRAINED)})")
+    return names
+
+
+def job_deps(config: DroidConfig, shards: list[str], conditions: tuple[str, ...] | None = None) -> dict[str, list[str]]:
+    """12 §2 的任务和依赖（插入顺序无关紧要，输出按拓扑层次和编号排）。`conditions` 给了就只排这些条件（见文件头）。"""
     t = config.training
+    keep = (lambda c: True) if conditions is None else (lambda c: c in conditions)
     deps: dict[str, list[str]] = {"index": []}
     for s in shards:
         deps[f"download/{s}"] = ["index"]
@@ -156,9 +175,12 @@ def job_deps(config: DroidConfig, shards: list[str]) -> dict[str, list[str]]:
     deps["calibrate/sigma-z"] = ["prepare/stats"] + [f"encode/{s}" for s in shards]
     deps["check/env"] = ["calibrate/sigma-z"]
     for c in LAMBDA_CONDITIONS:
-        deps[f"calibrate/lambda-{c}"] = ["calibrate/sigma-z"]
+        if keep(c):
+            deps[f"calibrate/lambda-{c}"] = ["calibrate/sigma-z"]
     evals = []
     for c in t.conditions:
+        if not keep(c):
+            continue
         for seed in t.seeds:
             train = f"train/{c}/seed{seed}"
             deps[train] = ["check/env"] + ([f"calibrate/lambda-{c}"] if c in LAMBDA_CONDITIONS else [])
@@ -167,8 +189,11 @@ def job_deps(config: DroidConfig, shards: list[str]) -> dict[str, list[str]]:
     if tuple(t.untrained) != UNTRAINED:
         raise ValueError(f"training.untrained must be {list(UNTRAINED)} (12 §2)")
     for c in t.untrained:
-        deps[f"eval/{c}"] = ["check/env", f"encode/{TEST_EXTRA}"]
-        evals.append(f"eval/{c}")
+        if keep(c):
+            deps[f"eval/{c}"] = ["check/env", f"encode/{TEST_EXTRA}"]
+            evals.append(f"eval/{c}")
+    if conditions is not None:                  # 按方法分开排：不排 spectral-gap 和 summary（见文件头）
+        return {k: sorted(v) for k, v in deps.items()}
     deps[f"eval/{SPECTRAL_GAP}"] = ["calibrate/sigma-z"]
     evals.append(f"eval/{SPECTRAL_GAP}")
     deps["summary"] = sorted(evals)
@@ -231,10 +256,11 @@ def command(job_id: str, config_path: str, data_root: str, run_root: str, res: d
 
 
 def build_graph(config: DroidConfig, config_path: str, data_root: str, run_root: str, *,
-                splits: dict | None = None) -> dict:
-    """12 §4 的任务图。`config_path`、`data_root`、`run_root` 原样写进命令（命令在 `po-jepa-full/` 下运行）。"""
+                splits: dict | None = None, conditions: tuple[str, ...] | None = None) -> dict:
+    """12 §4 的任务图。`config_path`、`data_root`、`run_root` 原样写进命令（命令在 `po-jepa-full/` 下运行）。
+    `conditions` 给了就只排这些条件（`parse_conditions`），图里多一个键 `conditions`；不给时和以前逐字节相同。"""
     shards = shard_names(config, data_root, splits)
-    deps = job_deps(config, shards)
+    deps = job_deps(config, shards, conditions)
     level = levels(deps)
     jobs = []
     for job_id in sorted(deps, key=lambda i: (level[i], i)):
@@ -247,8 +273,11 @@ def build_graph(config: DroidConfig, config_path: str, data_root: str, run_root:
                      "complete": str(complete_path(job_id, config, data_root, run_root)),
                      "requeue_exit_codes": list(REQUEUE_EXIT_CODES), "priority": priority})
     check_graph(jobs, shards)
-    return {"schema": SCHEMA, "config": config.name, "config_sha256": config.config_sha256,
-            "data_root": data_root, "run_root": run_root, "jobs": jobs}
+    graph = {"schema": SCHEMA, "config": config.name, "config_sha256": config.config_sha256,
+             "data_root": data_root, "run_root": run_root, "jobs": jobs}
+    if conditions is not None:
+        graph["conditions"] = list(conditions)
+    return graph
 
 
 def find_job(graph: dict, job_id: str) -> dict:
@@ -269,6 +298,8 @@ def to_list(graph: dict) -> str:
     lines = [f"# DROID 任务列表（12 §5.3）：配置 {graph['config']}，config_sha256 {graph['config_sha256']}，"
              f"{len(graph['jobs'])} 个任务。",
              "# 在 po-jepa-full/ 下按段运行：一段全部完成（退出 0）后再跑下一段；退出 75 = 已存档，重跑同一条命令。"]
+    if "conditions" in graph:
+        lines.append(f"# 只排条件 {','.join(graph['conditions'])}（--conditions）；spectral-gap 和 summary 在完整任务图里跑。")
     for k in range(max(level.values()) + 1):
         layer = [j for j in graph["jobs"] if level[j["id"]] == k]
         stages = sorted({j["stage"] for j in layer}, key=STAGES.index)
@@ -292,8 +323,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run-root", required=True)
     p.add_argument("--format", choices=("json", "list"), default="json")
     p.add_argument("--output", type=Path, help="不给就写到标准输出")
+    p.add_argument("--conditions", help="逗号分隔，只排这些条件的训练和评测（按方法分开跑；不排 spectral-gap、summary）")
     a = p.parse_args(argv)
-    graph = build_graph(load_config(a.config), a.config, a.data_root, a.run_root)
+    graph = build_graph(load_config(a.config), a.config, a.data_root, a.run_root, conditions=parse_conditions(a.conditions))
     body = cache._json_bytes(graph) if a.format == "json" else to_list(graph).encode("utf-8")
     if a.output is None:
         sys.stdout.buffer.write(body)

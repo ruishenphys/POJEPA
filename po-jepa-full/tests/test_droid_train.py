@@ -278,7 +278,8 @@ def check_complete(root, out, condition, config):
     assert reg["condition"] == condition and reg["model"]["parameters"] == report["parameters"]
     first = rows[0]["steps"][0]
     if condition in cd.AC_CONDITIONS:
-        assert first["p_out_calls"] is None and {"ac_teacher_forcing", "ac_rollout"} <= set(first["losses"])
+        rollout = () if condition == "dino_wm_small" else ("ac_rollout",)   # DINO-WM 只有 teacher forcing（09 §14）
+        assert first["p_out_calls"] is None and {"ac_teacher_forcing", *rollout} <= set(first["losses"])
         assert first["window_ids_sha256"] == wn.list_sha256([c["id"] for c in wn.ac_clips(
             make_data(root, config).train_set, {uid(k): ROWS[k] for k in SHARDS["train-000"]}, seed=1703, step=0,
             config=config)])

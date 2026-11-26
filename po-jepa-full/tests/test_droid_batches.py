@@ -297,6 +297,7 @@ def test_training_provenance(root):
     assert all(p[k] is None for k in ("encoder_checkpoint_sha256", "preprocess_sha256", "feature_manifest_sha256", "protocol_sha256"))
     assert "src/po_jepa/droid/batches.py" in p["source_files_sha256"] and "src/po_jepa/runtime/training.py" in p["source_files_sha256"]
     assert p["source_files_sha256"]["src/po_jepa/droid/windows.py"] == cache.file_sha(cache.ROOT/"src/po_jepa/droid/windows.py")
+    assert set(bt.SHARED_MODEL_SOURCES) <= set(p["source_files_sha256"])          # DWM1-P2：共享模型源码也登记
     real = {"evidence_role": en.REAL_ROLE, "encoder_checkpoint_sha256": "c"*64, "preprocess_sha256": cache.v7_preprocess_sha256()}
     p = bt.training_provenance(CFG, {s: {**m, "encoder": real} for s, m in manifests.items()}, "f"*64)
     assert (p["evidence_role"], p["split"], p["encoder_checkpoint_sha256"], p["feature_manifest_sha256"], p["protocol_sha256"]) \

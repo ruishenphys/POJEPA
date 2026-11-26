@@ -62,12 +62,15 @@ training:
   log_every: 100
   seeds: [1703, 1704, 1705]     # overlay 覆盖
   conditions: [po_jepa_full, po_jepa_no_consistency, fixed_fourier, koopman,
-               matched_transformer, transformer_consistency, vjepa2_ac, vjepa2_ac_small]
+               matched_transformer, transformer_consistency, vjepa2_ac, vjepa2_ac_small,
+               dino_wm_small, jepa_wm_small]
   untrained: [identity, vjepa2_ac_zeroshot]
 matching:                       # 参数量匹配的候选，只按参数量选（09 §2.3）
   tolerance: 0.01
   transformer_feedforward_candidates: [368, 384, 400]   # S00t：token 写法 PO-JEPA 248,737（09 §2.3）
   ac_small_mlp_ratio_candidates: [5.75, 6.0, 6.25]
+  dino_wm_small_mlp_hidden_candidates: [317, 318, 319]      # 09 §14：每单位前馈宽 149 个参数
+  jepa_wm_small_mlp_ratio_candidates: [2.875, 2.9375, 3.0]   # 09 §14：前馈宽 184/188/192，每单位 129 个
 monitoring:
   min_share: 0.005              # 加权一致性梯度至少是 JEPA 梯度的 0.5%（v7 同值，09 §4.6）
 calibration:

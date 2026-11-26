@@ -210,7 +210,7 @@ def _run_locked(out: Path, *, condition, seed, config, data, calibration, device
                initial_model_sha256=None if trained else info["initial_model_sha256"],
                ac_checkpoint_sha256=(info["ac"] or {}).get("official_checkpoint_sha256"))
     is_ac = condition in ev.AC_CONDITIONS
-    bind = droid_ac.bind if is_ac and config.model.ac_state == "true_state" else None
+    bind = droid_ac.bind if cd.binds_state(condition, config) else None   # DINO-WM、JEPA-WM 不绑定（09 §14）
     ac_steps = droid_ac.ac_steps if is_ac else None
     source_name = config.action.source
 

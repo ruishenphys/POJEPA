@@ -11,4 +11,6 @@ arXiv:2512.24497 (TMLR 2026); Zhou, Pan, LeCun, Pinto, "DINO-WM: World Models on
 enable Zero-shot Planning", arXiv:2411.04983. The changes made to the copied code are listed at the top of
 `jepa_wms.py`; the adaptation to frozen V-JEPA 2 features (input/output projections, parameter matching,
 context window, losses) is in `src/po_jepa/wm_baselines.py`, `src/po_jepa/ac_baseline.py` and
-`src/po_jepa/runtime/ac_training.py`.
+`src/po_jepa/runtime/ac_training.py`; the DROID adaptation (7-dimensional actions, parameter matching against the
+DROID PO-JEPA, no proprioception, the DROID optimizer betas of the upstream DROID configs) is in
+`src/po_jepa/droid/wm.py` and `src/po_jepa/droid/conditions.py`.

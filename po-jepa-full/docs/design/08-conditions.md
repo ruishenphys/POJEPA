@@ -281,5 +281,6 @@ Jerry 2026-11-25 定两个都加（“先都加，做不完再删”），依据
 - 任务表：`tools/make_v8_jobs.py` 的 `CONDITIONS` 默认带上两者（pilot、full 的 D 段和各评测阶段）。导师要求按方法分开跑：每个条件本来就是
   一条独立命令（`python run.py run … --condition dino_wm_small`）；pilot、full 也可以只排几个条件，例如
   `python tools/make_v8_jobs.py --stage full --conditions dino_wm_small,jepa_wm_small`。汇总 `summarize_v7.py` 只在结果里出现过它们时才按组核缺失。
-- DROID 路径还没接（`droid/conditions.py` 有自己的条件表），另开一段。
+- DROID 路径 2026-11-26 已接（09 §14）：同一模型改成 7 维动作、按 DROID 的 PO-JEPA 重新匹配参数，no-prop（上游 DROID 配方），
+  训练步在 `droid/wm.py`；`tools/droid_jobs.py --conditions dino_wm_small,jepa_wm_small` 只排这两个。
 
