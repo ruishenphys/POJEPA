@@ -55,7 +55,7 @@ def _learned_constant(config):
 # ---------------------------------------------------------------- 条件表、参数匹配、构造
 
 def test_conditions_and_parameter_table():
-    assert CONDITIONS[-2:] == WM and set(WM) <= set(cd.AC_CONDITIONS) and set(WM) <= set(ev.AC_CONDITIONS)
+    assert CONDITIONS[-4:-2] == WM and set(WM) <= set(cd.AC_CONDITIONS) and set(WM) <= set(ev.AC_CONDITIONS)
     assert not set(WM) & set(cd.STATE_AC) and not set(WM) & set(ev.STATE_AC_CONDITIONS)
     assert cd.LOSS_LABELS["dino_wm_small"] == cd.LOSS_LABELS["jepa_wm_small"] == "no_consistency"
     for c in WM:

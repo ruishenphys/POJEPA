@@ -46,6 +46,7 @@ import summarize_addon as sa  # noqa: E402  （它把 src 放进 sys.path）
 
 import torch  # noqa: E402
 
+from po_jepa.droid import conditions as cd  # noqa: E402
 from po_jepa.droid import evaluate as ev  # noqa: E402
 from po_jepa.droid import index as ix  # noqa: E402
 from po_jepa.droid import planning as pl  # noqa: E402
@@ -963,8 +964,18 @@ def summarize(config: DroidConfig, got: Mapping) -> dict:
                 definitions=dict(metrics={k: dict(source=v[0], parts=[[n, None if d is None else list(d)] for n, d in v[1]])
                                           for k, v in metric_specs(config).items()},
                                  not_comparable_for_ac=sorted(NOT_COMPARABLE),
+                                 ac_state_input=ac_state_inputs(config, ctx.conditions),
+                                 supplementary_conditions=[c for c in ctx.conditions if c in cd.NOPROP_AC],
                                  ac_interpolated_tcd=[f"tcd_ln:T={d}" for d in ev.AC_INTERPOLATED_TCD],
                                  epsilon_hat="median of tcd_normalized over all in-distribution windows of the cell"))
+
+
+def ac_state_inputs(config: DroidConfig, conditions: Sequence[str]) -> dict:
+    """vjepa2_ac 一族各条件的状态输入（09 §6.2、§15）：主表 AC 照 `model.ac_state`，`*_noprop` 是附表的无状态对照
+    （learned_constant）；DINO-WM、JEPA-WM 是 no-prop（§14）。其余条件不在表里。"""
+    out = {c: cd.state_input(c, config) for c in conditions if c in (*cd.STATE_AC, *cd.NOPROP_AC)}
+    out.update({c: "none (no-prop)" for c in conditions if c in cd.WM_CONDITIONS})
+    return out
 
 
 def _per_seed_many(ctx, split, c, metrics):
@@ -1054,6 +1065,10 @@ def markdown(summary: Mapping) -> str:
     errors = summary["precision"]["errors"]
     lines += ["", "## 精度匹配（id_test，16×16，同分布时长）", "", *_header(["条件", "e_c"])]
     lines += [_row([c, sa._f(errors[c])]) for c in conds]
+    states = summary["definitions"]["ac_state_input"]
+    if states:
+        lines += ["", "AC 一族的状态输入（09 §6.2、§14、§15）：" + "，".join(f"{c} {v}" for c, v in states.items()),
+                  "（*_noprop 是附表的无状态对照，不进论文主表；表里列出是为了同一处核对。）"]
     for split in SPLITS:
         t = summary["splits"][split]["by_outcome"]["all"]
         lines += ["", f"## {split}"]

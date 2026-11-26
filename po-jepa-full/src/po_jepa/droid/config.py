@@ -31,7 +31,8 @@ OOD_TEST_EPISODES = 500          # 00 §3.1 第 5 项：留出实验室测试集
 TRAINING_DURATIONS = (1, 2, 4, 8)  # v7 的 WindowQuery 和时间一致性的半程都依赖它
 CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "fixed_fourier", "koopman",
               "matched_transformer", "transformer_consistency", "vjepa2_ac", "vjepa2_ac_small",
-              "dino_wm_small", "jepa_wm_small")  # 08 §1.2，顺序固定；后两个 2026-11-26 加（09 §14）
+              "dino_wm_small", "jepa_wm_small",  # 08 §1.2，顺序固定；这两个 2026-11-26 加（09 §14）
+              "vjepa2_ac_noprop", "vjepa2_ac_small_noprop")   # 2026-11-26：AC 无状态对照（09 §15）
 ACTION_SOURCES = ("realized", "commanded")
 AC_STATES = ("true_state", "learned_constant")
 SPECTRAL_BACKENDS = ("cpu_batched", "cpu_threads", "cuda_float64")  # 09 §6.3

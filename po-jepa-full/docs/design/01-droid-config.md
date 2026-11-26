@@ -107,7 +107,8 @@ training:
   seeds: [1703, 1704, 1705]     # overlay 覆盖
   conditions: [po_jepa_full, po_jepa_no_consistency, fixed_fourier, koopman,
                matched_transformer, transformer_consistency, vjepa2_ac, vjepa2_ac_small,
-               dino_wm_small, jepa_wm_small]
+               dino_wm_small, jepa_wm_small,
+               vjepa2_ac_noprop, vjepa2_ac_small_noprop]   # 最后两个：AC 无状态对照（09 §15）
   untrained: [identity, vjepa2_ac_zeroshot]
 matching:                       # 参数量匹配的候选，只按参数量选（09 §2.3）
   tolerance: 0.01

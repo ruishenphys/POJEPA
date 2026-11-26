@@ -52,6 +52,7 @@ OUTCOME = {"A": "success", "B": "failure", "C": "success", "D": "success", "E": 
 OFFSET = {"po_jepa_full": 0., "po_jepa_no_consistency": .01, "fixed_fourier": .2, "koopman": .3,
           "matched_transformer": .4, "transformer_consistency": .41, "vjepa2_ac": .6, "vjepa2_ac_small": .7,
           "dino_wm_small": .75, "jepa_wm_small": .8,   # 2026-11-26（09 §14）
+          "vjepa2_ac_noprop": .65, "vjepa2_ac_small_noprop": .72,   # 2026-11-26：AC 无状态对照（09 §15）
           "identity": 1., "vjepa2_ac_zeroshot": .9}
 DURATIONS = sorted({*CFG.evaluation.durations_id, *CFG.evaluation.durations_heldout, *CFG.evaluation.durations_long})
 SIGMA = .5

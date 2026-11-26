@@ -104,6 +104,12 @@ def save(condition: str, path: Path, *, model, optimizer, loss_config, completed
     """v7 的保存函数（`comparison.save_checkpoint` 按条件分发）；返回文件 SHA。目标已存在就报错（不覆盖）。"""
     if condition not in cd.CONDITIONS:
         raise ValueError(f"{condition} is not a trained DROID condition")
+    if condition in cd.NOPROP_AC:
+        # 09 §15：共享的 comparison.save_checkpoint 只认仿真的 AC 名；无状态对照直接用它对 AC 的那一支（同一保存函数、
+        # 同一格式），检查点里记自己的条件名
+        training._count(completed, "completed_steps")
+        return ac_training.save_checkpoint(condition, Path(path), model, optimizer, completed, sampling_state(completed),
+                                           comparison._provenance(provenance), model.ac_info)
     return comparison.save_checkpoint(condition, Path(path), model, optimizer, loss_config, completed,
                                       sampling_state(completed), provenance)
 

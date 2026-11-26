@@ -29,7 +29,7 @@ S28b：上表的 Φ / p_out 次数是二等分（默认）时的值；多段切�
 
 ### 1.2 DROID（第二期以后）
 
-8 个训练条件：po_jepa_full、po_jepa_no_consistency、fixed_fourier、koopman、matched_transformer、transformer_consistency、vjepa2_ac、vjepa2_ac_small；2 个不训练的对照：identity、vjepa2_ac_zeroshot。单项消融只在仿真上做。DROID 上 m = 7，Koopman 的 K = 87（§5.6）；PO-JEPA 的参数量按 7 维动作、token 写法重新数（248,737；DROID 配置还没进代码，是手算：v7 协议的 `model` 块只把 `dynamics.action_dim` 换成 7，用 `DynamicsConfig` 构造 POJEPA 数出来的。模态写法下是 236,898）。
+8 个训练条件：po_jepa_full、po_jepa_no_consistency、fixed_fourier、koopman、matched_transformer、transformer_consistency、vjepa2_ac、vjepa2_ac_small；2 个不训练的对照：identity、vjepa2_ac_zeroshot。（2026-11-26 又加了 4 个训练条件：dino_wm_small、jepa_wm_small（09 §14），AC 无状态对照 vjepa2_ac_noprop、vjepa2_ac_small_noprop（09 §15）。）单项消融只在仿真上做。DROID 上 m = 7，Koopman 的 K = 87（§5.6）；PO-JEPA 的参数量按 7 维动作、token 写法重新数（248,737；DROID 配置还没进代码，是手算：v7 协议的 `model` 块只把 `dynamics.action_dim` 换成 7，用 `DynamicsConfig` 构造 POJEPA 数出来的。模态写法下是 236,898）。
 
 DROID 复用 S10 写的 fixed_fourier 和 koopman 构造函数，所以这两个构造函数要把模型配置块（projection/graph/dynamics/integrator，Koopman 另有 `KoopmanConfig`）和初始化种子作为显式参数：仿真调用时传 `load_protocol()["model"]` 和 `check.model_seed()`，结果和 §4.2、§5.2 写的完全相同；DROID 调用时传 09 §2.1 的配置块和运行种子。Transformer 和 AC 在 DROID 上的规格见 09 §2.2。
 

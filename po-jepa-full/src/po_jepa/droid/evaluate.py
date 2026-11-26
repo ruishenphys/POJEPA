@@ -79,7 +79,8 @@ PARTITION_DURATIONS = (4, 8)
 TRIANGLE_TOLERANCE = d4.TRIANGLE_TOLERANCE
 STATE_AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", "vjepa2_ac_zeroshot")   # true_state 时要绑定起点状态（09 §6.2）
 # ACPredictor 一族（逐帧自回归、输出 LN 空间、原始帧率走小步前向）；DINO-WM、JEPA-WM 是 no-prop，不绑定状态（09 §14）
-AC_CONDITIONS = (*STATE_AC_CONDITIONS, "dino_wm_small", "jepa_wm_small")
+# AC 无状态对照（vjepa2_ac_noprop、vjepa2_ac_small_noprop，09 §15）同属这一族，也不绑定状态
+AC_CONDITIONS = (*STATE_AC_CONDITIONS, "dino_wm_small", "jepa_wm_small", "vjepa2_ac_noprop", "vjepa2_ac_small_noprop")
 INPUT_SPACE_METRICS = ("tcd_normalized", "scd_normalized:h=8", "scd_normalized:h=12")   # AC 不可比（10 §3.8、§8.6）
 AC_INTERPOLATED_TCD = (1, 3)                                  # 10 §8.6：半程 0.5、1.5 是 AC 的插值
 partition_label = d4.partition_label

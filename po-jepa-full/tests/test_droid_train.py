@@ -150,7 +150,7 @@ def calib(condition, weights=WEIGHTS) -> tr.Calibration:
 
 
 def go(root, out, condition, config, **kw) -> int:
-    kw.setdefault("ac_checkpoint", root[3] if condition == "vjepa2_ac" else None)
+    kw.setdefault("ac_checkpoint", root[3] if condition in cd.OFFICIAL_AC else None)   # 含 vjepa2_ac_noprop（09 §15）
     return tr.run(out, condition=condition, seed=1703, config=config, data=make_data(root, config),
                   calibration=kw.pop("calibration", calib(condition)), device="cpu", workers=0, **kw)
 
@@ -260,7 +260,7 @@ def check_complete(root, out, condition, config):
             "report.json", "COMPLETE.json"} <= names and "FAILED.json" not in names
     entries = ck.read_index(out/"checkpoints")
     steps = sorted(e["step"] for e in entries if e["kind"] == "validation")
-    assert steps == ([0, 10, 20, 30] if condition != "vjepa2_ac" else sorted({0, 10, 20, 30} & {30, _best(out)}))
+    assert steps == ([0, 10, 20, 30] if condition not in tr.RETAIN_TWO else sorted({0, 10, 20, 30} & {30, _best(out)}))
     assert {p.name for p in (out/"checkpoints").iterdir()} == {e["path"] for e in entries} | {"index.json"}
     for e in entries:
         assert cache.file_sha(out/"checkpoints"/e["path"]) == e["sha256"]

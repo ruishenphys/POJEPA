@@ -60,7 +60,7 @@ LOG_FILE = "train-log.jsonl"
 STARTS_FILE = "starts.jsonl"
 EXIT_DONE, EXIT_FAILED, EXIT_REGISTRATION, EXIT_WEAK, EXIT_REQUEUE = 0, 1, 2, 3, 75   # 09 §4.7
 OFFICIAL_AC_FILE = "vjepa2-ac-vitg.pt"            # 12 §1：<数据根>/checkpoints/
-RETAIN_TWO = ("vjepa2_ac",)                       # 09 §4.4：只留最优和最近一个验证点（约 3.6 GB 一个）
+RETAIN_TWO = ("vjepa2_ac", "vjepa2_ac_noprop")   # 09 §4.4：官方规模只留最优和最近一个验证点（约 3.6 GB 一个；无状态对照同，§15）
 
 
 class ConsistencyTooWeak(RuntimeError):
@@ -699,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
     data = load_data(config, a.data_root)
     calibration = load_calibration(a.run_root, config, condition, feature_manifest_sha256=data.feature_manifest_sha256,
                                    action_scale_sha256=data.action_scale_sha256, train_set=dict(count=len(data.train_set), sha256=wn.list_sha256(data.train_set)))
-    ac_checkpoint = Path(a.data_root)/"checkpoints"/OFFICIAL_AC_FILE if condition == "vjepa2_ac" else None
+    ac_checkpoint = Path(a.data_root)/"checkpoints"/OFFICIAL_AC_FILE if condition in cd.OFFICIAL_AC else None
     return run(out, condition=condition, seed=seed, config=config, data=data, calibration=calibration, device=a.device,
                time_limit_minutes=a.time_limit_minutes, retry=a.retry, ac_checkpoint=ac_checkpoint, workers=a.workers,
                started=started)

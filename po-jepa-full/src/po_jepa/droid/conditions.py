@@ -16,6 +16,10 @@
   改成 7 维动作，DINO-WM 的前馈宽 `mlp_hidden`、JEPA-WM 的 `mlp_ratio` 按 §2.3 的同一规则对 DROID 的 PO-JEPA 重新匹配
   （候选在 `matching.dino_wm_small_mlp_hidden_candidates`、`jepa_wm_small_mlp_ratio_candidates`）；从头训练，不吃本体状态
   （no-prop，上游 DROID 配方），训练步、优化器在 `droid/wm.py`。
+- vjepa2_ac_noprop、vjepa2_ac_small_noprop（2026-11-26，09 §15，Jerry 决策卡定的 AC 无状态对照）：分别和 vjepa2_ac、
+  vjepa2_ac_small 完全相同（构造、官方权重载入、参数匹配规则、损失、优化器、学习率），只把 `state_input` 固定成
+  `learned_constant`（v7 做法：不吃真实状态，一个可学习常向量占状态 token 的位置），与 `model.ac_state` 无关；训练不传状态，
+  验证、评测、规划不绑定起点状态。和主配置的其余条件共用数据、特征、σ_z 和 check/env，不另起配置、不重编码。
 - 损失：po_jepa_full、fixed_fourier、transformer_consistency 的两个权重由调用者从 `lambda-<条件>.json` 读出后经
   `weights` 传进来（S09a 定：工厂不读文件），其余条件两个权重为 0（AC 只用它的学习率调度）。
 - 求谱后端：GraphSpectrum 的 `eig_backend = model.spectral_backend`、`eig_threads = resources.train.cpus`（09 §6.3）。
@@ -56,15 +60,19 @@ PO_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "fixed_fourier")
 TRANSFORMER_CONDITIONS = ("matched_transformer", "transformer_consistency")
 WM_CONDITIONS = wm.WM_CONDITIONS                 # 09 §14：dino_wm_small、jepa_wm_small（ACPredictor 的另两种条件方式）
 # ACPredictor 一族：AC 片段批、ac_training 的检查点格式、逐帧自回归前向。只有 STATE_AC 在 ac_state: true_state 时绑定状态。
-AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", *WM_CONDITIONS)
+# 09 §15：AC 无状态对照 → 同构造的 AC 条件（ac_training 的峰值学习率、autocast 按后者）
+NOPROP_AC = dict(vjepa2_ac_noprop="vjepa2_ac", vjepa2_ac_small_noprop="vjepa2_ac_small")
+AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", *WM_CONDITIONS, *NOPROP_AC)
 STATE_AC = ("vjepa2_ac", "vjepa2_ac_small", "vjepa2_ac_zeroshot")
-OFFICIAL_AC = ("vjepa2_ac", "vjepa2_ac_zeroshot")
+OFFICIAL_AC = ("vjepa2_ac", "vjepa2_ac_zeroshot", "vjepa2_ac_noprop")    # 官方规模、载入官方权重
+SMALL_AC = ("vjepa2_ac_small", "vjepa2_ac_small_noprop")                # 缩小版、从头训练、按 §2.3 匹配
 LAMBDA_CONDITIONS = ("po_jepa_full", "fixed_fourier", "transformer_consistency")   # 09 §1：各有一条 calibrate/lambda
 # training._loss_config 的标签（检查点里存的 condition / loss_config 快照）
 LOSS_LABELS = dict(po_jepa_full="full", po_jepa_no_consistency="no_consistency", fixed_fourier="full",
                    koopman="no_consistency", matched_transformer="no_consistency", transformer_consistency="full",
                    vjepa2_ac="no_consistency", vjepa2_ac_small="no_consistency",
-                   dino_wm_small="no_consistency", jepa_wm_small="no_consistency")
+                   dino_wm_small="no_consistency", jepa_wm_small="no_consistency",
+                   vjepa2_ac_noprop="no_consistency", vjepa2_ac_small_noprop="no_consistency")
 # 09 §2.4：同一种子下初始权重哈希必须相等的参照条件
 REFERENCE = dict(po_jepa_no_consistency="po_jepa_full", fixed_fourier="po_jepa_full",
                  transformer_consistency="matched_transformer", vjepa2_ac_zeroshot="vjepa2_ac")
@@ -136,14 +144,24 @@ def transformer_spec(feedforward: int) -> TransformerSpec:
     return TransformerSpec(action_dim=ACTION_DIM, feedforward=feedforward, **TRANSFORMER_FIXED)
 
 
-def ac_small_spec(config: DroidConfig, mlp_ratio: float) -> ac_baseline.ACSpec:
-    return ac_baseline.ACSpec(mlp_ratio=mlp_ratio, action_dim=ACTION_DIM, state_input=config.model.ac_state,
+def state_input(condition: str, config: DroidConfig) -> str:
+    """vjepa2_ac 一族（官方规模、缩小版、zero-shot）的 `ACSpec.state_input`：无状态对照（09 §15）固定 learned_constant，
+    其余取 `model.ac_state`。"""
+    if condition in NOPROP_AC:
+        return "learned_constant"
+    if condition in STATE_AC:
+        return config.model.ac_state
+    raise ValueError(f"{condition} is not a vjepa2_ac condition")
+
+
+def ac_small_spec(config: DroidConfig, mlp_ratio: float, condition: str = "vjepa2_ac_small") -> ac_baseline.ACSpec:
+    return ac_baseline.ACSpec(mlp_ratio=mlp_ratio, action_dim=ACTION_DIM, state_input=state_input(condition, config),
                               **AC_SMALL_FIXED)
 
 
-def official_ac_spec(config: DroidConfig) -> ac_baseline.ACSpec:
-    """官方规模（结构字段取 `ac_baseline.OFFICIAL`），7 维动作、`model.ac_state` 的状态输入。"""
-    return dataclasses.replace(ac_baseline.OFFICIAL, action_dim=ACTION_DIM, state_input=config.model.ac_state)
+def official_ac_spec(config: DroidConfig, condition: str = "vjepa2_ac") -> ac_baseline.ACSpec:
+    """官方规模（结构字段取 `ac_baseline.OFFICIAL`），7 维动作、`state_input(condition, config)` 的状态输入。"""
+    return dataclasses.replace(ac_baseline.OFFICIAL, action_dim=ACTION_DIM, state_input=state_input(condition, config))
 
 
 def _count(build) -> int:
@@ -157,10 +175,10 @@ def match_transformer(config: DroidConfig, po: int) -> dict:
     return _match(po, rows, config.matching.tolerance, "matched_transformer feedforward")
 
 
-def match_ac_small(config: DroidConfig, po: int) -> dict:
+def match_ac_small(config: DroidConfig, po: int, condition: str = "vjepa2_ac_small") -> dict:
     rows = [dict(spec=ac_baseline.spec_snapshot(s), parameters=_count(lambda s=s: ac_baseline.ACPredictor(s)))
-            for s in (ac_small_spec(config, r) for r in config.matching.ac_small_mlp_ratio_candidates)]
-    return _match(po, rows, config.matching.tolerance, "vjepa2_ac_small mlp_ratio")
+            for s in (ac_small_spec(config, r, condition) for r in config.matching.ac_small_mlp_ratio_candidates)]
+    return _match(po, rows, config.matching.tolerance, f"{condition} mlp_ratio")
 
 
 def wm_spec(condition: str, value) -> ac_baseline.ACSpec:
@@ -185,7 +203,7 @@ def match_wm(condition: str, config: DroidConfig, po: int) -> dict:
 
 def binds_state(condition: str, config: DroidConfig) -> bool:
     """验证、评测、规划是否给前向绑定起点状态（09 §6.2）：只有吃真实状态的 AC（STATE_AC）在 ac_state: true_state 时。
-    DINO-WM、JEPA-WM 是 no-prop（§14），任何 ac_state 下都不绑定。"""
+    DINO-WM、JEPA-WM 是 no-prop（§14），AC 无状态对照（§15）不吃状态，任何 ac_state 下都不绑定。"""
     return condition in STATE_AC and config.model.ac_state == "true_state"
 
 
@@ -278,12 +296,12 @@ def build(condition: str, *, config: DroidConfig, seed: int, sigma_z: float, dev
         model.wm_seed = seed                       # JEPA-WM 滚动前缀按本任务种子取（droid/wm.py 第 2 条）
         model.ac_info = dict(condition=condition, spec=ac_baseline.spec_snapshot(spec), **ac,
                              parameters=ac_baseline.parameter_count(model))
-    elif condition in OFFICIAL_AC or condition == "vjepa2_ac_small":
-        if condition == "vjepa2_ac_small":
-            matching = match_ac_small(config, po)
+    elif condition in OFFICIAL_AC or condition in SMALL_AC:
+        if condition in SMALL_AC:
+            matching = match_ac_small(config, po, condition)
             spec = ac_baseline.ACSpec(**matching["selected"])
         else:
-            spec = official_ac_spec(config)
+            spec = official_ac_spec(config, condition)
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(seed)
             model = ac_baseline.ACPredictor(spec)
@@ -291,9 +309,10 @@ def build(condition: str, *, config: DroidConfig, seed: int, sigma_z: float, dev
         if condition in OFFICIAL_AC:
             ac.update(_official(model, ac_checkpoint))
         elif ac_checkpoint is not None:
-            raise ValueError("vjepa2_ac_small is trained from scratch; it takes no official weights")
+            raise ValueError(f"{condition} is trained from scratch; it takes no official weights")
         model = model.to(device)
-        model.ac_condition = "vjepa2_ac" if condition in OFFICIAL_AC else condition   # 优化器峰值、存档（ac_training）
+        # 优化器峰值、autocast（ac_training）；无状态对照和同构造的 AC 相同（09 §15）
+        model.ac_condition = "vjepa2_ac" if condition in OFFICIAL_AC else "vjepa2_ac_small"
         model.ac_info = dict(condition=condition, spec=ac_baseline.spec_snapshot(spec), **ac,
                              parameters=ac_baseline.parameter_count(model))
     else:   # identity
@@ -369,7 +388,8 @@ def train_step(condition: str, model, optimizer, batch, loss_config: LossConfig,
     if condition in WM_CONDITIONS:                 # no-prop：不传状态，任何 ac_state 下都一样（§14）
         return wm.train_step(condition, model, optimizer, batch, loss_config, completed, seed=model.wm_seed)
     if condition in AC_CONDITIONS:
-        states = batch.states if ac_state == "true_state" else None
+        # 只有吃真实状态的 AC 在 true_state 下传状态；无状态对照（09 §15）任何 ac_state 下都不传
+        states = batch.states if ac_state == "true_state" and condition in STATE_AC else None
         return ac_training.train_step(model.ac_condition, model, optimizer, batch.features, batch.actions, loss_config,
                                       completed, states=states)
     if condition in ("po_jepa_full", "po_jepa_no_consistency"):
