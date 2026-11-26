@@ -30,7 +30,8 @@ OVERLAY_PREFIX = "resources."
 OOD_TEST_EPISODES = 500          # 00 §3.1 第 5 项：留出实验室测试集 500 条
 TRAINING_DURATIONS = (1, 2, 4, 8)  # v7 的 WindowQuery 和时间一致性的半程都依赖它
 CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "fixed_fourier", "koopman",
-              "matched_transformer", "transformer_consistency", "vjepa2_ac", "vjepa2_ac_small")  # 08 §1.2，顺序固定
+              "matched_transformer", "transformer_consistency", "vjepa2_ac", "vjepa2_ac_small",
+              "dino_wm_small", "jepa_wm_small")  # 08 §1.2，顺序固定；后两个 2026-11-26 加（09 §14）
 ACTION_SOURCES = ("realized", "commanded")
 AC_STATES = ("true_state", "learned_constant")
 SPECTRAL_BACKENDS = ("cpu_batched", "cpu_threads", "cuda_float64")  # 09 §6.3
@@ -123,6 +124,8 @@ class MatchingConfig:
     tolerance: float
     transformer_feedforward_candidates: tuple[int, ...]
     ac_small_mlp_ratio_candidates: tuple[float, ...]
+    dino_wm_small_mlp_hidden_candidates: tuple[int, ...]     # 09 §14：DINO-WM 前馈宽
+    jepa_wm_small_mlp_ratio_candidates: tuple[float, ...]    # 09 §14：JEPA-WM mlp_ratio
 
 
 @dataclass(frozen=True)

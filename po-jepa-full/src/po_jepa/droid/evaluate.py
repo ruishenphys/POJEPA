@@ -77,7 +77,9 @@ CROSS = d4.CROSS                                              # 10 §3.4：(T, n
 UNEQUAL = d4.UNEQUAL                                          # 10 §3.5：(d, (τ, σ))
 PARTITION_DURATIONS = (4, 8)
 TRIANGLE_TOLERANCE = d4.TRIANGLE_TOLERANCE
-AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", "vjepa2_ac_zeroshot")
+STATE_AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", "vjepa2_ac_zeroshot")   # true_state 时要绑定起点状态（09 §6.2）
+# ACPredictor 一族（逐帧自回归、输出 LN 空间、原始帧率走小步前向）；DINO-WM、JEPA-WM 是 no-prop，不绑定状态（09 §14）
+AC_CONDITIONS = (*STATE_AC_CONDITIONS, "dino_wm_small", "jepa_wm_small")
 INPUT_SPACE_METRICS = ("tcd_normalized", "scd_normalized:h=8", "scd_normalized:h=12")   # AC 不可比（10 §3.8、§8.6）
 AC_INTERPOLATED_TCD = (1, 3)                                  # 10 §8.6：半程 0.5、1.5 是 AC 的插值
 partition_label = d4.partition_label
@@ -989,10 +991,11 @@ def evaluate_job(output: Path | str, *, model, condition: str, seed: int | None,
             raise ValueError(f"{out} is complete for another request (condition, seed, checkpoint, config or inputs "
                              "changed); use a new output directory")
         return report
-    if condition in AC_CONDITIONS and config.model.ac_state == "true_state" and bind is None:
+    if condition in STATE_AC_CONDITIONS and config.model.ac_state == "true_state" and bind is None:
         raise ValueError("ac_state: true_state needs the state-binding wrapper (09 §6.2) for AC conditions")
-    if condition not in AC_CONDITIONS and bind is not None:
-        raise ValueError("only AC conditions take a state-binding wrapper")
+    if condition not in STATE_AC_CONDITIONS and bind is not None:
+        raise ValueError("only the state-taking AC conditions take a state-binding wrapper (DINO-WM / JEPA-WM are "
+                         "no-prop, 09 §14)")
     if condition in AC_CONDITIONS and extra_reader is not None and ac_steps is None:
         raise ValueError("the AC frame-rate axis needs the small-step forward ac_steps (10 §8.4)")
     if condition not in AC_CONDITIONS and ac_steps is not None:

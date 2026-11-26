@@ -298,7 +298,7 @@ class StopFlag:
 def validate(model, *, condition: str, data: TrainData, config: DroidConfig, loss_config, device) -> dict:
     """1,200 个验证窗口按文件顺序每 64 个一批，eval 模式、no_grad，每个窗口一次直接前向的未来误差
     `jepa_distance(prediction, raw_target).per_sample`；AC 官方输入用绑定起点状态的前向（09 §6.2）。"""
-    bind = condition in cd.AC_CONDITIONS and config.model.ac_state == "true_state"
+    bind = cd.binds_state(condition, config)      # DINO-WM、JEPA-WM 是 no-prop，不绑定（09 §14）
     modes = {m: m.training for m in model.modules()}
     started = time.perf_counter()
     values = []

@@ -12,6 +12,10 @@
 - vjepa2_ac、vjepa2_ac_zeroshot：官方规模 `ACSpec(action_dim=7, state_input=model.ac_state)`，载入官方权重
   （`ac_checkpoint`，S08b 的 `load_official`）；vjepa2_ac_small：`ACSpec(width=64, depth=1, heads=4, mlp_ratio=按 §2.3 选,
   action_dim=7, state_input=model.ac_state)`，从头训练。identity：`IdentityPredictor(action_dim=7)`。
+- dino_wm_small、jepa_wm_small（2026-11-26，09 §14）：仿真路径的同名条件（`ac_baseline.DINO_WM_SMALL` / `JEPA_WM_SMALL`）
+  改成 7 维动作，DINO-WM 的前馈宽 `mlp_hidden`、JEPA-WM 的 `mlp_ratio` 按 §2.3 的同一规则对 DROID 的 PO-JEPA 重新匹配
+  （候选在 `matching.dino_wm_small_mlp_hidden_candidates`、`jepa_wm_small_mlp_ratio_candidates`）；从头训练，不吃本体状态
+  （no-prop，上游 DROID 配方），训练步、优化器在 `droid/wm.py`。
 - 损失：po_jepa_full、fixed_fourier、transformer_consistency 的两个权重由调用者从 `lambda-<条件>.json` 读出后经
   `weights` 传进来（S09a 定：工厂不读文件），其余条件两个权重为 0（AC 只用它的学习率调度）。
 - 求谱后端：GraphSpectrum 的 `eig_backend = model.spectral_backend`、`eig_threads = resources.train.cpus`（09 §6.3）。
@@ -32,6 +36,7 @@ import yaml
 
 from po_jepa import ac_baseline
 from po_jepa.baselines import IdentityPredictor, TokenTransformer, TransformerSpec
+from po_jepa.droid import wm
 from po_jepa.droid.config import CONDITIONS, DroidConfig
 from po_jepa.dynamics import DynamicsConfig, ModalDynamics
 from po_jepa.fourier import FourierSpectrum, build_fixed_fourier
@@ -49,13 +54,17 @@ UNTRAINED = ("identity", "vjepa2_ac_zeroshot")
 ALL = (*CONDITIONS, *UNTRAINED)
 PO_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "fixed_fourier")
 TRANSFORMER_CONDITIONS = ("matched_transformer", "transformer_consistency")
-AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small")
+WM_CONDITIONS = wm.WM_CONDITIONS                 # 09 §14：dino_wm_small、jepa_wm_small（ACPredictor 的另两种条件方式）
+# ACPredictor 一族：AC 片段批、ac_training 的检查点格式、逐帧自回归前向。只有 STATE_AC 在 ac_state: true_state 时绑定状态。
+AC_CONDITIONS = ("vjepa2_ac", "vjepa2_ac_small", *WM_CONDITIONS)
+STATE_AC = ("vjepa2_ac", "vjepa2_ac_small", "vjepa2_ac_zeroshot")
 OFFICIAL_AC = ("vjepa2_ac", "vjepa2_ac_zeroshot")
 LAMBDA_CONDITIONS = ("po_jepa_full", "fixed_fourier", "transformer_consistency")   # 09 §1：各有一条 calibrate/lambda
 # training._loss_config 的标签（检查点里存的 condition / loss_config 快照）
 LOSS_LABELS = dict(po_jepa_full="full", po_jepa_no_consistency="no_consistency", fixed_fourier="full",
                    koopman="no_consistency", matched_transformer="no_consistency", transformer_consistency="full",
-                   vjepa2_ac="no_consistency", vjepa2_ac_small="no_consistency")
+                   vjepa2_ac="no_consistency", vjepa2_ac_small="no_consistency",
+                   dino_wm_small="no_consistency", jepa_wm_small="no_consistency")
 # 09 §2.4：同一种子下初始权重哈希必须相等的参照条件
 REFERENCE = dict(po_jepa_no_consistency="po_jepa_full", fixed_fourier="po_jepa_full",
                  transformer_consistency="matched_transformer", vjepa2_ac_zeroshot="vjepa2_ac")
@@ -154,6 +163,32 @@ def match_ac_small(config: DroidConfig, po: int) -> dict:
     return _match(po, rows, config.matching.tolerance, "vjepa2_ac_small mlp_ratio")
 
 
+def wm_spec(condition: str, value) -> ac_baseline.ACSpec:
+    """09 §14：仿真的同名规格改成 7 维动作，再把要匹配的那一项换成候选值（DINO-WM mlp_hidden，JEPA-WM mlp_ratio）。"""
+    base = dataclasses.replace(ac_baseline.spec_for(condition), action_dim=ACTION_DIM)
+    if condition == "dino_wm_small":
+        return dataclasses.replace(base, mlp_hidden=value)
+    if condition == "jepa_wm_small":
+        return dataclasses.replace(base, mlp_ratio=value)
+    raise ValueError(f"{condition} is not a DINO-WM / JEPA-WM condition")
+
+
+def match_wm(condition: str, config: DroidConfig, po: int) -> dict:
+    """09 §14：和 vjepa2_ac_small 同一规则（§2.3）在配置的候选里选。"""
+    candidates = dict(dino_wm_small=config.matching.dino_wm_small_mlp_hidden_candidates,
+                      jepa_wm_small=config.matching.jepa_wm_small_mlp_ratio_candidates)[condition]
+    rows = [dict(spec=ac_baseline.spec_snapshot(s), parameters=_count(lambda s=s: ac_baseline.ACPredictor(s)))
+            for s in (wm_spec(condition, v) for v in candidates)]
+    what = "dino_wm_small mlp_hidden" if condition == "dino_wm_small" else "jepa_wm_small mlp_ratio"
+    return _match(po, rows, config.matching.tolerance, what)
+
+
+def binds_state(condition: str, config: DroidConfig) -> bool:
+    """验证、评测、规划是否给前向绑定起点状态（09 §6.2）：只有吃真实状态的 AC（STATE_AC）在 ac_state: true_state 时。
+    DINO-WM、JEPA-WM 是 no-prop（§14），任何 ac_state 下都不绑定。"""
+    return condition in STATE_AC and config.model.ac_state == "true_state"
+
+
 def match_koopman(config: DroidConfig, po: int) -> dict:
     """08 §5.6：K 取任意正整数里使参数量最接近的（相等取较小的），只有这一个候选。"""
     k = choose_modes(po, action_dim=ACTION_DIM)
@@ -227,6 +262,22 @@ def build(condition: str, *, config: DroidConfig, seed: int, sigma_z: float, dev
     elif condition == "koopman":
         matching = match_koopman(config, po)
         model = build_koopman(KoopmanConfig(**matching["selected"]), seed, device)
+    elif condition in WM_CONDITIONS:
+        if ac_checkpoint is not None:
+            raise ValueError(f"{condition} is trained from scratch; it takes no official weights")
+        matching = match_wm(condition, config, po)
+        spec = ac_baseline.ACSpec(**matching["selected"])
+        with torch.random.fork_rng(devices=[]):
+            torch.random.default_generator.manual_seed(seed)
+            model = ac_baseline.ACPredictor(spec)
+        ac = dict(init="scratch", source=ac_baseline.JEPA_WMS_SOURCE,
+                  upstream_pred_type="dino_wm" if spec.conditioning == "feature" else "AdaLN", proprio=wm.PROPRIO,
+                  betas=list(wm.DROID_BETAS[condition]))
+        model = model.to(device)
+        model.ac_condition = condition
+        model.wm_seed = seed                       # JEPA-WM 滚动前缀按本任务种子取（droid/wm.py 第 2 条）
+        model.ac_info = dict(condition=condition, spec=ac_baseline.spec_snapshot(spec), **ac,
+                             parameters=ac_baseline.parameter_count(model))
     elif condition in OFFICIAL_AC or condition == "vjepa2_ac_small":
         if condition == "vjepa2_ac_small":
             matching = match_ac_small(config, po)
@@ -297,6 +348,8 @@ def make_optimizer(condition: str, model) -> torch.optim.Optimizer:
         return comparison.make_optimizer(model)
     if condition == "koopman":
         return addon_conditions.make_koopman_optimizer(model)
+    if condition in WM_CONDITIONS:
+        return wm.make_optimizer(condition, model)
     if condition in AC_CONDITIONS:
         return ac_training.make_optimizer(model, model.ac_condition)
     raise ValueError(f"{condition} is not trained")
@@ -313,6 +366,8 @@ def train_step(condition: str, model, optimizer, batch, loss_config: LossConfig,
     """一步更新（09 §4.3）：返回 (TrainingStepResult, 本步学习率)。PO-JEPA 类走 `training.train_step`（fixed_fourier
     经 S10 的分发核谱模块类型），matched_transformer 走 `comparison.condition_step`，transformer_consistency、koopman 走
     S10 的单步，AC 走 `ac_training.train_step`（`ac_state: true_state` 时传片段的真实状态）。"""
+    if condition in WM_CONDITIONS:                 # no-prop：不传状态，任何 ac_state 下都一样（§14）
+        return wm.train_step(condition, model, optimizer, batch, loss_config, completed, seed=model.wm_seed)
     if condition in AC_CONDITIONS:
         states = batch.states if ac_state == "true_state" else None
         return ac_training.train_step(model.ac_condition, model, optimizer, batch.features, batch.actions, loss_config,

@@ -81,6 +81,10 @@ S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推�
 - 资源取配置的 `resources.<阶段>`（01 §3），`calibrate/sigma-z` 和 `eval/spectral-gap` 用 `stats` 的资源（CPU）。
 - `priority`：越小越先排。训练里 vjepa2_ac 为 1（最慢），其余 PO-JEPA 类和 AC 缩小版为 2，Transformer 类和 Koopman 为 3；其他阶段按拓扑层次。只影响同时有多个任务可跑时的顺序。
 - 生成时核对：每个依赖都存在、没有环、完成标志互不相同、每个片都有下载、准备、编码三个任务。
+- 按方法分开跑（2026-11-26，导师要求）：`--conditions a,b` 只排这些条件（可含 identity、vjepa2_ac_zeroshot）的训练和评测，
+  连同它们依赖的数据、标定和 check/env；不排 `eval/spectral-gap` 和 `summary`，JSON 多一个键 `"conditions"`。
+  任务和完整任务图里的同一任务逐键相同，完成标志相同，所以分开跑完的任务在完整任务图里直接算完成。
+  DINO-WM、JEPA-WM（09 §14）的 priority 和 AC 缩小版同为 2。
 
 ## 5. 后端
 

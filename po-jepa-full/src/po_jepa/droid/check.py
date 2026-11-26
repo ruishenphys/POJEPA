@@ -59,6 +59,8 @@ LOADER_STEPS = 200               # §7 第 5 条
 PARAMETER_TABLE = dict(po_jepa_full=248_737, po_jepa_no_consistency=248_737, fixed_fourier=248_737,
                        matched_transformer=249_024, transformer_consistency=249_024, koopman=248_512)
 AC_SMALL_TABLE = dict(true_state=249_344, learned_constant=248_896)
+# 09 §14：DINO-WM、JEPA-WM（no-prop，和 ac_state 无关）
+PARAMETER_TABLE.update(dino_wm_small=248_694, jepa_wm_small=248_508)
 
 
 def expected_parameters(condition: str, config: DroidConfig) -> int | None:
