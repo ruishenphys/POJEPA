@@ -268,3 +268,14 @@ def test_train_entry_passes_the_official_weights(tmp_path, monkeypatch, conditio
     want = tmp_path/"data"/"checkpoints"/tr.OFFICIAL_AC_FILE if condition == "vjepa2_ac_noprop" else None
     assert calls["condition"] == condition and calls["ac_checkpoint"] == want
     assert calls["out"] == tmp_path/"runs"/"pilot"/"train"/condition/"seed1703"
+
+
+def test_summary_labels_state_inputs_and_supplementary_controls():
+    """Codex ACNP1 P3：汇总写出 AC 一族的状态输入，并把两个无状态对照标成附表。"""
+    import droid_summary as ds
+    config = small()
+    got = ds.ac_state_inputs(config, (*CONDITIONS, "identity", "vjepa2_ac_zeroshot"))
+    assert got == dict(vjepa2_ac="true_state", vjepa2_ac_small="true_state", vjepa2_ac_zeroshot="true_state",
+                       vjepa2_ac_noprop="learned_constant", vjepa2_ac_small_noprop="learned_constant",
+                       dino_wm_small="none (no-prop)", jepa_wm_small="none (no-prop)")
+    assert ds.ac_state_inputs(_learned_constant(config), NOPROP) == dict.fromkeys(NOPROP, "learned_constant")
