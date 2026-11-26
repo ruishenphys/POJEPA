@@ -9,10 +9,13 @@ from pathlib import Path
 
 import torch
 
+from po_jepa import ac_baseline
+
 from . import cache, checks, comparison, data, environment, evaluation, plots
 
 JOB_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity",
-                  "vjepa2_ac_small", "vjepa2_ac", *comparison.ADDON_CONDITIONS)   # 07 §2.6：补跑的 6 个条件（S27a 加了 po_jepa_rollout_sup）
+                  "vjepa2_ac_small", "vjepa2_ac", *comparison.ADDON_CONDITIONS,   # 07 §2.6：补跑的 6 个条件（S27a 加了 po_jepa_rollout_sup）
+                  *ac_baseline.WM_CONDITIONS)   # 2026-11-25：DINO-WM、JEPA-WM 参数匹配基线
 
 
 def _light_preflight(features, output, device):

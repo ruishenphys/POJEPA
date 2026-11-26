@@ -16,7 +16,8 @@ FIRST = ("double_well", "van_der_pol", "multi_particle", "advection_diffusion", 
          "gray_scott", "push")
 SECOND = ("pendulum", "bouncing_balls", "wave", "cart_pole", "spring_chain")
 PAIR = tuple(s+"~tubelet=pair" for s in SECOND)
-CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
+CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac",
+              "dino_wm_small", "jepa_wm_small")   # 2026-11-25
 ADDON = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman", "po_jepa_rollout_sup")
 
 
@@ -98,7 +99,7 @@ def test_default_full_stage_has_12_scenes_and_second_order_is_pair():
     assert not lines[0].startswith("# 注意：二阶场景")          # 默认里没有单帧复制的二阶场景
     cmds = [l for l in lines if l and not l.startswith("#")]
     runs = [l for l in cmds if l.startswith("python run.py run ")]
-    assert len(runs) == 12*3*6 == 216
+    assert len(runs) == 12*3*8 == 288
     assert sum("encode_v7.py encode" in l for l in cmds) == 12*4
     assert sum("probe_actions.py" in l for l in cmds) == 12 and sum("run.py calibrate " in l for l in cmds) == 12
     want = {("double_well", ""), ("van_der_pol", ""), ("multi_particle", ""), ("advection_diffusion", ""),
@@ -157,12 +158,12 @@ def test_transfer_timing_space_read_the_merged_pair_test_set():
             assert train[1]["tubelet"] == "pair"
             assert feats == (train[0], {**train[1], **_knobs(tv)}), l
             checked += 1
-    assert checked == 6*53 + 3*6*6*5 + 3*6*6*5     # V3 标准档 53 格 × 6 条件；T3、S3 各 5 场景 × 6 项 × 3 种子 × 6 条件
+    assert checked == 8*53 + 3*6*8*5 + 3*6*8*5     # V3 标准档 53 格 × 8 条件；T3、S3 各 5 场景 × 6 项 × 3 种子 × 8 条件
 
 
 def test_plan_lines_plan_on_the_pair_base_scene_without_test_variant():
     plan = [l for l in _cmds("--stage", "variants") if "plan_v7.py" in l]
-    assert len(plan) == 12*6
+    assert len(plan) == 12*8
     for l in plan:
         assert "--test-variant" not in l
         job = _arg(l, "--job")
@@ -193,7 +194,7 @@ def test_dup_control_still_explicit_and_bad_scenes_refused():
     lines = _jobs("--stage", "full", "--scenes", "pendulum")
     assert lines[0].startswith("# 注意：二阶场景 pendulum") and "dup" in lines[0] and "tubelet=pair" in lines[0]
     cmds = [l for l in lines if l and not l.startswith("#")]
-    assert all("tubelet" not in l for l in cmds) and sum(l.startswith("python run.py run ") for l in cmds) == 18
+    assert all("tubelet" not in l for l in cmds) and sum(l.startswith("python run.py run ") for l in cmds) == 24
     mixed = _jobs("--stage", "full", "--scenes", "pendulum,pendulum~tubelet=pair")
     assert mixed[0] == ("# 注意：二阶场景 pendulum 按单帧复制（dup）编码，特征里看不到速度，是对照；"
                         "两帧编码要写 <场景>~tubelet=pair（默认场景就是这个写法）。")
@@ -234,10 +235,10 @@ def test_readout_and_long_paths_belong_to_the_same_scene():
             assert _arg(l, "--features") == (long if kind == "rollout" else feats(system, knobs)), l
             assert _arg(l, "--output").startswith(f"../results-v8/full/readout/{kind}/{name}/seed")
         checked += 1
-    assert checked == 12 + 12 + 2*12*3*6
+    assert checked == 12 + 12 + 2*12*3*8
     long_cmds = [l for l in _cmds("--stage", "long") if "long_rollout.py" in l]
     for l in long_cmds:
         system, knobs = _scene_of_path(_arg(l, "--job"))
         assert _arg(l, "--features") == feats(system, {**knobs, "horizon": "128"})
         assert _arg(l, "--output").startswith(f"../results-v8/full/long/{scene(system, knobs)}/seed")
-    assert len(long_cmds) == 12*3*6
+    assert len(long_cmds) == 12*3*8

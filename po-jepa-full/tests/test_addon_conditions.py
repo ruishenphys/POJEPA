@@ -108,14 +108,15 @@ def tensors_equal(a, b):
 def test_condition_lists_labels_and_entry_points():
     assert conditions.ADDON_CONDITIONS == ADDON and comparison.ADDON_CONDITIONS is conditions.ADDON_CONDITIONS
     assert comparison.ALL_CONDITIONS == (*comparison.V7_CONDITIONS, *ADDON) and "identity" not in comparison.ALL_CONDITIONS
-    assert comparison.V7_CONDITIONS == ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full", "vjepa2_ac", "vjepa2_ac_small")
+    assert comparison.V7_CONDITIONS == ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full", "vjepa2_ac", "vjepa2_ac_small",
+                                         "dino_wm_small", "jepa_wm_small")   # 2026-11-25：DINO-WM、JEPA-WM
     assert conditions.LOSS_LABELS == dict(po_jepa_time_only="time_only", po_jepa_space_only="space_only",
                                           transformer_consistency="full", fixed_fourier="full", koopman="no_consistency",
                                           po_jepa_rollout_sup="rollout_sup")
     assert evaluation.CONDITIONS == ("matched_transformer", "po_jepa_no_consistency", "po_jepa_full", "identity",
-                                     "vjepa2_ac", "vjepa2_ac_small", *ADDON)
+                                     "vjepa2_ac", "vjepa2_ac_small", "dino_wm_small", "jepa_wm_small", *ADDON)
     assert v7jobs.JOB_CONDITIONS == ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity",
-                                     "vjepa2_ac_small", "vjepa2_ac", *ADDON)
+                                     "vjepa2_ac_small", "vjepa2_ac", *ADDON, "dino_wm_small", "jepa_wm_small")
     for name in ADDON:
         evaluation.EvaluationQuery(180, 0, 2., 16, "point").key(name)
     with pytest.raises(ValueError, match="^not an add-on condition$"):

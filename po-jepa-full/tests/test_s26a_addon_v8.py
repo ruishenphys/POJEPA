@@ -345,8 +345,8 @@ def test_make_v8_jobs_conditions_option():
     assert space and all(("fixed_fourier" in l) != ("transformer_consistency" in l) for l in space)
     assert "koopman 还不能评空间采样" in _jobs("--stage", "space", "--conditions", "koopman", ok=False)
     assert "没有这些条件" in _jobs("--stage", "long", "--conditions", "fictional", ok=False)
-    for stage in ("full", "pilot"):
-        assert "--conditions 只用于" in _jobs("--stage", stage, "--conditions", "koopman", ok=False)
+    for stage in ("full", "pilot"):   # 2026-11-25 起 pilot、full 可以只排几个主表条件（导师要求按方法分开跑），补跑条件仍拒绝
+        assert "的 --conditions 只能是不重复的主表条件" in _jobs("--stage", stage, "--conditions", "koopman", ok=False)
     for stage in ("addon", "addon-pilot"):   # 08 §6 起 addon 阶段可以只排几个补跑条件，但只收补跑条件、不收重复
         for bad in ("matched_transformer", "koopman,koopman"):
             assert "的 --conditions 只能是不重复的补跑条件" in _jobs("--stage", stage, "--conditions", bad, ok=False)
@@ -354,8 +354,8 @@ def test_make_v8_jobs_conditions_option():
         # S27a 审核 P2-2：显式写 v7 的完整条件列表也要拒绝，不能当成“没写”而排 6 个补跑条件
         v7 = ",".join(_tool("make_v8_jobs").CONDITIONS)
         assert "的 --conditions 只能是不重复的补跑条件" in _jobs("--stage", stage, "--conditions", v7, ok=False)
-    for stage in ("full", "pilot"):     # 显式写默认列表也算写了
-        assert "--conditions 只用于" in _jobs("--stage", stage, "--conditions", ",".join(_tool("make_v8_jobs").CONDITIONS), ok=False)
+    for stage in ("full", "pilot"):     # 显式写完整的默认列表 = 不写
+        assert _jobs("--stage", stage, "--conditions", ",".join(_tool("make_v8_jobs").CONDITIONS)) == _jobs("--stage", stage)
     for stage in ("pilot", "full", "variants", "strength", "long", "timing", "space"):      # 默认任务表不排补跑条件
         assert not any(c in l for l in _jobs("--stage", stage) for c in conditions.ADDON_CONDITIONS)
 

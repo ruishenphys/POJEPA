@@ -560,7 +560,7 @@ def test_make_v8_jobs_long_stage():
     encode = [c for c in commands if "encode_v7.py encode" in c]
     final = [c for c in commands if "encode_v7.py finalize" in c]
     rollout = [c for c in commands if "long_rollout.py" in c]
-    assert len(encode) == 12*4 and len(final) == 12 and len(rollout) == 12*3*6 and commands[-1].startswith("python tools/summarize_v7.py")
+    assert len(encode) == 12*4 and len(final) == 12 and len(rollout) == 12*3*8 and commands[-1].startswith("python tools/summarize_v7.py")
     assert all("--splits test" in c and "horizon=128" in c and "--trajectories 2000" in c for c in encode+final)
     assert "--variant horizon=128,shape=multi_well" in next(c for c in encode if "landscape" in c)
     c = next(c for c in rollout if "landscape" in c and "seed1705/vjepa2_ac " in c)

@@ -219,10 +219,10 @@
         "validate_condition"
       ],
       "operation": "v4_modified",
-      "candidate_sha256": "7a36fe9d9a9e4d30a7d40706b1e0984d5b460ff52262e34c60b676740076d6d0",
+      "candidate_sha256": "34d52d52893d9ae2f6cb6f2bef9bc67aee6371ec2c6fd646f10b8abbc1336a37",
       "prior_candidate_sha256": "f47f5e51d4ecff7491484dee38e38c437c28ac2abbffdc8ed16b5b93e4c98964",
       "comment_cleanup_baseline_sha256": "4f8b6364970bd74c7afde1e3a234f8b0f8635451b513f7d380c7cecb644b4180",
-      "executable_ast_sha256": "b913c67154bd96f795b2ba3eb0f29b8b408f744fadc14de32c5e5a9da38222c0",
+      "executable_ast_sha256": "1fc78fa2759b7c563fdf46046e9c5f48f1e866d783fd2385e709e7b6d2158f71",
       "prior_operation": "relocated_runtime_with_explicit_resume_dispatch",
       "v4_previous_candidate_sha256": "b46e00954ef13f51612a3b04b96398e108548456c554aef9a4db9478969e9925",
       "v7_previous_candidate_sha256": "1e426f39ca9e174f2a5851ea2584291e7f39d3df958c447854737db64729678b"

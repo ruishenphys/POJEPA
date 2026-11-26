@@ -75,6 +75,7 @@ def consumer_sources():
     names = ["src/po_jepa/runtime/learning.py", "src/po_jepa/baselines.py", "src/po_jepa/runtime/comparison.py"]
     if check.is_v7():   # v7：AC 基线、独立任务入口也进预登记，同一 (数据集, 种子) 的各任务必须用同一份代码
         names += ["src/po_jepa/ac_baseline.py", "src/po_jepa/third_party/vjepa2_ac.py", "src/po_jepa/runtime/ac_training.py",
+                  "src/po_jepa/wm_baselines.py", "src/po_jepa/third_party/jepa_wms.py",   # 2026-11-25：DINO-WM、JEPA-WM
                   "src/po_jepa/runtime/v7jobs.py", "src/po_jepa/runtime/plots.py", "src/po_jepa/systems.py",
                   "src/po_jepa/datasets.py"]
         # 07 §2.7：补跑新条件的源码（runtime/addon/ 下全部 .py，后续段加的文件也自动进来）
@@ -168,7 +169,8 @@ def preregister():
         extra = dict(protocol="v7", dataset=datasets.active().tag, updates=check.v7_updates(),
                      early_stopping=early_stopping_config(), checkpoint_retention=checkpoint_retention_config(),
                      ac_parameters=counts, ac_baselines={c: ac_baseline.describe(c) for c in AC_CONDITIONS},
-                     ac_small_parameter_match=parameter_match(matching["po_parameters"], counts["vjepa2_ac_small"]))
+                     ac_small_parameter_match=parameter_match(matching["po_parameters"], counts["vjepa2_ac_small"]),
+                     wm_parameter_match={c: parameter_match(matching["po_parameters"], counts[c]) for c in ac_baseline.WM_CONDITIONS})
         if check.v7_variant() != check.V7_VARIANT_DEFAULT:   # S28b：非默认变体写进预登记（默认变体的预登记逐键不变）
             extra["variant"] = check.v7_variant()
     return dict(**extra, schema="F05_code_preregistration_v1", conditions=list(CONDITIONS), identity_trained=False,
@@ -603,9 +605,9 @@ def _selection(condition, model, optimizer, features, output, device, config, st
     return row, row if best is None or row["mean"] < best["mean"] else best
 
 def _observed_update_ac(condition, model, optimizer, features, rows, device, config, completed):
-    """v7：V-JEPA 2-AC 一步（官方 teacher forcing + 2 步自回归），记录读出尺度与本步学习率。"""
+    """v7：V-JEPA 2-AC 一步（官方 teacher forcing + 2 步自回归；DINO-WM、JEPA-WM 见 ac_training 文件头），记录读出尺度与本步学习率。"""
     from . import ac_training
-    clips, actions = ac_training.load_clips(features, rows, device)
+    clips, actions = ac_training.load_clips(features, rows, device, ac_training.clip_frames(condition))
     scales = []
     handle = model.core.predictor_proj.register_forward_hook(lambda owner,args,value:scales.append(check.tensor_stats(value.float())))
     try:

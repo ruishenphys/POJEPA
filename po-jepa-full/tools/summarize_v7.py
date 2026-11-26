@@ -32,7 +32,10 @@ V7_CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer"
 # 要求的是结果里任何一组出现过的补跑条件（不再要求 6 个全有：只排一部分补跑条件时其余的不算缺失）。
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
                     "po_jepa_rollout_sup")   # 08 §6：有真值两段滚动的对照（2026-11-12 加）
-CONDITIONS = (*V7_CONDITIONS, *ADDON_CONDITIONS)
+# 2026-11-25：DINO-WM、JEPA-WM 参数匹配基线（和 po_jepa.ac_baseline.WM_CONDITIONS 相同，测试核对）。v8 任务表默认排，
+# 但 v7、小规模验证的结果里没有：只在结果里出现过时才按组核缺失（同补跑条件没写 --addon-conditions 时的规则）。
+WM_CONDITIONS = ("dino_wm_small", "jepa_wm_small")
+CONDITIONS = (*V7_CONDITIONS, *WM_CONDITIONS, *ADDON_CONDITIONS)
 # S28b（C3，Jerry 2026-11-17）：identity 退出对比，不再当配对比较的对照；它照算，只在单独一节报（数值自检、归一化参照）
 REFERENCES = tuple(c for c in CONDITIONS[1:] if c != "identity")
 SELF_CHECK = ("identity",)
@@ -233,13 +236,14 @@ def missing_jobs(groups, expected_addon=None):
     """每组（数据集, 步数, 种子）缺的条件。expected_addon 给了：每组都要 v7 条件 + 这些补跑条件；
     没给：结果里出现过的补跑条件，只在本组出现过补跑条件时要求（补跑是可选的）。"""
     seen = {c for by_c in groups.values() for c in by_c if c in ADDON_CONDITIONS}
+    wm = [c for c in WM_CONDITIONS if any(c in by_c for by_c in groups.values())]   # 出现过就每组都要
     out = []
     for (d, u, s), by_c in sorted(groups.items()):
         if expected_addon is not None:
             addon = [c for c in ADDON_CONDITIONS if c in expected_addon]
         else:
             addon = [c for c in ADDON_CONDITIONS if c in seen] if set(by_c) & set(ADDON_CONDITIONS) else []
-        out += [dict(dataset=d, updates=u, seed=s, condition=c) for c in (*V7_CONDITIONS, *addon) if c not in by_c]
+        out += [dict(dataset=d, updates=u, seed=s, condition=c) for c in (*V7_CONDITIONS, *addon, *wm) if c not in by_c]
     return out
 
 

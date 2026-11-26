@@ -60,7 +60,7 @@ def refresh_source_map() -> list[str]:
                 changed.append(row["target"])
     source.setdefault("v7_changes", {})["files_changed_since_v6"] = sorted(set(
         changed+source.get("v7_changes", {}).get("files_changed_since_v6", [])))
-    path.write_text(json.dumps(source, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    path.write_text(json.dumps(source, ensure_ascii=False, indent=2)+"\n", encoding="utf-8", newline="\n")
     return changed
 
 
@@ -75,7 +75,7 @@ def refresh_manifest() -> int:
             continue
         files[rel.as_posix()] = sha(item)
     manifest["files_sha256"] = files
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n", encoding="utf-8", newline="\n")
     return len(files)
 
 

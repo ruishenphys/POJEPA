@@ -49,6 +49,10 @@ transformer_consistency、fixed_fourier、koopman；08-conditions.md），2026-1
 addon 阶段可以用 --conditions 只排其中几个（例如只排 po_jepa_rollout_sup：--conditions po_jepa_rollout_sup）；AC 补跑标定
 每个场景 1 条，三个要标定的条件（transformer_consistency、fixed_fourier、po_jepa_rollout_sup）总是一起标。
 训练好以后，variants、strength、long、timing、space、readout 各阶段用 --conditions 选这些条件即可评测（目录结构和 v7 条件相同）。
+2026-11-25：DINO-WM、JEPA-WM 的参数匹配版（dino_wm_small、jepa_wm_small，src/po_jepa/wm_baselines.py）进了默认条件 CONDITIONS，
+pilot、full 的 D 段和各评测阶段的默认条件都带上它们（Jerry 定“先都加，做不完再删”；要删时从 CONDITIONS 去掉即可）。
+每个条件都是独立的一条命令（python run.py run … --condition <条件>）；pilot、full 也可以用 --conditions 只排几个条件的训练，
+例如只跑这两个新基线：python tools/make_v8_jobs.py --stage full --conditions dino_wm_small,jepa_wm_small
 注意：v8 和“v7 场景上的仿真补跑”（make_addon_jobs.py，导入 v7 标定）不能在同一份工作树里跑——两者的基础标定文件同名
 （configs/calibration/<场景>-<条数>-u<步数>.yaml），补跑标定也同名。local 模式遇到导入的 v7 标定会直接报错。
 """
@@ -59,7 +63,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
 from po_jepa import protocols, variants  # noqa: E402
 
-CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac")
+CONDITIONS = ("po_jepa_full", "po_jepa_no_consistency", "matched_transformer", "identity", "vjepa2_ac_small", "vjepa2_ac",
+              "dino_wm_small", "jepa_wm_small")   # 2026-11-25（Jerry 定）：DINO-WM、JEPA-WM 参数匹配基线进正式训练
 # S26a：和 po_jepa.runtime.addon.conditions.ADDON_CONDITIONS 相同（测试核对）；这里不导入 torch
 ADDON_CONDITIONS = ("po_jepa_time_only", "po_jepa_space_only", "transformer_consistency", "fixed_fourier", "koopman",
                     "po_jepa_rollout_sup")   # 08 §6：有真值两段滚动的对照（2026-11-12 加）
@@ -85,8 +90,9 @@ def main():
                    help="逗号分隔的场景（系统[~调节项]），默认 12 个（二阶场景带 tubelet=pair）；二阶场景不带调节项是单帧复制对照")
     p.add_argument("--protocols", default="", help="只要这些协议，逗号分隔，例如 P1,P4（默认全部）")
     p.add_argument("--conditions", default=None,
-                   help="variants、strength、long、timing、space、readout 评哪些条件（默认 v7 的条件）；可以加补跑的 6 个（S26a、08 §6，"
-                        "要先跑 --stage addon）；addon、addon-pilot 阶段只能写补跑条件，不写时 6 个全排；pilot、full 不收这个参数")
+                   help="variants、strength、long、timing、space、readout 评哪些条件（默认 CONDITIONS）；可以加补跑的 6 个（S26a、08 §6，"
+                        "要先跑 --stage addon）；addon、addon-pilot 阶段只能写补跑条件，不写时 6 个全排；pilot、full 只排这些主表条件的 "
+                        "D 段训练（例如 --conditions dino_wm_small,jepa_wm_small），不写时全排")
     p.add_argument("--shards", type=int, default=4, help="每个场景的编码切成几片（每片一张卡）")
     p.add_argument("--features", default="../features-v8")
     p.add_argument("--results", default="../results-v8")
@@ -111,7 +117,11 @@ def main():
     if not set(conditions) <= {*CONDITIONS, *ADDON_CONDITIONS}:
         raise SystemExit(f"没有这些条件：{sorted(set(conditions)-{*CONDITIONS, *ADDON_CONDITIONS})}")
     if a.stage in ("pilot", "full") and a.conditions is not None:
-        raise SystemExit(f"--conditions 只用于 variants、strength、long、timing、space、readout、addon；{a.stage} 的条件是固定的")
+        # 2026-11-25（导师 Tomas 要求按方法分开跑）：pilot、full 也可以只排几个主表条件的 D 段训练；A–C 段（编码、标定、检查）照常列出，
+        # 是各条件共用的前提，run_jobs.py 会跳过已完成的
+        if not conditions or not set(conditions) <= set(CONDITIONS) or len(set(conditions)) != len(conditions):
+            raise SystemExit(f"{a.stage} 的 --conditions 只能是不重复的主表条件：{CONDITIONS}（补跑条件用 --stage addon）")
+        conditions = [c for c in CONDITIONS if c in conditions]
     if addon_stage:
         if not conditions or not set(conditions) <= set(ADDON_CONDITIONS) or len(set(conditions)) != len(conditions):
             raise SystemExit(f"{a.stage} 的 --conditions 只能是不重复的补跑条件：{ADDON_CONDITIONS}")
@@ -333,10 +343,10 @@ def main():
     probe = scenes[min(1, len(scenes)-1)]
     print("# ===== C2 检查（GPU，C 段完成后跑 1 条：依赖、设备、完整梯度、100 步成本；每种 GPU 型号做一次）=====")
     print(f"python run.py check {ds(probe)} --updates {updates} --features-root {feats(probe)} --device cuda:0 --output {root}/check")
-    print(f"# ===== D 训练+评测（GPU，C 段对应场景完成后；{len(scenes)*len(seeds)*len(CONDITIONS)} 条，互不依赖）=====")
+    print(f"# ===== D 训练+评测（GPU，C 段对应场景完成后；{len(scenes)*len(seeds)*len(conditions)} 条，互不依赖）=====")
     for s in scenes:
         for seed in seeds:
-            for c in CONDITIONS:
+            for c in conditions:
                 extra = f" --ac-checkpoint {a.ac_checkpoint}" if c == "vjepa2_ac" else ""
                 print(f"python run.py run {ds(s)} --updates {updates} --seed {seed} --condition {c} "
                       f"--features-root {feats(s)} --device cuda:0 --output {root}/{name(s)}/seed{seed}/{c}{extra}")

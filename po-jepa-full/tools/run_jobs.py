@@ -130,7 +130,8 @@ def priority(cmd):
     """长任务先跑，两张卡的总时间更短。"""
     if "--condition vjepa2_ac " in cmd + " ":
         return 0
-    if "--condition po_jepa" in cmd or "--condition matched_transformer" in cmd or "--condition vjepa2_ac_small" in cmd:
+    if ("--condition po_jepa" in cmd or "--condition matched_transformer" in cmd or "--condition vjepa2_ac_small" in cmd
+            or "--condition dino_wm_small" in cmd or "--condition jepa_wm_small" in cmd):   # 2026-11-25：参数匹配的 DINO-WM、JEPA-WM
         return 1
     if "--condition transformer_consistency" in cmd or "--condition fixed_fourier" in cmd:   # 07 §2.8；两个单项消融已含在 po_jepa 里
         return 1
