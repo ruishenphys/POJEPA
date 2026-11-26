@@ -32,6 +32,7 @@ Naming: "formal training" means the full-scale runs on the 12-scene simulation d
 | G12 | C-1 2×2 readout (§8f): physical readout and counterfactual action response of the 12 C-1 checkpoints (bisection/dyadic × Xavier/zero `P_out`), evaluation only, probes and truth fitted on the 200-trajectory datasets | **Ready** (`full-model` c379bc4 or later; #14 and #15 are merged) | ~1 GPU-hour *(est.)*, 48 commands (12 of them optional) | C-1 job folders under `results-small-validation/c1/` with their selected checkpoints; the v6 `double_well-200` features (`$V6`, as for C-1) |
 | G13 | Second-order scenes in the formal-training job file (§8g): `tools/make_v8_jobs.py` now lists all 12 scenes by default, the 5 second-order scenes encoded from two frames (`<scene>~tubelet=pair`) | **Nothing to run now**: it runs with the formal training of the simulation dataset (advisor's cluster) | part of the formal training; the 5 scenes add about 70% to every stage, see §8g | formal training; `full-model` with S25b4 merged |
 | G14 | C-1-scale isolation of the double_well "moves too little" shrinkage (§8h): `po_jepa_no_consistency`, temporal-only and spatial-only consistency, two more seeds of the key cells, and a λ_t scan (×0.5, ×0.25), all 200 trajectories × 2,000 updates on double_well and van_der_pol; then action response and motion gain | **Ready once its pull request is merged**; pull only after the C-3 batch-1 remainder in that clone has finished | ~10–15 GPU-hours *(est.)*: 29 short training runs + 66 evaluation lines, ~6–8 hours on two cards | the C-1 clone (its 9 `*-200-u2000~*.yaml` calibrations, the C-1 job folders) and the G12 probes and truth files under `results-small-validation/c1-readout/` |
+| G15 | C-3 extra training with the dyadic-xavier fix (§8i): `Kfull` and `K16c` × dyadic temporal partition × Xavier-initialised `P_out`, one `po_jepa_full` per variant and scene (6 runs), with calibration, readout, modal check, G9 shrinkage check and summary (`c3-xavier` job file, 36 commands); plus sending back the batch-1 checkpoints for the `K16c` divergence analysis | **Ready once its pull request is merged**; run it **after** the C-3 batch-1 remainder (§8e) and only then pull | ~20–24 GPU-hours *(est.)*, ~11 hours on two cards | readout probes and truth files under `results-small-validation/readout/` (G4) |
 
 Suggested order: G1 and G2 first (short). Then G3, G4 and the `c1` job file in parallel on the two cards. G6 comes after the C-1 summary has been sent back and Jerry has confirmed the variant.
 
@@ -340,6 +341,28 @@ python $TOOL pack results-small-validation/c3 logs-addon/jobs-sv-c3-* full-model
 
 (For batch 2 use `--output c3-batch2.pack.sqlite`; the same command picks up both batches.)
 
+### Batch 1 remainder (2026-11-25): run only the missing sections, in the same clone, without pulling
+
+Batch 1 stopped in section D on 2026-11-24 (19 of 72 done): `K16c` `po_jepa_full` diverged during training on `double_well` (step 3336) and `van_der_pol` (step 5927), and the evaluation of the two `van_der_pol` `po_jepa_no_consistency` runs failed in the closed-loop rollout (`eigh` did not converge). `run_jobs.py` stops at the first section with a failure, so D2, R3, R4, G9 and E never started.
+
+**Do not rerun the whole job file**: it would first retry the two diverged trainings, which are deterministic and would diverge again at the same step (about 3 GPU-hours wasted). Run only the evaluation sections, one command per section, so that a failure in one section does not block the next:
+
+```bash
+cd $WORK/full-model/po-jepa-full        # the same clone that ran batch 1 (0d35288); do NOT git pull before this is finished
+for s in R3 R4 G9 E; do
+    python tools/run_jobs.py jobs-sv-c3-b1.txt --gpus 0,1 --only "$s" \
+        || printf 'Section %s had failures; keep its logs and continue.\n' "$s"
+done
+```
+
+- Use the existing `jobs-sv-c3-b1.txt`; do not regenerate it. These lines read checkpoints trained by this clone and have no `--cross-version`, so they must run **before** the pull for §8i (after the pull they would be refused: the preregistration of these runs records the old delivery manifest).
+- Expected failures, which are fine: the lines that read `K16c` `po_jepa_full` on `double_well` and `van_der_pol` (no checkpoint), and possibly the `van_der_pol` `po_jepa_no_consistency` lines. Everything else should finish. `run_jobs.py` prints the failed log paths at the end of each section; keep them.
+- Each `for` step ends with either `全部完成。` or `第 … 段有任务失败，已停下`; both are fine here, the loop goes on to the next section.
+- D2 (6 equal-step evaluations, ~7 GPU-hours *(est.)*) is **skipped**: the `Kfull` full runs trained the full 10,000 updates without early stopping, so it adds little.
+- R3 (24 commands, ~3 min each), R4 (4), G9 (12, ~1.5 min each), E (3): about 2 GPU-hours *(est.)*.
+
+Send back with the batch-1 pack command above, but `--output c3-batch1b.pack.sqlite`.
+
 ## 8f. G12: C-1 2×2 readout (physical readout and action response, evaluation only)
 
 Evaluation only, no training, no new code: it runs the existing `tools/encode_v7.py` and `tools/state_readout.py` (the G4 tools) on the 12 C-1 checkpoints. Like G9 and G10, every readout line uses `--cross-version` (the C-1 jobs were trained on an older commit and later commits changed `MANIFEST.json`), so it runs on the current `full-model` and also after #14 (G10) and #15 (C-3) are merged (C-3 leaves the default model and its configuration snapshot unchanged).
@@ -514,6 +537,67 @@ cd $WORK
 python $TOOL pack results-small-validation/c1-isolation logs-addon/jobs-sv-c1-isolation \
     full-model/po-jepa-full/jobs-sv-c1-isolation.txt nvidia-smi.txt --output c1-isolation.pack.sqlite
 ```
+
+## 8i. G15: C-3 extra training with the dyadic-xavier fix (`c3-xavier` job file)
+
+This one **trains** (6 new runs). Background: in C-2 and C-3 the full model "moves too little" on `double_well` (G9: its motion gain is about half that of `po_jepa_no_consistency`). The C-1 2×2 readout (G12) showed this happens only when the dyadic temporal partition and the zero-initialised `P_out` are combined; dyadic + Xavier does not shrink. Jerry decided on 2026-11-25 to keep the dyadic partition (the advisor's choice) and go back to Xavier initialisation of `P_out` (as in v7.1). This section checks the fix at C-2 scale on two structures: `Kfull` (every grid uses all its tokens as modes; best in C-3 batch 1) and `K16c` (16 modes plus the kept complement; the same K on every grid, as the advisor asked). In batch 1 (dyadic-zero) `K16c` `po_jepa_full` diverged on `double_well` and `van_der_pol`; the `K16c` lines here show whether it still diverges with Xavier `P_out`.
+
+| Setting | Value |
+|---|---|
+| Variants | `Kfull`: `--temporal-partition dyadic --readout-init xavier --modes full --complement none`; `K16c`: `... --modes 16 --complement shared` (calibration files `configs/calibration/<scene>-2000-u10000~dyadic~Kfull.yaml` / `~dyadic~K16c.yaml`, separate from batch 1's `~dyadic~zeroinit~*.yaml`) |
+| Scenes | `advection_diffusion`, `double_well`, `van_der_pol`, 2,000 trajectories × 10,000 updates, seed 1703 |
+| Condition | `po_jepa_full` only. The references (`po_jepa_no_consistency` and the dyadic-zero full of each variant, `transformer_consistency`) are reused from C-3 batch 1 and C-2, not retrained. **Please keep those job folders.** |
+| Results | `results-small-validation/c3/dyadic-xavier-Kfull/`, `results-small-validation/c3/dyadic-xavier-K16c/` |
+
+Order: first finish the C-3 batch-1 remainder (§8e) in the current clone. Then pull and generate the job file:
+
+```bash
+cd $WORK/full-model/po-jepa-full
+git pull                                 # only after every job file of this clone is finished (§1)
+python tools/make_small_validation_jobs.py --stage c3-xavier > jobs-sv-c3-xavier.txt
+python tools/run_jobs.py jobs-sv-c3-xavier.txt --gpus 0,1
+```
+
+36 commands: 6 × `calibrate`, 2 × `check` (`van_der_pol`), 6 training runs, 12 readouts and counterfactuals (R3), 2 modal spectra (R4, `advection_diffusion`), 6 × `shrinkage_check.py` (G9), 2 summaries. About 20–24 GPU-hours *(est.)*, ~11 hours on two cards (C-3 batch 1 took about 3–3.5 GPU-hours per training run including its calibration; a run that diverges stops early). G14 (§8h, if present) can share this clone and run after or alongside it.
+
+If a training run diverges (loss to 1e3 or more, gradient norm to 1e16, as `K16c` did in batch 1), `run_jobs.py` finishes the other D lines and then **stops** (it does not enter R3 and later). Keep the failed folder and log, and do not rerun the whole file (it would retry the deterministic divergence). Once every D line has ended, run the remaining sections one at a time:
+
+```bash
+for s in R3 R4 G9 E; do
+    python tools/run_jobs.py jobs-sv-c3-xavier.txt --gpus 0,1 --only "$s" \
+        || printf 'Section %s had failures; keep its logs and continue.\n' "$s"
+done
+```
+
+The R3, R4 and G9 lines of the diverged run will fail; the others finish. A failure in C or C2 (calibration, check) is different: stop and send the logs first.
+
+Send back:
+
+```bash
+cd $WORK
+python $TOOL pack results-small-validation/c3/dyadic-xavier-Kfull results-small-validation/c3/dyadic-xavier-K16c \
+    logs-addon/jobs-sv-c3-xavier full-model/po-jepa-full/configs/calibration \
+    full-model/po-jepa-full/jobs-sv-c3-xavier.txt nvidia-smi.txt --output c3-xavier.pack.sqlite
+```
+
+### `K16c` divergence: send back the batch-1 checkpoints (no GPU, can be done any time)
+
+The step-by-step training logs of the two diverged runs are already back (in `c3-batch1-partial-2026-11-24.pack.sqlite`): on `double_well` the gradient first jumps at about step 3040–3140 and the loss explodes from about 3180; on `van_der_pol` from about step 5880. To see which part of the model runs away (the shared complement rotation `A(λ_⊥, g)`, the attention, the residual heads), Jerry needs the PO-JEPA checkpoints of those runs and of two references at the same steps. They are small (a few MB each) and `pack_results.py` skips `*.pt` by default, so this is a separate pack with `--no-default-excludes`:
+
+```bash
+cd $WORK
+R=results-small-validation/c3
+python $TOOL pack \
+    $R/dyadic-zero-K16c/double_well/seed1703/po_jepa_full/run/job/training/po_jepa_full/checkpoints \
+    $R/dyadic-zero-K16c/van_der_pol/seed1703/po_jepa_full/run/job/training/po_jepa_full/checkpoints \
+    $R/dyadic-zero-K16c/double_well/seed1703/po_jepa_no_consistency/run/job/training/po_jepa_no_consistency/checkpoints \
+    $R/dyadic-zero-K16c/van_der_pol/seed1703/po_jepa_no_consistency/run/job/training/po_jepa_no_consistency/checkpoints \
+    $R/dyadic-zero-Kfull/double_well/seed1703/po_jepa_full/run/job/training/po_jepa_full/checkpoints \
+    $R/dyadic-zero-Kfull/van_der_pol/seed1703/po_jepa_full/run/job/training/po_jepa_full/checkpoints \
+    --no-default-excludes --exclude '*.partial' --output c3-k16c-checkpoints.pack.sqlite
+```
+
+About 100 files, roughly 0.3 GB *(est.)*. If a path does not exist, drop it and say which one. Do not delete or move these checkpoints afterwards.
 
 ## 9. What to send back
 
