@@ -11,7 +11,7 @@
 | `calibrate/sigma-z` | §3.1（CPU） | 训练片的特征 | `calibration/sigma_z.json` |
 | `calibrate/lambda-<条件>` | §3.2，po_jepa_full、fixed_fourier、transformer_consistency 各一条（GPU） | sigma-z | `calibration/lambda-<条件>.json` |
 | `check/env` | §7（GPU） | sigma-z | `check/env.json` |
-| `train/<条件>/seed<种子>` | §4（GPU），10 个条件 × 种子（后两个 DINO-WM、JEPA-WM 见 §14） | sigma-z；需要 λ 的条件还依赖自己的 lambda；check/env | `train/<条件>/seed<种子>/` |
+| `train/<条件>/seed<种子>` | §4（GPU），12 个条件 × 种子（DINO-WM、JEPA-WM 见 §14，AC 无状态对照 vjepa2_ac_noprop、vjepa2_ac_small_noprop 见 §15） | sigma-z；需要 λ 的条件还依赖自己的 lambda；check/env | `train/<条件>/seed<种子>/` |
 
 命令统一是 `python tools/droid.py <阶段> --config configs/droid/<name>.yaml --data-root … --run-root … --job <任务名>`，任务图见 12。
 
@@ -40,6 +40,8 @@ PO-JEPA 类的配置块 = po-jepa-full 里 `configs/train/default.yaml` 深度�
 | transformer_consistency | 和 matched_transformer 完全相同 | λ 取 `lambda-transformer_consistency.json` | 同上 |
 | vjepa2_ac | `ACPredictor(ACSpec(action_dim=7, state_input=config.model.ac_state))`（官方规模），载入官方权重（§6.2） | v7 AC 的官方损失；学习率调度用 `config.loss_config(0, 0)`，峰值 1e-4 | `ac_training.make_optimizer` |
 | vjepa2_ac_small | `ACSpec(width=64, depth=1, heads=4, mlp_ratio=6.0, action_dim=7, state_input=config.model.ac_state)`，从头训练 | 同上，峰值 4.25e-4 | 同上 |
+| vjepa2_ac_noprop | 和 vjepa2_ac 相同，只把 `state_input` 固定成 `learned_constant`（§15） | 同 vjepa2_ac | 同 vjepa2_ac |
+| vjepa2_ac_small_noprop | 和 vjepa2_ac_small 相同，只把 `state_input` 固定成 `learned_constant`，mlp_ratio 6.0 → 248,896（§15） | 同 vjepa2_ac_small | 同 vjepa2_ac_small |
 | identity（不训练） | `IdentityPredictor(action_dim=7)` | — | — |
 | vjepa2_ac_zeroshot（不训练） | 和 vjepa2_ac 相同的构造和载入，不训练 | — | — |
 
@@ -330,3 +332,22 @@ DWM1 审核修复（Codex P2）：DROID 训练来源（`batches.training_provena
 共享模型源码（`ac_baseline.py`、`runtime/ac_training.py`、`wm_baselines.py`、`third_party/jepa_wms.py`、`third_party/vjepa2_ac.py`、
 `baselines.py`、`fourier.py`、`koopman.py`、`generic_consistency.py`、`spectral_backends.py`、`runtime/comparison.py`、
 `runtime/addon/conditions.py`）不在里面，只改前向时续训认不出来；现在全部登记（`batches.SHARED_MODEL_SOURCES`），仿真的来源清单不动。
+
+## 15. AC 无状态对照（2026-11-26）
+
+Jerry 决策卡定（2026-11-26）：DROID 上 PO-JEPA 和其余基线只看特征和动作，主表的 vjepa2_ac、vjepa2_ac_small 照官方吃末端位姿
+（`ac_state: true_state`），输入不对等；PO-JEPA 不加本体状态，另补一组不吃状态的 AC 作附表，只跑这两个 AC × 3 个种子（多 6 条训练）。
+
+| 项 | 做法 |
+|---|---|
+| 条件 | `vjepa2_ac_noprop`、`vjepa2_ac_small_noprop`，排在 `CONDITIONS` 最后，每个种子各一条训练、一条评测；和其余条件同在主配置（full、pilot）里 |
+| 模型 | 分别和 vjepa2_ac（官方规模，载入官方权重，`state_encoder` 不载入）、vjepa2_ac_small（从头训练，§2.3 同一组候选 → mlp_ratio 6.0，248,896，和 PO-JEPA 差 159，0.064%）相同，只把 `ACSpec.state_input` 固定成 `learned_constant`（v7 做法：一个可学习常向量占状态 token 的位置），与 `model.ac_state` 无关（`conditions.state_input`） |
+| 训练、验证、评测 | 训练步不传状态；验证、评测、规划不绑定起点状态（`binds_state` 为假）；原始帧率的小步前向忽略状态。损失、优化器、峰值学习率、官方规模的 autocast 都按同构造的 AC（`model.ac_condition` = vjepa2_ac / vjepa2_ac_small）；评测和 AC 同一族（`evaluate.AC_CONDITIONS`） |
+| 检查点 | `ac_training.save_checkpoint` 同一格式，记自己的条件名（共享的 `comparison.save_checkpoint` 只认仿真的 AC 名，`droid/checkpoints.save` 对这两个直接调 AC 那一支）；规格快照没有 `state_input: true_state`，和吃状态的 AC 的检查点互相读不进。官方规模的同 vjepa2_ac 进 `RETAIN_TWO` |
+| 共用 | 同一配置名、同一 `config_sha256`：数据根的下载、准备、统计、编码、测试附加，运行根的 σ_z、check/env 都和其余条件共用，不另起配置、不重编码；不需要 λ |
+| 等价性 | 测试核：主配置（true_state）下训练无状态对照 20 步，和把整个配置换成 `ac_state: learned_constant` 后训练同构造的 AC 逐位相同（模型、优化器、日志、验证值），所以等于 01 §3 说的“改开关另起一份配置”，只是省掉了重编码和另一套标定 |
+
+任务图：`tools/droid_jobs.py --conditions vjepa2_ac_noprop,vjepa2_ac_small_noprop` 只排这两个条件的 6 条训练、6 条评测，连同
+它们依赖的数据、σ_z 和 check/env（与完整任务图逐键相同，已完成的直接跳过）；不排 λ、spectral-gap、summary。完整任务图里
+它们也在，pilot 48 个任务、full 153 个。`check/env` 也检查这两个条件。加条件改了 `base.yaml`，两份配置的 config_sha256 变了。
+训练 priority：vjepa2_ac_noprop 1、vjepa2_ac_small_noprop 2（和各自的 AC 同档）。

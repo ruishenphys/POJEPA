@@ -28,13 +28,13 @@
 | σ_z | `calibrate/sigma-z` | 1 / 1 | `prepare/stats`、全部 `encode/<片>` | `<name>/calibration/sigma_z.json` |
 | 环境检查 | `check/env` | 1 / 1 | `calibrate/sigma-z` | `<name>/check/env.json` |
 | λ | `calibrate/lambda-<条件>` | 3 / 3 | `calibrate/sigma-z` | `<name>/calibration/lambda-<条件>.json` |
-| 训练 | `train/<条件>/seed<种子>` | 8 / 24 | `check/env`；三个带一致性的条件另依赖自己的 λ | `<name>/train/<条件>/seed<种子>/COMPLETE.json` |
-| 评测 | `eval/<条件>/seed<种子>` | 8 / 24 | 对应的训练任务、`encode/test-extra` | `<name>/eval/<条件>/seed<种子>/COMPLETE.json` |
+| 训练 | `train/<条件>/seed<种子>` | 12 / 36 | `check/env`；三个带一致性的条件另依赖自己的 λ | `<name>/train/<条件>/seed<种子>/COMPLETE.json` |
+| 评测 | `eval/<条件>/seed<种子>` | 12 / 36 | 对应的训练任务、`encode/test-extra` | `<name>/eval/<条件>/seed<种子>/COMPLETE.json` |
 | 不训练的对照 | `eval/identity`、`eval/vjepa2_ac_zeroshot` | 2 / 2 | `check/env`、`encode/test-extra` | 同上 |
 | 截断间隙 | `eval/spectral-gap` | 1 / 1 | `calibrate/sigma-z` | `<name>/eval/spectral-gap/COMPLETE.json` |
 | 汇总 | `summary` | 1 / 1 | 全部评测任务 | `<name>/summary/COMPLETE.json` |
 
-正式运行共 129 个任务，试跑 40 个。片是 `train-000` 到 `train-019`（试跑只有 `train-000`）和 `val`、`id_test`、`ood_test`（02 §6）。编码训练片时带 `--delete-raw`（03 §4），测试片和验证片不带。
+正式运行共 153 个任务，试跑 48 个（2026-11-26 加了 DINO-WM、JEPA-WM（09 §14）和 AC 无状态对照（09 §15）四个条件；此前是 129、40）。片是 `train-000` 到 `train-019`（试跑只有 `train-000`）和 `val`、`id_test`、`ood_test`（02 §6）。编码训练片时带 `--delete-raw`（03 §4），测试片和验证片不带。
 
 下载、准备、编码按片串起来：一片下完就能准备，准备完就能编码，不用等全部下完。训练任务之间互不依赖，可以同时跑。
 
@@ -85,6 +85,8 @@ S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推�
   连同它们依赖的数据、标定和 check/env；不排 `eval/spectral-gap` 和 `summary`，JSON 多一个键 `"conditions"`。
   任务和完整任务图里的同一任务逐键相同，完成标志相同，所以分开跑完的任务在完整任务图里直接算完成。
   DINO-WM、JEPA-WM（09 §14）的 priority 和 AC 缩小版同为 2。
+- AC 无状态对照（09 §15）：`--conditions vjepa2_ac_noprop,vjepa2_ac_small_noprop`，6 条训练、6 条评测，数据和特征与主配置共用；
+  priority 和各自的 AC 同档（1、2）。
 
 ## 5. 后端
 
@@ -119,7 +121,7 @@ S14 补注：训练片号在 `use_failures: true` 时按 ⌈N/shard_size⌉ 推�
 
 正式运行之前先跑 `jobs-pilot.json`（N = 500、U = 2000、1 个种子）。通过标准：
 
-- 40 个任务全部完成，没有失败。
+- 48 个任务全部完成，没有失败。
 - 至少有一个训练任务真的被时长上限打断并续跑过：`pilot.yaml` 里把 `resources.train.time_limit_minutes` 设成 20，训练任务都会续跑几次；续跑后的日志覆盖 1…U 不重不漏。
 - `check/env.json` 给出每个条件的单步用时和求谱后端的比较；据此在 `full.yaml` 里定 `training.updates`、`model.spectral_backend` 和各阶段的 `time_limit_minutes`（这些只能在看任何评测结果之前定）。
 - 试跑的汇总表能完整生成。

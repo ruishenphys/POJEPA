@@ -64,8 +64,8 @@ PARAMETER_TABLE.update(dino_wm_small=248_694, jepa_wm_small=248_508)
 
 
 def expected_parameters(condition: str, config: DroidConfig) -> int | None:
-    if condition == "vjepa2_ac_small":
-        return AC_SMALL_TABLE[config.model.ac_state]
+    if condition in cd.SMALL_AC:        # 无状态对照（09 §15）固定 learned_constant
+        return AC_SMALL_TABLE[cd.state_input(condition, config)]
     return PARAMETER_TABLE.get(condition)
 
 

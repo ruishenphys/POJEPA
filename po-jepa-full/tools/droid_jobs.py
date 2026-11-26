@@ -13,7 +13,7 @@
 - `--conditions a,b`（2026-11-26，导师要求按方法分开跑）：只排这些条件的训练和评测（可含不训练的 identity、
   vjepa2_ac_zeroshot），连同它们依赖的数据、标定和 check/env 任务；不排 spectral-gap 和 summary（汇总读全部条件，
   在不带 --conditions 的完整任务图里跑）。完成标志的路径和完整任务图相同，先按方法跑完再跑完整任务图时已完成的直接跳过。
-  不给时输出和以前逐字节相同。例：`--conditions dino_wm_small,jepa_wm_small`。
+  例：`--conditions dino_wm_small,jepa_wm_small`；AC 无状态对照（09 §15）：`--conditions vjepa2_ac_noprop,vjepa2_ac_small_noprop`。
 - `--format list` 输出 v7 那种按 “# =====” 分段的纯文本，每段是一个拓扑层（12 §5.3）。
 
 `tools/droid.py`（统一入口）和 `tools/droid_run.py`（本机运行器）用本模块的 `build_graph`、`find_job`。
@@ -48,7 +48,8 @@ SPECTRAL_GAP = "spectral-gap"
 TRAIN_PRIORITY = {"vjepa2_ac": 1,
                   "po_jepa_full": 2, "po_jepa_no_consistency": 2, "fixed_fourier": 2, "vjepa2_ac_small": 2,
                   "matched_transformer": 3, "transformer_consistency": 3, "koopman": 3,
-                  "dino_wm_small": 2, "jepa_wm_small": 2}   # 09 §14：参数匹配、逐帧自回归，和 AC 缩小版同档
+                  "dino_wm_small": 2, "jepa_wm_small": 2,   # 09 §14：参数匹配、逐帧自回归，和 AC 缩小版同档
+                  "vjepa2_ac_noprop": 1, "vjepa2_ac_small_noprop": 2}   # 09 §15：AC 无状态对照，和各自的 AC 同档
 STAGES = ("index", "download", "prepare", "encode", "calibrate", "check", "train", "eval", "summary")
 # 完成标志在时仍要调用阶段、由阶段先核本次请求的身份再决定复用的阶段（S11-P1-1 修复）：训练（COMPLETE.json 绑定
 # report.json）、评测（job.json/source.json 的请求身份，10 §8.9）、汇总（每次按当前产物重算，内容不变就不换输出）、
