@@ -326,3 +326,7 @@ Jerry 2026-11-25 定两个都加（“先都加，做不完再删”），仿真
 `--conditions` 时输出和以前逐字节相同（加了两个条件后 pilot 44 个任务、full 141 个）。`check/env` 也检查这两个条件。
 加条件改了 `base.yaml`，所以两份配置的 config_sha256 变了（此前没有在跑的 DROID 任务）。
 
+DWM1 审核修复（Codex P2）：DROID 训练来源（`batches.training_provenance`）原来只登记 v7 的 7 个文件和 `droid/` 下的文件，各条件用到的
+共享模型源码（`ac_baseline.py`、`runtime/ac_training.py`、`wm_baselines.py`、`third_party/jepa_wms.py`、`third_party/vjepa2_ac.py`、
+`baselines.py`、`fourier.py`、`koopman.py`、`generic_consistency.py`、`spectral_backends.py`、`runtime/comparison.py`、
+`runtime/addon/conditions.py`）不在里面，只改前向时续训认不出来；现在全部登记（`batches.SHARED_MODEL_SOURCES`），仿真的来源清单不动。

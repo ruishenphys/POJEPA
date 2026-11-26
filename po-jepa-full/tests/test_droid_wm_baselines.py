@@ -227,3 +227,19 @@ def test_jobs_cli_conditions(tmp_path):
     trains = [j["id"] for j in graph["jobs"] if j["stage"] == "train"]
     assert trains == ["train/jepa_wm_small/seed1703"] and graph["conditions"] == ["jepa_wm_small"]
     assert next(j for j in graph["jobs"] if j["id"] == trains[0])["priority"] == 2
+
+
+# ---------------------------------------------------------------- DWM1-P2：共享模型源码进训练来源
+
+def test_shared_model_sources_are_in_the_training_provenance(root):
+    """只改共享核心（例如 wm_baselines.py 的前向，参数、规格、初始化都不变）时训练来源必须变：这些文件都登记、摘要是文件的
+    实际 SHA；把其中一项换成别的摘要，`training._provenance` 的实际 SHA 核对就拒绝（续训同样经这个核对）。"""
+    from po_jepa.runtime import cache, training
+    _, manifests, _, _ = root
+    p = bt.training_provenance(small(), manifests, "f"*64)
+    for name in ("src/po_jepa/wm_baselines.py", "src/po_jepa/third_party/jepa_wms.py", "src/po_jepa/ac_baseline.py",
+                 "src/po_jepa/runtime/ac_training.py", "src/po_jepa/third_party/vjepa2_ac.py"):
+        assert p["source_files_sha256"][name] == cache.file_sha(cache.ROOT/name)
+        changed = dict(p, source_files_sha256=dict(p["source_files_sha256"], **{name: "0"*64}))
+        with pytest.raises(ValueError, match="source SHA mismatch"):
+            training._provenance(changed)
